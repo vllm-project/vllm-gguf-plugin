@@ -12,6 +12,14 @@ handler with a fully out-of-tree GGUF implementation.
 uv pip install -e . --torch-backend=auto
 ```
 
+## Development
+
+```bash
+uv tool install pre-commit
+pre-commit install
+pre-commit run --all-files
+```
+
 ## How it works
 
 - vLLM loads `vllm.general_plugins` during engine setup.
