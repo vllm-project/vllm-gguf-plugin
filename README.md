@@ -21,16 +21,16 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 1. Clone this repository:
 
-```bash
-git clone https://github.com/vllm-project/vllm-gguf-plugin
-cd vllm-gguf-plugin
-```
+   ```bash
+   git clone https://github.com/vllm-project/vllm-gguf-plugin
+   cd vllm-gguf-plugin
+   ```
 
 2. Install the plugin in development mode:
 
-```bash
-uv pip install -e . --torch-backend=auto
-```
+   ```bash
+   uv pip install -e . --torch-backend=auto
+   ```
 
 Or install directly:
 
