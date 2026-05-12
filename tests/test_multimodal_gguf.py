@@ -18,7 +18,6 @@ import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from pytest import MarkDecorator
 from transformers import AutoModelForImageTextToText, AutoProcessor
-
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import rescale_image_size
@@ -49,9 +48,9 @@ class GGUFMMTestConfig(NamedTuple):
             mmproj_path = repo_path / self.gguf_mmproj
             backbone_path = repo_path / self.gguf_backbone
             assert mmproj_path.is_file(), f"Missing GGUF mmproj file: {mmproj_path}"
-            assert (
-                backbone_path.is_file()
-            ), f"Missing GGUF backbone file: {backbone_path}"
+            assert backbone_path.is_file(), (
+                f"Missing GGUF backbone file: {backbone_path}"
+            )
             return str(backbone_path)
         hf_hub_download(self.gguf_repo, filename=self.gguf_mmproj)
         return hf_hub_download(self.gguf_repo, filename=self.gguf_backbone)
@@ -180,9 +179,7 @@ def _hf_generate_greedy_logprobs(
 
     results = []
     for prompt, image in zip(prompts, images):
-        inputs = processor(
-            text=prompt, images=[image], return_tensors="pt"
-        ).to(device)
+        inputs = processor(text=prompt, images=[image], return_tensors="pt").to(device)
         with torch.no_grad():
             output = hf_model.generate(
                 **inputs,
@@ -227,9 +224,7 @@ def check_logprobs_close(
 
     assert len(outputs_0_lst) == len(outputs_1_lst)
 
-    for prompt_idx, (out_0, out_1) in enumerate(
-        zip(outputs_0_lst, outputs_1_lst)
-    ):
+    for prompt_idx, (out_0, out_1) in enumerate(zip(outputs_0_lst, outputs_1_lst)):
         ids_0, text_0, lps_0 = out_0
         ids_1, text_1, lps_1 = out_1
 

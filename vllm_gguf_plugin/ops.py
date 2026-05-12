@@ -55,7 +55,9 @@ if hasattr(torch.ops, "_C_gguf") and hasattr(torch.ops._C_gguf, "ggml_dequantize
         top_k: torch.SymInt,
         tokens: torch.SymInt,
     ) -> torch.Tensor:
-        return torch.empty((X.size(0) * top_k, row), dtype=torch.float16, device=W.device)
+        return torch.empty(
+            (X.size(0) * top_k, row), dtype=torch.float16, device=W.device
+        )
 
 
 if hasattr(torch.ops, "_C_gguf") and hasattr(torch.ops._C_gguf, "ggml_moe_a8_vec"):

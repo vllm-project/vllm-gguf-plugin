@@ -4,7 +4,6 @@
 import gguf
 import torch
 from gguf import GGMLQuantizationType as WeightType
-
 from vllm.model_executor.layers.linear import (
     LinearMethodBase,
     register_weight_loader_v2_supported_method,
@@ -13,13 +12,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .. import ops
-from .utils import (
-    DEQUANT_TYPES,
-    IMATRIX_QUANT_TYPES,
-    MMQ_QUANT_TYPES,
-    MMVQ_QUANT_TYPES,
-    UNQUANTIZED_TYPES,
-)
 from .params import (
     GGUFUninitializedWeightParameter,
     GGUFUninitializedWeightTypeParameter,
@@ -29,6 +21,13 @@ from .params import (
     _materialize_gguf_weight_type_parameter,
     _resolve_gguf_weight_loader,
     _resolve_gguf_weight_type_loader,
+)
+from .utils import (
+    DEQUANT_TYPES,
+    IMATRIX_QUANT_TYPES,
+    MMQ_QUANT_TYPES,
+    MMVQ_QUANT_TYPES,
+    UNQUANTIZED_TYPES,
 )
 
 
@@ -200,7 +199,9 @@ class GGUFLinearMethod(LinearMethodBase):
             qweight.shard_id.clear()
             qweight.shard_id_map.clear()
             if qweight.data.numel() > 0:
-                qweight.data = torch.empty(0, dtype=qweight.dtype, device=qweight.device)
+                qweight.data = torch.empty(
+                    0, dtype=qweight.dtype, device=qweight.device
+                )
             layer.register_parameter("qweight", padded_param)
 
     def apply(
@@ -228,7 +229,9 @@ class GGUFLinearMethod(LinearMethodBase):
             result = []
             for idx in shard_id:
                 start, end, offset = layer.qweight.shard_offset_map[idx]
-                qweight_type = layer.qweight_type.shard_weight_type.get(idx, fallback_wtype)
+                qweight_type = layer.qweight_type.shard_weight_type.get(
+                    idx, fallback_wtype
+                )
                 result.append(
                     fused_mul_mat_gguf_op(
                         x, qweight[start:end, :offset].contiguous(), qweight_type

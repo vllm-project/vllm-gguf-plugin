@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 import re
 from collections.abc import Iterable
@@ -15,13 +14,13 @@ import torch
 from transformers import AutoModelForCausalLM
 from vllm.logger import init_logger
 
-from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
 from ..gguf_utils import maybe_patch_hf_config_from_gguf
 from ..weight_utils import (
     get_gguf_extra_tensor_names,
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator_multi,
 )
+from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -40,10 +39,10 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         del config
         return True
 
-    def patch_hf_config(self, model_path: str, hf_config: "PretrainedConfig"):
+    def patch_hf_config(self, model_path: str, hf_config: PretrainedConfig):
         return maybe_patch_hf_config_from_gguf(model_path, hf_config)
 
-    def build_name_map(self, model_config: "ModelConfig") -> dict[str, str]:
+    def build_name_map(self, model_config: ModelConfig) -> dict[str, str]:
         config = model_config.hf_config
         text_config = config.get_text_config()
         model_type = config.model_type
@@ -220,7 +219,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
         if unmapped_params:
             unmapped_params = [
-                x for x in unmapped_params if not any(regex.fullmatch(p, x) for p in sideload_params)
+                x
+                for x in unmapped_params
+                if not any(regex.fullmatch(p, x) for p in sideload_params)
             ]
         if unmapped_params:
             raise RuntimeError(
@@ -257,7 +258,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
     def update_tie_word_embeddings(
         self,
         model_path: str,
-        hf_config: "PretrainedConfig",
+        hf_config: PretrainedConfig,
         gguf_to_hf_name_map: dict[str, str],
     ) -> None:
         if "lm_head.weight" not in gguf_to_hf_name_map.values():
@@ -293,9 +294,11 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
     def prepare_loading(
         self,
         model_path: str,
-        model_config: "ModelConfig",
+        model_config: ModelConfig,
     ) -> GGUFLoadSpec:
-        model_config.hf_config = self.patch_hf_config(model_path, model_config.hf_config)
+        model_config.hf_config = self.patch_hf_config(
+            model_path, model_config.hf_config
+        )
         gguf_to_hf_name_map = self.build_name_map(model_config)
         self.update_tie_word_embeddings(
             model_path, model_config.hf_config, gguf_to_hf_name_map
@@ -310,7 +313,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
     def prepare_weights(
         self,
-        model_config: "ModelConfig",
+        model_config: ModelConfig,
     ) -> Iterable[tuple[str, torch.Tensor]]:
         del model_config
         weights = gguf_quant_weights_iterator_multi(

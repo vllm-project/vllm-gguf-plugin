@@ -24,18 +24,18 @@ class GGUFLoadSpec:
 class BaseGGUFWeightsAdapter(ABC):
     """Base hooks for GGUF weight loading adapters."""
 
-    def __init__(self, config: "PretrainedConfig") -> None:
+    def __init__(self, config: PretrainedConfig) -> None:
         self.config = config
 
     @classmethod
     @abstractmethod
-    def matches(cls, config: "PretrainedConfig") -> bool:
+    def matches(cls, config: PretrainedConfig) -> bool:
         """Return whether this adapter supports *config*."""
 
     @abstractmethod
     def prepare_weights(self, model_config: ModelConfig) -> None:
         """Return HF-style weights."""
-    
+
     @abstractmethod
     def prepare_loading(self, model_config: ModelConfig) -> None:
         """Preparation before loading, e.g., patching the HF config."""
@@ -43,8 +43,8 @@ class BaseGGUFWeightsAdapter(ABC):
     def patch_hf_config(
         self,
         model_path: str,
-        hf_config: "PretrainedConfig",
-    ) -> "PretrainedConfig":
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
         """Patch HF config before model init."""
         del model_path
         return hf_config

@@ -11,6 +11,9 @@ license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = ["gguf>=0.17.0", "vllm"]
 
+[project.optional-dependencies]
+dev = ["pre-commit"]
+
 [project.entry-points."vllm.general_plugins"]
 gguf = "vllm_gguf_plugin:register"
 
@@ -65,6 +68,9 @@ extend-exclude = [
     "vllm_gguf_plugin/csrc/gguf/mmvq.cuh",
 ]
 ignore-hidden = false
+
+[tool.typos.default.extend-identifiers]
+iy = "iy"
 
 [tool.pytest.ini_options]
 markers = [

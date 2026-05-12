@@ -4,8 +4,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 
 from vllm_gguf_plugin.loader import GGUFModelLoader

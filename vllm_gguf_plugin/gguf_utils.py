@@ -11,7 +11,6 @@ import regex as re
 from gguf.constants import Keys, VisionProjectorType
 from gguf.quants import GGMLQuantizationType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
-
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
@@ -291,10 +290,7 @@ def extract_lm_head_from_gguf(model_path: str | Path) -> bool:
         return None
 
     reader = gguf.GGUFReader(str(model_path))
-    for tensor in reader.tensors:
-        if tensor.name == "output.weight":
-            return True
-    return False
+    return any(tensor.name == "output.weight" for tensor in reader.tensors)
 
 
 def maybe_patch_hf_config_from_gguf(
@@ -328,8 +324,8 @@ def maybe_patch_hf_config_from_gguf(
 
     has_lm_head = extract_lm_head_from_gguf(model)
     if has_lm_head is not None:
-       text_config = hf_config.get_text_config()
-       text_config.update({"tie_word_embeddings": not has_lm_head})
+        text_config = hf_config.get_text_config()
+        text_config.update({"tie_word_embeddings": not has_lm_head})
 
     # Patch multimodal config if mmproj.gguf exists
     mmproj_path = detect_gguf_multimodal(model)

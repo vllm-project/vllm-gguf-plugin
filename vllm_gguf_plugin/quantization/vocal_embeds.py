@@ -6,7 +6,6 @@ from functools import partial
 import gguf
 import torch
 from gguf import GGMLQuantizationType as WeightType
-
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op

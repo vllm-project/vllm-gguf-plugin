@@ -12,7 +12,6 @@ from typing import NamedTuple
 import pytest
 import torch
 from transformers import AutoTokenizer
-
 from vllm import LLM, SamplingParams
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
