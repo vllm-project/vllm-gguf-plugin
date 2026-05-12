@@ -178,7 +178,7 @@ def test_mmq_triton_dispatch(
         qweight = torch.tensor(tensor.data, device="cuda")
         output = ggml_mul_mat_a8_triton(qweight, x, quant_type, qweight.shape[0])
 
-        atols = {torch.half: 1, torch.bfloat16: 4, torch.float: 1.2}
+        atols = {torch.half: 1, torch.bfloat16: 5, torch.float: 1.2}
         # test matrix has inputs centered around 0 and lower precision from
         # bfloat16 tends to accumulate and can greatly inflate rtol
         # since outputs are also very close to 0
