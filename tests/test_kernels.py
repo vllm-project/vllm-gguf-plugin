@@ -2,10 +2,16 @@ import pytest
 import torch
 from gguf import GGMLQuantizationType, dequantize
 
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation,
+)
 from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
 import vllm_gguf_plugin.ops as ops
 from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
+from vllm_gguf_plugin.triton.fused_moe import ggml_moe_a8_triton
 from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton
 
 from .utils import seed_everything, get_gguf_sample_tensors, get_gguf_moe_tensors
@@ -39,6 +45,23 @@ QUANT_TYPES = [
     GGMLQuantizationType.Q5_0,
     GGMLQuantizationType.Q8_0,
 ]
+TRITON_MOE_QUANT_TYPES = [
+    GGMLQuantizationType.Q2_K,
+    GGMLQuantizationType.Q3_K,
+    GGMLQuantizationType.Q4_K,
+    GGMLQuantizationType.Q5_K,
+    GGMLQuantizationType.Q6_K,
+    GGMLQuantizationType.Q4_0,
+    GGMLQuantizationType.Q5_0,
+    GGMLQuantizationType.Q8_0,
+]
+
+
+def _silu_and_mul(inp: torch.Tensor) -> torch.Tensor:
+    d = inp.shape[-1] // 2
+    out = torch.empty(inp.shape[:-1] + (d,), dtype=inp.dtype, device=inp.device)
+    apply_moe_activation(MoEActivation.SILU, out, inp)
+    return out
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_type", QUANT_TYPES)
@@ -288,6 +311,74 @@ def test_moe(
         quant_type,
         "silu",
     )
+
+    ref_output = fused_experts(
+        x, w13_dequant, w2_dequant, topk_weights, topk_ids
+    ).reshape(output.shape)
+    torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
+
+
+@pytest.mark.parametrize("num_tokens", [83, 128])
+@pytest.mark.parametrize("hidden_size", [512])
+@pytest.mark.parametrize("top_k", [4, 8])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_type", TRITON_MOE_QUANT_TYPES)
+@torch.inference_mode()
+def test_moe_triton(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    quant_type: GGMLQuantizationType,
+    top_k: int,
+):
+    seed_everything(0)
+    H, E = 1024, 256
+
+    x = torch.rand((num_tokens, H), dtype=dtype, device="cuda")
+    topk_weights = torch.rand(num_tokens, top_k, device="cuda", dtype=dtype)
+    topk_ids = torch.randint(
+        0, E, (num_tokens, top_k), device="cuda", dtype=torch.int32
+    )
+
+    w13, w2 = get_gguf_moe_tensors(hidden_size, quant_type)
+    w13_q = torch.tensor(w13.data, device="cuda")
+    w2_q = torch.tensor(w2.data, device="cuda")
+    w13_dequant = torch.tensor(dequantize(w13.data, quant_type), device="cuda").to(dtype)
+    w2_dequant = torch.tensor(dequantize(w2.data, quant_type), device="cuda").to(dtype)
+
+    block_size = ops.ggml_moe_get_block_size(quant_type)
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        topk_ids, block_size, E
+    )
+
+    out = ggml_moe_a8_triton(
+        x,
+        w13_q,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        quant_type,
+        w13_q.shape[1],
+        top_k,
+        num_tokens,
+    )
+    out = _silu_and_mul(out)
+    out = ggml_moe_a8_triton(
+        out,
+        w2_q,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        quant_type,
+        w2_q.shape[1],
+        1,
+        num_tokens * top_k,
+    )
+    out = out.reshape(num_tokens, top_k, w2_q.shape[1]).mul_(
+        topk_weights.view(num_tokens, top_k, 1)
+    )
+    output = torch.empty_like(x)
+    ops.moe_sum(out, output)
 
     ref_output = fused_experts(
         x, w13_dequant, w2_dequant, topk_weights, topk_ids

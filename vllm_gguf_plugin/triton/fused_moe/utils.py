@@ -9,10 +9,15 @@ import triton.language as tl
 from ..gemm.utils import (
     BLOCK_BYTES_BY_TYPE,
     BLOCK_QK_BY_TYPE,
+    GGML_TYPE_Q2_K,
+    GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_0,
     GGML_TYPE_Q4_1,
+    GGML_TYPE_Q4_K,
     GGML_TYPE_Q5_0,
     GGML_TYPE_Q5_1,
+    GGML_TYPE_Q5_K,
+    GGML_TYPE_Q6_K,
     GGML_TYPE_Q8_0,
     GGML_TYPE_Q8_1,
     TRITON_NUM_STAGES,
@@ -28,6 +33,11 @@ TRITON_FUSED_MOE_STANDARD_TYPES = frozenset(
         GGML_TYPE_Q5_1,
         GGML_TYPE_Q8_0,
         GGML_TYPE_Q8_1,
+        GGML_TYPE_Q2_K,
+        GGML_TYPE_Q3_K,
+        GGML_TYPE_Q4_K,
+        GGML_TYPE_Q5_K,
+        GGML_TYPE_Q6_K,
     }
 )
 
@@ -40,7 +50,7 @@ TRITON_FUSED_MOE_BLOCK_K_BLOCKS = 4
 def load_moe_token_info(sorted_token_ids_ptr, pid_m, top_k, num_valid_tokens, BLOCK_M: tl.constexpr):
     offs_block = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_output = tl.load(sorted_token_ids_ptr + offs_block).to(tl.int64)
-    token_mask = offs_output < num_valid_tokens
+    token_mask = (offs_output >= 0) & (offs_output < num_valid_tokens)
     offs_token = tl.where(token_mask, offs_output // top_k, 0)
     return offs_output, offs_token, token_mask
 
