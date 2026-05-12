@@ -3,7 +3,26 @@ import torch
 from gguf import GGMLQuantizationType, dequantize
 
 import vllm_gguf_plugin.ops as ops
+pytest.importorskip("triton")
+
 from .utils import seed_everything, get_gguf_sample_tensors
+from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton
+from vllm_gguf_plugin.triton.gemm.iq1_m import ggml_gemm_iq1_m_triton
+from vllm_gguf_plugin.triton.gemm.iq1_s import ggml_gemm_iq1_s_triton
+from vllm_gguf_plugin.triton.gemm.iq2_s import ggml_gemm_iq2_s_triton
+from vllm_gguf_plugin.triton.gemm.iq2_xs import ggml_gemm_iq2_xs_triton
+from vllm_gguf_plugin.triton.gemm.iq3_s import ggml_gemm_iq3_s_triton
+from vllm_gguf_plugin.triton.gemm.iq3_xxs import ggml_gemm_iq3_xxs_triton
+from vllm_gguf_plugin.triton.gemm.iq4_nl import ggml_gemm_iq4_nl_triton
+from vllm_gguf_plugin.triton.gemm.iq4_xs import ggml_gemm_iq4_xs_triton
+from vllm_gguf_plugin.triton.gemm.q2_k import ggml_gemm_q2_k_triton
+from vllm_gguf_plugin.triton.gemm.q3_k import ggml_gemm_q3_k_triton
+from vllm_gguf_plugin.triton.gemm.q4_0 import ggml_gemm_q4_0_triton
+from vllm_gguf_plugin.triton.gemm.q4_k import ggml_gemm_q4_k_triton
+from vllm_gguf_plugin.triton.gemm.q5_0 import ggml_gemm_q5_0_triton
+from vllm_gguf_plugin.triton.gemm.q5_k import ggml_gemm_q5_k_triton
+from vllm_gguf_plugin.triton.gemm.q6_k import ggml_gemm_q6_k_triton
+from vllm_gguf_plugin.triton.gemm.q8_0 import ggml_gemm_q8_0_triton
 
 
 DTYPES = [torch.half, torch.bfloat16, torch.float32]
@@ -101,6 +120,64 @@ def test_mmvq(hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantization
 )
 @torch.inference_mode()
 def test_mmq(
+    name: str,
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    quant_type: GGMLQuantizationType,
+):
+    seed_everything(0)
+
+    tensors = get_gguf_sample_tensors(hidden_size, quant_type)
+    x = torch.rand((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    for tensor in tensors:
+        weight = torch.tensor(dequantize(tensor.data, quant_type), device="cuda").to(
+            dtype
+        )
+        ref_output = x @ weight.T
+
+        qweight = torch.tensor(tensor.data, device="cuda")
+        output = ops.ggml_mul_mat_a8(qweight, x, quant_type, qweight.shape[0]).to(dtype)
+
+        atols = {torch.half: 1, torch.bfloat16: 1.5, torch.float: 1.2}
+        # test matrix has inputs centered around 0 and lower precision from
+        # bfloat16 tends to accumulate and can greatly inflate rtol
+        # since outputs are also very close to 0
+        rtols = {torch.half: 1e-1, torch.bfloat16: 1e4, torch.float: 2e1}
+        torch.testing.assert_close(
+            output, ref_output, atol=atols[dtype], rtol=rtols[dtype]
+        )
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(
+    "quant_type, name",
+    [
+        # i-matrix quants
+        # (GGMLQuantizationType.IQ1_M, "IQ1_M"),
+        # (GGMLQuantizationType.IQ1_S, "IQ1_S"),
+        # (GGMLQuantizationType.IQ2_S, "IQ2_S"),
+        # (GGMLQuantizationType.IQ2_XS, "IQ2_XS"),
+        # (GGMLQuantizationType.IQ3_S, "IQ3_S"),
+        # (GGMLQuantizationType.IQ3_XXS, "IQ3_XXS"),
+        # (GGMLQuantizationType.IQ4_NL, "IQ4_NL"),
+        # (GGMLQuantizationType.IQ4_XS, "IQ4_XS"),
+        # k-quants
+        (GGMLQuantizationType.Q2_K, "Q2_K"),
+        (GGMLQuantizationType.Q3_K, "Q3_K"),
+        (GGMLQuantizationType.Q4_K, "Q4_K"),
+        (GGMLQuantizationType.Q5_K, "Q5_K"),
+        (GGMLQuantizationType.Q6_K, "Q6_K"),
+        # standard quants
+        (GGMLQuantizationType.Q4_0, "Q4_0"),
+        (GGMLQuantizationType.Q5_0, "Q5_0"),
+        (GGMLQuantizationType.Q8_0, "Q8_0"),
+    ],
+)
+@torch.inference_mode()
+def test_mmq_triton_dispatch(
     name: str,
     num_tokens: int,
     hidden_size: int,
