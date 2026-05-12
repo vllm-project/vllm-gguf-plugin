@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77.0.3,<81.0.0", "wheel", "torch"]
+requires = ["setuptools>=77.0.3,<81.0.0", "wheel", "torch>=2.9"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,7 +9,7 @@ description = "Out-of-tree GGUF quantization plugin for vLLM"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
-dependencies = ["gguf>=0.17.0", "vllm"]
+dependencies = ["gguf>=0.17.0", "vllm", "torch>=2.9"]
 
 [project.optional-dependencies]
 dev = ["pre-commit"]

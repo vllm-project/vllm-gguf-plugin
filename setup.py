@@ -15,11 +15,19 @@ setup(
                 "vllm_gguf_plugin/csrc",
                 "vllm_gguf_plugin/csrc/gguf",
             ],
+            py_limited_api=True,
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
-                "nvcc": ["-O3", "-std=c++17", "--use_fast_math"],
+                "nvcc": [
+                    "-O3",
+                    "-std=c++17",
+                    "--use_fast_math",
+                    # Exposes aoti_torch_get_current_cuda_stream in the AOTI shim.
+                    "-DUSE_CUDA",
+                ],
             },
         )
     ],
     cmdclass={"build_ext": BuildExtension},
+    options={"bdist_wheel": {"py_limited_api": "cp310"}},
 )
