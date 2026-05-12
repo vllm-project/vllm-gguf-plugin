@@ -1,0 +1,160 @@
+import torch
+import triton
+import triton.language as tl
+
+
+GGML_TYPE_Q4_0 = 2
+GGML_TYPE_Q4_1 = 3
+GGML_TYPE_Q5_0 = 6
+GGML_TYPE_Q5_1 = 7
+GGML_TYPE_Q8_0 = 8
+GGML_TYPE_Q8_1 = 9
+
+QK = 32
+Q4_0_BLOCK_BYTES = 18
+Q4_1_BLOCK_BYTES = 20
+Q5_0_BLOCK_BYTES = 22
+Q5_1_BLOCK_BYTES = 24
+Q8_0_BLOCK_BYTES = 34
+Q8_1_BLOCK_BYTES = 36
+
+BLOCK_BYTES_BY_TYPE = {
+    GGML_TYPE_Q4_0: Q4_0_BLOCK_BYTES,
+    GGML_TYPE_Q4_1: Q4_1_BLOCK_BYTES,
+    GGML_TYPE_Q5_0: Q5_0_BLOCK_BYTES,
+    GGML_TYPE_Q5_1: Q5_1_BLOCK_BYTES,
+    GGML_TYPE_Q8_0: Q8_0_BLOCK_BYTES,
+    GGML_TYPE_Q8_1: Q8_1_BLOCK_BYTES,
+}
+
+TRITON_SUPPORTED_TYPES = frozenset(BLOCK_BYTES_BY_TYPE)
+
+TRITON_BLOCK_M = 32
+TRITON_BLOCK_N = 128
+TRITON_BLOCK_K_BLOCKS = 4
+TRITON_NUM_WARPS = 2
+TRITON_NUM_STAGES = 2
+
+
+@triton.jit
+def load_f16_from_u8(ptrs, mask):
+    lo = tl.load(ptrs + 0, mask=mask, other=0)
+    hi = tl.load(ptrs + 1, mask=mask, other=0)
+    bits = lo.to(tl.uint16) | (hi.to(tl.uint16) << 8)
+    return tl.cast(bits, tl.float16, bitcast=True)
+
+
+@triton.jit
+def load_u32_from_u8(ptrs, mask):
+    b0 = tl.load(ptrs + 0, mask=mask, other=0).to(tl.uint32)
+    b1 = tl.load(ptrs + 1, mask=mask, other=0).to(tl.uint32)
+    b2 = tl.load(ptrs + 2, mask=mask, other=0).to(tl.uint32)
+    b3 = tl.load(ptrs + 3, mask=mask, other=0).to(tl.uint32)
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+
+@triton.jit
+def load_x_tile(
+    x_ptr,
+    m,
+    num_k_blocks,
+    stride_xm,
+    stride_xk,
+    offs_m,
+    kb_start,
+    offs_kb,
+    offs_nibble,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K_BLOCKS: tl.constexpr,
+):
+    cur_kb = kb_start + offs_kb
+    kb_mask = cur_kb < num_k_blocks
+    x_row_ptrs = x_ptr + offs_m[:, None, None] * stride_xm
+    x_k_low = cur_kb[None, :, None] * 32 + offs_nibble[None, None, :]
+    x_k_high = x_k_low + 16
+    x_even = tl.load(
+        x_row_ptrs + x_k_low * stride_xk,
+        mask=(offs_m[:, None, None] < m) & kb_mask[None, :, None],
+        other=0.0,
+    )
+    x_odd = tl.load(
+        x_row_ptrs + x_k_high * stride_xk,
+        mask=(offs_m[:, None, None] < m) & kb_mask[None, :, None],
+        other=0.0,
+    )
+    return tl.reshape(tl.join(x_even, x_odd), (BLOCK_M, BLOCK_K_BLOCKS * 32)), cur_kb, kb_mask
+
+
+def _validate_args(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    row: int,
+    quant_type: int,
+) -> tuple[torch.Tensor, torch.Tensor, tuple[int, ...], int]:
+    if quant_type not in TRITON_SUPPORTED_TYPES:
+        raise ValueError(f"Unsupported Triton quant type: {quant_type}")
+    if not W.is_cuda or not X.is_cuda:
+        raise ValueError("Triton kernels require CUDA tensors")
+    if W.dtype is not torch.uint8:
+        raise TypeError(f"Quantized weights must be torch.uint8, got {W.dtype}")
+    if X.dtype is not torch.float16:
+        raise TypeError(f"Triton kernels currently support torch.float16 activations, got {X.dtype}")
+    if X.dim() not in (2, 3):
+        raise ValueError(f"X must be 2D or 3D, got {X.dim()}D")
+    if row != W.shape[0]:
+        raise ValueError(f"row must match W.shape[0], got row={row}, W.shape[0]={W.shape[0]}")
+
+    block_bytes = BLOCK_BYTES_BY_TYPE[quant_type]
+    if W.shape[1] % block_bytes != 0:
+        raise ValueError(
+            f"Invalid row width {W.shape[1]} for quant type {quant_type}: "
+            f"must be divisible by {block_bytes}"
+        )
+
+    num_k_blocks = W.shape[1] // block_bytes
+    hidden_size = num_k_blocks * QK
+    if X.shape[-1] != hidden_size:
+        raise ValueError(
+            f"X hidden size {X.shape[-1]} does not match quantized weight width {hidden_size}"
+        )
+
+    return W.contiguous(), X.reshape(-1, hidden_size).contiguous(), X.shape, num_k_blocks
+
+
+def run_triton_kernel(
+    kernel,
+    W: torch.Tensor,
+    X: torch.Tensor,
+    row: int,
+    quant_type: int,
+) -> torch.Tensor:
+    W, X_2d, X_shape, num_k_blocks = _validate_args(W, X, row, quant_type)
+    Y_2d = torch.empty((X_2d.shape[0], row), device=X.device, dtype=X.dtype)
+
+    grid = (
+        triton.cdiv(X_2d.shape[0], TRITON_BLOCK_M),
+        triton.cdiv(row, TRITON_BLOCK_N),
+    )
+
+    kernel[grid](
+        X_2d,
+        W,
+        Y_2d,
+        X_2d.shape[0],
+        row,
+        num_k_blocks,
+        X_2d.stride(0),
+        X_2d.stride(1),
+        W.stride(0),
+        Y_2d.stride(0),
+        Y_2d.stride(1),
+        BLOCK_M=TRITON_BLOCK_M,
+        BLOCK_N=TRITON_BLOCK_N,
+        BLOCK_K_BLOCKS=TRITON_BLOCK_K_BLOCKS,
+        num_warps=TRITON_NUM_WARPS,
+        num_stages=TRITON_NUM_STAGES,
+    )
+
+    if len(X_shape) == 2:
+        return Y_2d
+    return Y_2d.view(*X_shape[:-1], row)

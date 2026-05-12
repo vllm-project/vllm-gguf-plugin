@@ -1,0 +1,30 @@
+import torch
+
+from .q4_0 import ggml_gemm_q4_0_triton
+from .q4_1 import ggml_gemm_q4_1_triton
+from .q5_0 import ggml_gemm_q5_0_triton
+from .q5_1 import ggml_gemm_q5_1_triton
+from .q8_0 import ggml_gemm_q8_0_triton
+from .q8_1 import ggml_gemm_q8_1_triton
+from .utils import (
+    GGML_TYPE_Q4_0,
+    GGML_TYPE_Q4_1,
+    GGML_TYPE_Q5_0,
+    GGML_TYPE_Q5_1,
+    GGML_TYPE_Q8_0,
+    GGML_TYPE_Q8_1,
+)
+
+
+def ggml_mul_mat_a8_triton(W: torch.Tensor, X: torch.Tensor, quant_type: int, row: int) -> torch.Tensor:
+    kernel = {
+        GGML_TYPE_Q4_0: ggml_gemm_q4_0_triton,
+        GGML_TYPE_Q4_1: ggml_gemm_q4_1_triton,
+        GGML_TYPE_Q5_0: ggml_gemm_q5_0_triton,
+        GGML_TYPE_Q5_1: ggml_gemm_q5_1_triton,
+        GGML_TYPE_Q8_0: ggml_gemm_q8_0_triton,
+        GGML_TYPE_Q8_1: ggml_gemm_q8_1_triton,
+    }.get(int(quant_type))
+    if kernel is None:
+        raise ValueError(f"Unsupported Triton quant type: {quant_type}")
+    return kernel(W, X, row)
