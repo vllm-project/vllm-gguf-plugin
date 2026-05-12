@@ -2,17 +2,12 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import (
-    GGML_TYPE_Q5_1,
-    load_f16_from_u8,
-    load_u32_from_u8,
-    load_x_tile,
-    run_triton_kernel,
-)
+from .iq_tables import get_iq_table_tensors
+from ..utils import GGML_TYPE_IQ4_NL, load_f16_from_u8, load_x_tile, run_triton_kernel
 
 
 @triton.jit
-def q5_1_gemm_kernel(
+def iq4_nl_gemm_kernel(
     x_ptr,
     w_u8_ptr,
     y_ptr,
@@ -24,6 +19,7 @@ def q5_1_gemm_kernel(
     stride_wn,
     stride_ym,
     stride_yn,
+    values_ptr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K_BLOCKS: tl.constexpr,
@@ -35,8 +31,6 @@ def q5_1_gemm_kernel(
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_kb = tl.arange(0, BLOCK_K_BLOCKS)
     offs_nibble = tl.arange(0, 16)
-    bit_low = tl.arange(0, 16)
-    bit_high = tl.arange(16, 32)
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     w_row_ptrs = w_u8_ptr + offs_n[:, None] * stride_wn
@@ -57,20 +51,16 @@ def q5_1_gemm_kernel(
         )
         x_dtype = x_tile.dtype
 
-        block_ptrs = w_row_ptrs + cur_kb[None, :] * 24
+        block_ptrs = w_row_ptrs + cur_kb[None, :] * 18
         scale_mask = (offs_n[:, None] < n) & kb_mask[None, :]
         d = load_f16_from_u8(block_ptrs + 0, scale_mask).to(x_dtype)
-        m0 = load_f16_from_u8(block_ptrs + 2, scale_mask).to(x_dtype)
-        qh = load_u32_from_u8(block_ptrs + 4, scale_mask)
         packed = tl.load(
-            block_ptrs[:, :, None] + 8 + offs_nibble[None, None, :],
+            block_ptrs[:, :, None] + 2 + offs_nibble[None, None, :],
             mask=(offs_n[:, None, None] < n) & kb_mask[None, :, None],
             other=0,
         )
-        qh_low = ((qh[:, :, None] >> bit_low[None, None, :]) & 0x01).to(tl.uint8)
-        qh_high = ((qh[:, :, None] >> bit_high[None, None, :]) & 0x01).to(tl.uint8)
-        low = ((packed & 0x0F) | (qh_low << 4)).to(x_dtype) * d[:, :, None] + m0[:, :, None]
-        high = (((packed >> 4) & 0x0F) | (qh_high << 4)).to(x_dtype) * d[:, :, None] + m0[:, :, None]
+        low = tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
+        high = tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
         q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
@@ -79,5 +69,13 @@ def q5_1_gemm_kernel(
     tl.store(y_ptrs, acc, mask=y_mask)
 
 
-def ggml_gemm_q5_1_triton(W: torch.Tensor, X: torch.Tensor, row: int) -> torch.Tensor:
-    return run_triton_kernel(q5_1_gemm_kernel, W, X, row, GGML_TYPE_Q5_1)
+def ggml_gemm_iq4_nl_triton(W: torch.Tensor, X: torch.Tensor, row: int) -> torch.Tensor:
+    tables = get_iq_table_tensors(W.device)
+    return run_triton_kernel(
+        iq4_nl_gemm_kernel,
+        W,
+        X,
+        row,
+        GGML_TYPE_IQ4_NL,
+        extra_args=(tables["kvalues_iq4nl"],),
+    )

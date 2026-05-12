@@ -2,11 +2,11 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import GGML_TYPE_Q8_0, load_f16_from_u8, load_x_tile, run_triton_kernel
+from ..utils import GGML_TYPE_Q4_1, load_f16_from_u8, load_x_tile, run_triton_kernel
 
 
 @triton.jit
-def q8_0_gemm_kernel(
+def q4_1_gemm_kernel(
     x_ptr,
     w_u8_ptr,
     y_ptr,
@@ -49,26 +49,18 @@ def q8_0_gemm_kernel(
         )
         x_dtype = x_tile.dtype
 
-        block_ptrs = w_row_ptrs + cur_kb[None, :] * 34
+        block_ptrs = w_row_ptrs + cur_kb[None, :] * 20
         scale_mask = (offs_n[:, None] < n) & kb_mask[None, :]
         d = load_f16_from_u8(block_ptrs + 0, scale_mask).to(x_dtype)
-        q_low = tl.load(
-            block_ptrs[:, :, None] + 2 + offs_nibble[None, None, :],
+        m0 = load_f16_from_u8(block_ptrs + 2, scale_mask).to(x_dtype)
+        packed = tl.load(
+            block_ptrs[:, :, None] + 4 + offs_nibble[None, None, :],
             mask=(offs_n[:, None, None] < n) & kb_mask[None, :, None],
             other=0,
         )
-        q_high = tl.load(
-            block_ptrs[:, :, None] + 18 + offs_nibble[None, None, :],
-            mask=(offs_n[:, None, None] < n) & kb_mask[None, :, None],
-            other=0,
-        )
-        q_tile = tl.reshape(
-                tl.join(
-                tl.cast(q_low, tl.int8, bitcast=True).to(x_dtype) * d[:, :, None],
-                tl.cast(q_high, tl.int8, bitcast=True).to(x_dtype) * d[:, :, None],
-            ),
-            (BLOCK_N, BLOCK_K_BLOCKS * 32),
-        )
+        low = (packed & 0x0F).to(x_dtype) * d[:, :, None] + m0[:, :, None]
+        high = ((packed >> 4) & 0x0F).to(x_dtype) * d[:, :, None] + m0[:, :, None]
+        q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
     y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
@@ -76,5 +68,5 @@ def q8_0_gemm_kernel(
     tl.store(y_ptrs, acc, mask=y_mask)
 
 
-def ggml_gemm_q8_0_triton(W: torch.Tensor, X: torch.Tensor, row: int) -> torch.Tensor:
-    return run_triton_kernel(q8_0_gemm_kernel, W, X, row, GGML_TYPE_Q8_0)
+def ggml_gemm_q4_1_triton(W: torch.Tensor, X: torch.Tensor, row: int) -> torch.Tensor:
+    return run_triton_kernel(q4_1_gemm_kernel, W, X, row, GGML_TYPE_Q4_1)

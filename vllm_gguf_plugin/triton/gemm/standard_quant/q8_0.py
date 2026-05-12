@@ -2,12 +2,11 @@ import torch
 import triton
 import triton.language as tl
 
-from .iq_tables import get_iq_table_tensors
-from .utils import GGML_TYPE_IQ4_NL, load_f16_from_u8, load_x_tile, run_triton_kernel
+from ..utils import GGML_TYPE_Q8_0, load_f16_from_u8, load_x_tile, run_triton_kernel
 
 
 @triton.jit
-def iq4_nl_gemm_kernel(
+def q8_0_gemm_kernel(
     x_ptr,
     w_u8_ptr,
     y_ptr,
@@ -19,7 +18,6 @@ def iq4_nl_gemm_kernel(
     stride_wn,
     stride_ym,
     stride_yn,
-    values_ptr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K_BLOCKS: tl.constexpr,
@@ -51,17 +49,26 @@ def iq4_nl_gemm_kernel(
         )
         x_dtype = x_tile.dtype
 
-        block_ptrs = w_row_ptrs + cur_kb[None, :] * 18
+        block_ptrs = w_row_ptrs + cur_kb[None, :] * 34
         scale_mask = (offs_n[:, None] < n) & kb_mask[None, :]
         d = load_f16_from_u8(block_ptrs + 0, scale_mask).to(x_dtype)
-        packed = tl.load(
+        q_low = tl.load(
             block_ptrs[:, :, None] + 2 + offs_nibble[None, None, :],
             mask=(offs_n[:, None, None] < n) & kb_mask[None, :, None],
             other=0,
         )
-        low = tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
-        high = tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
-        q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
+        q_high = tl.load(
+            block_ptrs[:, :, None] + 18 + offs_nibble[None, None, :],
+            mask=(offs_n[:, None, None] < n) & kb_mask[None, :, None],
+            other=0,
+        )
+        q_tile = tl.reshape(
+                tl.join(
+                tl.cast(q_low, tl.int8, bitcast=True).to(x_dtype) * d[:, :, None],
+                tl.cast(q_high, tl.int8, bitcast=True).to(x_dtype) * d[:, :, None],
+            ),
+            (BLOCK_N, BLOCK_K_BLOCKS * 32),
+        )
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
     y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
@@ -69,13 +76,5 @@ def iq4_nl_gemm_kernel(
     tl.store(y_ptrs, acc, mask=y_mask)
 
 
-def ggml_gemm_iq4_nl_triton(W: torch.Tensor, X: torch.Tensor, row: int) -> torch.Tensor:
-    tables = get_iq_table_tensors(W.device)
-    return run_triton_kernel(
-        iq4_nl_gemm_kernel,
-        W,
-        X,
-        row,
-        GGML_TYPE_IQ4_NL,
-        extra_args=(tables["kvalues_iq4nl"],),
-    )
+def ggml_gemm_q8_0_triton(W: torch.Tensor, X: torch.Tensor, row: int) -> torch.Tensor:
+    return run_triton_kernel(q8_0_gemm_kernel, W, X, row, GGML_TYPE_Q8_0)

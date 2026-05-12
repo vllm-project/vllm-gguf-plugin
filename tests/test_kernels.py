@@ -3,26 +3,9 @@ import torch
 from gguf import GGMLQuantizationType, dequantize
 
 import vllm_gguf_plugin.ops as ops
-pytest.importorskip("triton")
+from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton
 
 from .utils import seed_everything, get_gguf_sample_tensors
-from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton
-from vllm_gguf_plugin.triton.gemm.iq1_m import ggml_gemm_iq1_m_triton
-from vllm_gguf_plugin.triton.gemm.iq1_s import ggml_gemm_iq1_s_triton
-from vllm_gguf_plugin.triton.gemm.iq2_s import ggml_gemm_iq2_s_triton
-from vllm_gguf_plugin.triton.gemm.iq2_xs import ggml_gemm_iq2_xs_triton
-from vllm_gguf_plugin.triton.gemm.iq3_s import ggml_gemm_iq3_s_triton
-from vllm_gguf_plugin.triton.gemm.iq3_xxs import ggml_gemm_iq3_xxs_triton
-from vllm_gguf_plugin.triton.gemm.iq4_nl import ggml_gemm_iq4_nl_triton
-from vllm_gguf_plugin.triton.gemm.iq4_xs import ggml_gemm_iq4_xs_triton
-from vllm_gguf_plugin.triton.gemm.q2_k import ggml_gemm_q2_k_triton
-from vllm_gguf_plugin.triton.gemm.q3_k import ggml_gemm_q3_k_triton
-from vllm_gguf_plugin.triton.gemm.q4_0 import ggml_gemm_q4_0_triton
-from vllm_gguf_plugin.triton.gemm.q4_k import ggml_gemm_q4_k_triton
-from vllm_gguf_plugin.triton.gemm.q5_0 import ggml_gemm_q5_0_triton
-from vllm_gguf_plugin.triton.gemm.q5_k import ggml_gemm_q5_k_triton
-from vllm_gguf_plugin.triton.gemm.q6_k import ggml_gemm_q6_k_triton
-from vllm_gguf_plugin.triton.gemm.q8_0 import ggml_gemm_q8_0_triton
 
 
 DTYPES = [torch.half, torch.bfloat16, torch.float32]

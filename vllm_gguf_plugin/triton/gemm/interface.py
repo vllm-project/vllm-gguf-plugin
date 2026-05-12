@@ -1,24 +1,24 @@
 import torch
 
-from .iq1_m import ggml_gemm_iq1_m_triton
-from .iq1_s import ggml_gemm_iq1_s_triton
-from .iq2_s import ggml_gemm_iq2_s_triton
-from .iq2_xs import ggml_gemm_iq2_xs_triton
-from .iq3_s import ggml_gemm_iq3_s_triton
-from .iq3_xxs import ggml_gemm_iq3_xxs_triton
-from .iq4_nl import ggml_gemm_iq4_nl_triton
-from .iq4_xs import ggml_gemm_iq4_xs_triton
-from .q2_k import ggml_gemm_q2_k_triton
-from .q3_k import ggml_gemm_q3_k_triton
-from .q4_0 import ggml_gemm_q4_0_triton
-from .q4_1 import ggml_gemm_q4_1_triton
-from .q4_k import ggml_gemm_q4_k_triton
-from .q5_0 import ggml_gemm_q5_0_triton
-from .q5_1 import ggml_gemm_q5_1_triton
-from .q5_k import ggml_gemm_q5_k_triton
-from .q6_k import ggml_gemm_q6_k_triton
-from .q8_0 import ggml_gemm_q8_0_triton
-from .q8_1 import ggml_gemm_q8_1_triton
+from .iq_quant.iq1_m import ggml_gemm_iq1_m_triton
+from .iq_quant.iq1_s import ggml_gemm_iq1_s_triton
+from .iq_quant.iq2_s import ggml_gemm_iq2_s_triton
+from .iq_quant.iq2_xs import ggml_gemm_iq2_xs_triton
+from .iq_quant.iq3_s import ggml_gemm_iq3_s_triton
+from .iq_quant.iq3_xxs import ggml_gemm_iq3_xxs_triton
+from .iq_quant.iq4_nl import ggml_gemm_iq4_nl_triton
+from .iq_quant.iq4_xs import ggml_gemm_iq4_xs_triton
+from .k_quant.q2_k import ggml_gemm_q2_k_triton
+from .k_quant.q3_k import ggml_gemm_q3_k_triton
+from .k_quant.q4_k import ggml_gemm_q4_k_triton
+from .k_quant.q5_k import ggml_gemm_q5_k_triton
+from .k_quant.q6_k import ggml_gemm_q6_k_triton
+from .standard_quant.q4_0 import ggml_gemm_q4_0_triton
+from .standard_quant.q4_1 import ggml_gemm_q4_1_triton
+from .standard_quant.q5_0 import ggml_gemm_q5_0_triton
+from .standard_quant.q5_1 import ggml_gemm_q5_1_triton
+from .standard_quant.q8_0 import ggml_gemm_q8_0_triton
+from .standard_quant.q8_1 import ggml_gemm_q8_1_triton
 from .utils import (
     GGML_TYPE_IQ1_M,
     GGML_TYPE_IQ1_S,

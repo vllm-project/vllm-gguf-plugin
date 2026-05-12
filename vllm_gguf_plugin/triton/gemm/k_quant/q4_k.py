@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import (
+from ..utils import (
     GGML_TYPE_Q4_K,
     load_f16_from_u8,
     load_x_chunk,

@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 
 from .iq_tables import get_iq_table_tensors
-from .utils import GGML_TYPE_IQ2_S, load_f16_from_u8, load_x_chunk, run_triton_kernel
+from ..utils import GGML_TYPE_IQ2_S, load_f16_from_u8, load_x_chunk, run_triton_kernel
 
 
 @triton.jit

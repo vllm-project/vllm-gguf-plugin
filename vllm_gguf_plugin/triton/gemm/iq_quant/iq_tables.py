@@ -9,7 +9,7 @@ import torch
 from gguf.quants import IQ3_S
 
 
-_COMMON_H = Path(__file__).resolve().parents[2] / "csrc" / "gguf" / "ggml-common.h"
+_COMMON_H = Path(__file__).resolve().parents[3] / "csrc" / "gguf" / "ggml-common.h"
 
 
 @lru_cache(maxsize=1)
