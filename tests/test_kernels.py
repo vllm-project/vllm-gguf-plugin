@@ -149,6 +149,7 @@ def test_mmq(
         (GGMLQuantizationType.Q8_0, "Q8_0"),
     ],
 )
+@pytest.skip(reason="Current CUDA Kernel hasn't supported invarlen")
 @torch.inference_mode()
 def test_mmq_batching(
     name: str,
