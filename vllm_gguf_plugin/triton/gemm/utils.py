@@ -14,6 +14,14 @@ GGML_TYPE_Q3_K = 11
 GGML_TYPE_Q4_K = 12
 GGML_TYPE_Q5_K = 13
 GGML_TYPE_Q6_K = 14
+GGML_TYPE_IQ2_XS = 17
+GGML_TYPE_IQ3_XXS = 18
+GGML_TYPE_IQ1_S = 19
+GGML_TYPE_IQ4_NL = 20
+GGML_TYPE_IQ3_S = 21
+GGML_TYPE_IQ2_S = 22
+GGML_TYPE_IQ4_XS = 23
+GGML_TYPE_IQ1_M = 29
 
 QK = 32
 QK_K = 256
@@ -28,6 +36,14 @@ Q3_K_BLOCK_BYTES = 110
 Q4_K_BLOCK_BYTES = 144
 Q5_K_BLOCK_BYTES = 176
 Q6_K_BLOCK_BYTES = 210
+IQ2_XS_BLOCK_BYTES = 74
+IQ3_XXS_BLOCK_BYTES = 98
+IQ1_S_BLOCK_BYTES = 50
+IQ4_NL_BLOCK_BYTES = 18
+IQ3_S_BLOCK_BYTES = 110
+IQ2_S_BLOCK_BYTES = 82
+IQ4_XS_BLOCK_BYTES = 136
+IQ1_M_BLOCK_BYTES = 56
 
 BLOCK_BYTES_BY_TYPE = {
     GGML_TYPE_Q4_0: Q4_0_BLOCK_BYTES,
@@ -41,6 +57,14 @@ BLOCK_BYTES_BY_TYPE = {
     GGML_TYPE_Q4_K: Q4_K_BLOCK_BYTES,
     GGML_TYPE_Q5_K: Q5_K_BLOCK_BYTES,
     GGML_TYPE_Q6_K: Q6_K_BLOCK_BYTES,
+    GGML_TYPE_IQ2_XS: IQ2_XS_BLOCK_BYTES,
+    GGML_TYPE_IQ3_XXS: IQ3_XXS_BLOCK_BYTES,
+    GGML_TYPE_IQ1_S: IQ1_S_BLOCK_BYTES,
+    GGML_TYPE_IQ4_NL: IQ4_NL_BLOCK_BYTES,
+    GGML_TYPE_IQ3_S: IQ3_S_BLOCK_BYTES,
+    GGML_TYPE_IQ2_S: IQ2_S_BLOCK_BYTES,
+    GGML_TYPE_IQ4_XS: IQ4_XS_BLOCK_BYTES,
+    GGML_TYPE_IQ1_M: IQ1_M_BLOCK_BYTES,
 }
 
 BLOCK_QK_BY_TYPE = {
@@ -55,6 +79,14 @@ BLOCK_QK_BY_TYPE = {
     GGML_TYPE_Q4_K: QK_K,
     GGML_TYPE_Q5_K: QK_K,
     GGML_TYPE_Q6_K: QK_K,
+    GGML_TYPE_IQ2_XS: QK_K,
+    GGML_TYPE_IQ3_XXS: QK_K,
+    GGML_TYPE_IQ1_S: QK_K,
+    GGML_TYPE_IQ4_NL: QK,
+    GGML_TYPE_IQ3_S: QK_K,
+    GGML_TYPE_IQ2_S: QK_K,
+    GGML_TYPE_IQ4_XS: QK_K,
+    GGML_TYPE_IQ1_M: QK_K,
 }
 
 TRITON_SUPPORTED_TYPES = frozenset(BLOCK_BYTES_BY_TYPE)
@@ -81,6 +113,13 @@ def load_u32_from_u8(ptrs, mask):
     b2 = tl.load(ptrs + 2, mask=mask, other=0).to(tl.uint32)
     b3 = tl.load(ptrs + 3, mask=mask, other=0).to(tl.uint32)
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+
+@triton.jit
+def load_u16_from_u8(ptrs, mask):
+    lo = tl.load(ptrs + 0, mask=mask, other=0).to(tl.uint16)
+    hi = tl.load(ptrs + 1, mask=mask, other=0).to(tl.uint16)
+    return lo | (hi << 8)
 
 
 @triton.jit
@@ -210,6 +249,7 @@ def run_triton_kernel(
     X: torch.Tensor,
     row: int,
     quant_type: int,
+    extra_args: tuple = (),
 ) -> torch.Tensor:
     W, X_2d, X_shape, num_k_blocks = _validate_args(W, X, row, quant_type)
     Y_2d = torch.empty((X_2d.shape[0], row), device=X.device, dtype=X.dtype)
@@ -231,6 +271,7 @@ def run_triton_kernel(
         W.stride(0),
         Y_2d.stride(0),
         Y_2d.stride(1),
+        *extra_args,
         BLOCK_M=TRITON_BLOCK_M,
         BLOCK_N=TRITON_BLOCK_N,
         BLOCK_K_BLOCKS=TRITON_BLOCK_K_BLOCKS,
