@@ -156,14 +156,14 @@ def test_mmq(
     "quant_type, name",
     [
         # i-matrix quants
-        # (GGMLQuantizationType.IQ1_M, "IQ1_M"),
-        # (GGMLQuantizationType.IQ1_S, "IQ1_S"),
-        # (GGMLQuantizationType.IQ2_S, "IQ2_S"),
-        # (GGMLQuantizationType.IQ2_XS, "IQ2_XS"),
-        # (GGMLQuantizationType.IQ3_S, "IQ3_S"),
-        # (GGMLQuantizationType.IQ3_XXS, "IQ3_XXS"),
-        # (GGMLQuantizationType.IQ4_NL, "IQ4_NL"),
-        # (GGMLQuantizationType.IQ4_XS, "IQ4_XS"),
+        (GGMLQuantizationType.IQ1_M, "IQ1_M"),
+        (GGMLQuantizationType.IQ1_S, "IQ1_S"),
+        (GGMLQuantizationType.IQ2_S, "IQ2_S"),
+        (GGMLQuantizationType.IQ2_XS, "IQ2_XS"),
+        (GGMLQuantizationType.IQ3_S, "IQ3_S"),
+        (GGMLQuantizationType.IQ3_XXS, "IQ3_XXS"),
+        (GGMLQuantizationType.IQ4_NL, "IQ4_NL"),
+        (GGMLQuantizationType.IQ4_XS, "IQ4_XS"),
         # k-quants
         (GGMLQuantizationType.Q2_K, "Q2_K"),
         (GGMLQuantizationType.Q3_K, "Q3_K"),
@@ -189,13 +189,11 @@ def test_mmq_triton_dispatch(
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     x = torch.rand((num_tokens, hidden_size), dtype=dtype, device="cuda")
     for tensor in tensors:
-        weight = torch.tensor(dequantize(tensor.data, quant_type), device="cuda").to(
-            dtype
-        )
+        weight = torch.tensor(dequantize(tensor.data, quant_type), device="cuda").to(dtype)
         ref_output = x @ weight.T
 
         qweight = torch.tensor(tensor.data, device="cuda")
-        output = ops.ggml_mul_mat_a8(qweight, x, quant_type, qweight.shape[0]).to(dtype)
+        output = ggml_mul_mat_a8_triton(qweight, x, quant_type, qweight.shape[0])
 
         atols = {torch.half: 1, torch.bfloat16: 1.5, torch.float: 1.2}
         # test matrix has inputs centered around 0 and lower precision from
