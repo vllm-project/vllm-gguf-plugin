@@ -2,10 +2,13 @@ import pytest
 import torch
 from gguf import GGMLQuantizationType, dequantize
 
+from vllm.model_executor.layers.fused_moe import fused_experts
+
 import vllm_gguf_plugin.ops as ops
+from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
 from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton
 
-from .utils import seed_everything, get_gguf_sample_tensors
+from .utils import seed_everything, get_gguf_sample_tensors, get_gguf_moe_tensors
 
 
 DTYPES = [torch.half, torch.bfloat16, torch.float32]
@@ -36,8 +39,6 @@ QUANT_TYPES = [
     GGMLQuantizationType.Q5_0,
     GGMLQuantizationType.Q8_0,
 ]
-
-
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_type", QUANT_TYPES)
@@ -241,3 +242,54 @@ def test_mmq_batching(
     # FIXME: X will cause nan values in full test suite, need to investigate
     del x
     torch.cuda.empty_cache()
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", [512])
+@pytest.mark.parametrize("top_k", [4, 8])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_type", QUANT_TYPES)
+@torch.inference_mode()
+def test_moe(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    quant_type: GGMLQuantizationType,
+    top_k: int,
+):
+    seed_everything(0)
+    H, E = 1024, 256
+
+    x = torch.rand((num_tokens, H), dtype=dtype, device="cuda")
+
+    topk_weights = torch.rand(num_tokens, top_k, device="cuda", dtype=dtype)
+    topk_ids = torch.randint(
+        0, E, (num_tokens, top_k), device="cuda", dtype=torch.int32
+    )
+
+    tensors = get_gguf_moe_tensors(hidden_size, quant_type)
+
+    w13 = tensors[0]
+    w2 = tensors[1]
+
+    w13_dequant = torch.tensor(dequantize(w13.data, quant_type), device="cuda").to(
+        dtype
+    )
+
+    w2_dequant = torch.tensor(dequantize(w2.data, quant_type), device="cuda").to(dtype)
+
+    output = _fused_moe_gguf(
+        x,
+        torch.tensor(w13.data, device="cuda"),
+        torch.tensor(w2.data, device="cuda"),
+        topk_weights,
+        topk_ids,
+        quant_type,
+        quant_type,
+        "silu",
+    )
+
+    ref_output = fused_experts(
+        x, w13_dequant, w2_dequant, topk_weights, topk_ids
+    ).reshape(output.shape)
+    torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
