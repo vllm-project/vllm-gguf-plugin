@@ -9,14 +9,25 @@ GGML_TYPE_Q5_0 = 6
 GGML_TYPE_Q5_1 = 7
 GGML_TYPE_Q8_0 = 8
 GGML_TYPE_Q8_1 = 9
+GGML_TYPE_Q2_K = 10
+GGML_TYPE_Q3_K = 11
+GGML_TYPE_Q4_K = 12
+GGML_TYPE_Q5_K = 13
+GGML_TYPE_Q6_K = 14
 
 QK = 32
+QK_K = 256
 Q4_0_BLOCK_BYTES = 18
 Q4_1_BLOCK_BYTES = 20
 Q5_0_BLOCK_BYTES = 22
 Q5_1_BLOCK_BYTES = 24
 Q8_0_BLOCK_BYTES = 34
 Q8_1_BLOCK_BYTES = 36
+Q2_K_BLOCK_BYTES = 84
+Q3_K_BLOCK_BYTES = 110
+Q4_K_BLOCK_BYTES = 144
+Q5_K_BLOCK_BYTES = 176
+Q6_K_BLOCK_BYTES = 210
 
 BLOCK_BYTES_BY_TYPE = {
     GGML_TYPE_Q4_0: Q4_0_BLOCK_BYTES,
@@ -25,6 +36,25 @@ BLOCK_BYTES_BY_TYPE = {
     GGML_TYPE_Q5_1: Q5_1_BLOCK_BYTES,
     GGML_TYPE_Q8_0: Q8_0_BLOCK_BYTES,
     GGML_TYPE_Q8_1: Q8_1_BLOCK_BYTES,
+    GGML_TYPE_Q2_K: Q2_K_BLOCK_BYTES,
+    GGML_TYPE_Q3_K: Q3_K_BLOCK_BYTES,
+    GGML_TYPE_Q4_K: Q4_K_BLOCK_BYTES,
+    GGML_TYPE_Q5_K: Q5_K_BLOCK_BYTES,
+    GGML_TYPE_Q6_K: Q6_K_BLOCK_BYTES,
+}
+
+BLOCK_QK_BY_TYPE = {
+    GGML_TYPE_Q4_0: QK,
+    GGML_TYPE_Q4_1: QK,
+    GGML_TYPE_Q5_0: QK,
+    GGML_TYPE_Q5_1: QK,
+    GGML_TYPE_Q8_0: QK,
+    GGML_TYPE_Q8_1: QK,
+    GGML_TYPE_Q2_K: QK_K,
+    GGML_TYPE_Q3_K: QK_K,
+    GGML_TYPE_Q4_K: QK_K,
+    GGML_TYPE_Q5_K: QK_K,
+    GGML_TYPE_Q6_K: QK_K,
 }
 
 TRITON_SUPPORTED_TYPES = frozenset(BLOCK_BYTES_BY_TYPE)
@@ -85,6 +115,59 @@ def load_x_tile(
     return tl.reshape(tl.join(x_even, x_odd), (BLOCK_M, BLOCK_K_BLOCKS * 32)), cur_kb, kb_mask
 
 
+@triton.jit
+def load_x_chunk(
+    x_ptr,
+    stride_xm,
+    stride_xk,
+    offs_m,
+    m,
+    k_start,
+    CHUNK: tl.constexpr,
+):
+    offs_k = k_start + tl.arange(0, CHUNK)
+    return tl.load(
+        x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk,
+        mask=offs_m[:, None] < m,
+        other=0.0,
+    )
+
+
+@triton.jit
+def load_scale_min_k4(scales_ptr, mask, j: tl.constexpr):
+    if j < 4:
+        d = tl.load(scales_ptr + j, mask=mask, other=0)
+        m = tl.load(scales_ptr + j + 4, mask=mask, other=0)
+        return d & 0x3F, m & 0x3F
+
+    hi = tl.load(scales_ptr + j + 4, mask=mask, other=0)
+    lo_d = tl.load(scales_ptr + j - 4, mask=mask, other=0)
+    lo_m = tl.load(scales_ptr + j + 0, mask=mask, other=0)
+    d = (hi & 0x0F) | ((lo_d >> 6) << 4)
+    m = (hi >> 4) | ((lo_m >> 6) << 4)
+    return d, m
+
+
+@triton.jit
+def load_q3_k_scale(scales_ptr, mask, is_idx: tl.constexpr):
+    if is_idx < 4:
+        lo = tl.load(scales_ptr + is_idx, mask=mask, other=0)
+        hi = tl.load(scales_ptr + is_idx + 8, mask=mask, other=0)
+        return (lo & 0x0F) | (((hi >> 0) & 0x03) << 4)
+    if is_idx < 8:
+        lo = tl.load(scales_ptr + is_idx, mask=mask, other=0)
+        hi = tl.load(scales_ptr + is_idx + 4, mask=mask, other=0)
+        return (lo & 0x0F) | (((hi >> 2) & 0x03) << 4)
+    if is_idx < 12:
+        lo = tl.load(scales_ptr + is_idx - 8, mask=mask, other=0)
+        hi = tl.load(scales_ptr + is_idx, mask=mask, other=0)
+        return ((lo >> 4) & 0x0F) | (((hi >> 4) & 0x03) << 4)
+
+    lo = tl.load(scales_ptr + is_idx - 8, mask=mask, other=0)
+    hi = tl.load(scales_ptr + is_idx - 4, mask=mask, other=0)
+    return ((lo >> 4) & 0x0F) | (((hi >> 6) & 0x03) << 4)
+
+
 def _validate_args(
     W: torch.Tensor,
     X: torch.Tensor,
@@ -112,7 +195,7 @@ def _validate_args(
         )
 
     num_k_blocks = W.shape[1] // block_bytes
-    hidden_size = num_k_blocks * QK
+    hidden_size = num_k_blocks * BLOCK_QK_BY_TYPE[quant_type]
     if X.shape[-1] != hidden_size:
         raise ValueError(
             f"X hidden size {X.shape[-1]} does not match quantized weight width {hidden_size}"
