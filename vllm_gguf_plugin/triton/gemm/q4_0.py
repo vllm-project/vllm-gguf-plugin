@@ -11,6 +11,11 @@ Q4_0_BLOCK_N = 128
 Q4_0_BLOCK_K_BLOCKS = 4
 Q4_0_NUM_WARPS = 2
 Q4_0_NUM_STAGES = 2
+Q4_0_SUPPORTED_ACTIVATION_DTYPES = (
+    torch.float16,
+    torch.bfloat16,
+    torch.float32,
+)
 
 
 @triton.jit
@@ -56,20 +61,21 @@ def q4_0_gemm_kernel(
 
         x_even = tl.load(x_even_ptrs, mask=x_mask, other=0.0)
         x_odd = tl.load(x_odd_ptrs, mask=x_mask, other=0.0)
+        x_dtype = x_even.dtype
 
         scale_ptrs = w_block_row_ptrs + cur_kb[None, :] * 18
         scale_mask = (offs_n[:, None] < n) & kb_mask[None, :]
         scale_lo = tl.load(scale_ptrs + 0, mask=scale_mask, other=0)
         scale_hi = tl.load(scale_ptrs + 1, mask=scale_mask, other=0)
         scale_bits = scale_lo.to(tl.uint16) | (scale_hi.to(tl.uint16) << 8)
-        scales = tl.cast(scale_bits, tl.float16, bitcast=True)
+        scales = tl.cast(scale_bits, tl.float16, bitcast=True).to(x_dtype)
 
         packed_ptrs = w_packed_row_ptrs + cur_kb[None, :, None] * 18 + 2 + offs_byte[None, None, :]
         packed_mask = (offs_n[:, None, None] < n) & kb_mask[None, :, None]
         packed = tl.load(packed_ptrs, mask=packed_mask, other=0)
 
-        low = ((packed & 0x0F).to(tl.float16) - 8.0) * scales[:, :, None]
-        high = (((packed >> 4) & 0x0F).to(tl.float16) - 8.0) * scales[:, :, None]
+        low = ((packed & 0x0F).to(x_dtype) - 8.0) * scales[:, :, None]
+        high = (((packed >> 4) & 0x0F).to(x_dtype) - 8.0) * scales[:, :, None]
 
         x_tile = tl.join(x_even, x_odd)
         w_tile = tl.join(low, high)
@@ -93,8 +99,11 @@ def ggml_gemm_q4_0_triton(
         raise ValueError("Q4_0 Triton kernel requires CUDA tensors")
     if W.dtype is not torch.uint8:
         raise TypeError(f"Q4_0 weights must be torch.uint8, got {W.dtype}")
-    if X.dtype is not torch.float16:
-        raise TypeError(f"Triton Q4_0 kernel currently supports torch.float16, got {X.dtype}")
+    if X.dtype not in Q4_0_SUPPORTED_ACTIVATION_DTYPES:
+        raise TypeError(
+            "Triton Q4_0 kernel supports torch.float16, torch.bfloat16, and "
+            f"torch.float32 activations, got {X.dtype}"
+        )
     if X.dim() not in (2, 3):
         raise ValueError(f"X must be 2D or 3D, got {X.dim()}D")
     if row != W.shape[0]:

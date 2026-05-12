@@ -36,8 +36,6 @@ def q2_k_gemm_kernel(
 
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 84
-        d = load_f16_from_u8(block_ptrs + 80, n_mask)
-        dmin = load_f16_from_u8(block_ptrs + 82, n_mask)
 
         for chunk in range(8):
             group = chunk // 4
@@ -52,6 +50,9 @@ def q2_k_gemm_kernel(
                 kb * 256 + 128 * group + 32 * part,
                 CHUNK=32,
             )
+            x_dtype = x_tile.dtype
+            d = load_f16_from_u8(block_ptrs + 80, n_mask).to(x_dtype)
+            dmin = load_f16_from_u8(block_ptrs + 82, n_mask).to(x_dtype)
             q_bytes = tl.load(
                 block_ptrs[:, None] + 16 + 32 * group + offs_q[None, :],
                 mask=n_mask[:, None],
@@ -61,9 +62,9 @@ def q2_k_gemm_kernel(
             scale1 = tl.load(block_ptrs + (8 * group + 2 * part + 1), mask=n_mask, other=0)
             scale_byte = tl.where(use_hi[None, :], scale1[:, None], scale0[:, None])
 
-            scale = (scale_byte & 0x0F).to(tl.float16) * d[:, None]
-            minv = (scale_byte >> 4).to(tl.float16) * dmin[:, None]
-            q_tile = ((q_bytes >> (2 * part)) & 0x03).to(tl.float16) * scale - minv
+            scale = (scale_byte & 0x0F).to(x_dtype) * d[:, None]
+            minv = (scale_byte >> 4).to(x_dtype) * dmin[:, None]
+            q_tile = ((q_bytes >> (2 * part)) & 0x03).to(x_dtype) * scale - minv
             acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
     y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn

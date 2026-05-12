@@ -36,22 +36,13 @@ def iq1_s_gemm_kernel(
 
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 50
-        d = load_f16_from_u8(block_ptrs + 0, n_mask)
 
         for ib in range(8):
             qh = load_u16_from_u8(block_ptrs + 34 + 2 * ib, n_mask)
             delta_num = tl.where((qh & 0x8000) != 0, -9, -7).to(tl.int16)
-            scale = (d * (2 * ((qh >> 12) & 0x7).to(tl.float16) + 1.0) * 0.125).to(tl.float16)
             for il in range(4):
                 idx = tl.load(block_ptrs + 2 + 4 * ib + il, mask=n_mask, other=0).to(tl.int32)
                 idx = idx | ((((qh >> (3 * il)) & 0x7).to(tl.int32)) << 8)
-                grid = tl.load(
-                    grid_ptr + idx[:, None] * 8 + offs_8[None, :],
-                    mask=n_mask[:, None],
-                    other=0,
-                ).to(tl.float16)
-                q_tile = ((((grid.to(tl.int16) * 8) + delta_num[:, None]).to(tl.float16)) * scale[:, None]).to(tl.float16)
-
                 x_tile = load_x_chunk(
                     x_ptr,
                     stride_xm,
@@ -61,6 +52,15 @@ def iq1_s_gemm_kernel(
                     kb * 256 + 32 * ib + 8 * il,
                     CHUNK=8,
                 )
+                x_dtype = x_tile.dtype
+                d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
+                scale = (d * (2 * ((qh >> 12) & 0x7).to(x_dtype) + 1.0) * 0.125).to(x_dtype)
+                grid = tl.load(
+                    grid_ptr + idx[:, None] * 8 + offs_8[None, :],
+                    mask=n_mask[:, None],
+                    other=0,
+                ).to(x_dtype)
+                q_tile = ((((grid.to(tl.int16) * 8) + delta_num[:, None]).to(x_dtype)) * scale[:, None]).to(x_dtype)
                 acc += tl.sum(x_tile[:, None, :] * q_tile[None, :, :], axis=2)
 
     y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn

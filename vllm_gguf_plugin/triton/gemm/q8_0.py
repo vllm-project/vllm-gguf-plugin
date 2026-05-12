@@ -47,10 +47,11 @@ def q8_0_gemm_kernel(
             BLOCK_M=BLOCK_M,
             BLOCK_K_BLOCKS=BLOCK_K_BLOCKS,
         )
+        x_dtype = x_tile.dtype
 
         block_ptrs = w_row_ptrs + cur_kb[None, :] * 34
         scale_mask = (offs_n[:, None] < n) & kb_mask[None, :]
-        d = load_f16_from_u8(block_ptrs + 0, scale_mask)
+        d = load_f16_from_u8(block_ptrs + 0, scale_mask).to(x_dtype)
         q_low = tl.load(
             block_ptrs[:, :, None] + 2 + offs_nibble[None, None, :],
             mask=(offs_n[:, None, None] < n) & kb_mask[None, :, None],
@@ -62,9 +63,9 @@ def q8_0_gemm_kernel(
             other=0,
         )
         q_tile = tl.reshape(
-            tl.join(
-                tl.cast(q_low, tl.int8, bitcast=True).to(tl.float16) * d[:, :, None],
-                tl.cast(q_high, tl.int8, bitcast=True).to(tl.float16) * d[:, :, None],
+                tl.join(
+                tl.cast(q_low, tl.int8, bitcast=True).to(x_dtype) * d[:, :, None],
+                tl.cast(q_high, tl.int8, bitcast=True).to(x_dtype) * d[:, :, None],
             ),
             (BLOCK_N, BLOCK_K_BLOCKS * 32),
         )

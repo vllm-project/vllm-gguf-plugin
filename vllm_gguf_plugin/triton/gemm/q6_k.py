@@ -35,7 +35,6 @@ def q6_k_gemm_kernel(
 
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 210
-        d = load_f16_from_u8(block_ptrs + 208, n_mask)
 
         for chunk in range(16):
             half_block = chunk // 8
@@ -48,8 +47,6 @@ def q6_k_gemm_kernel(
                 mask=n_mask,
                 other=0,
             )
-            scale = tl.cast(scale, tl.int8, bitcast=True).to(tl.float16) * d
-
             x_tile = load_x_chunk(
                 x_ptr,
                 stride_xm,
@@ -59,6 +56,9 @@ def q6_k_gemm_kernel(
                 kb * 256 + 128 * half_block + 32 * group + 16 * half,
                 CHUNK=16,
             )
+            x_dtype = x_tile.dtype
+            d = load_f16_from_u8(block_ptrs + 208, n_mask).to(x_dtype)
+            scale = tl.cast(scale, tl.int8, bitcast=True).to(x_dtype) * d
             qh = tl.load(
                 block_ptrs[:, None] + 128 + 32 * half_block + il[None, :],
                 mask=n_mask[:, None],
@@ -71,7 +71,7 @@ def q6_k_gemm_kernel(
                 other=0,
             )
             q = (ql & 0x0F) if group < 2 else (ql >> 4)
-            q = q.to(tl.float16) + 16.0 * (((qh >> (2 * group)) & 0x03).to(tl.float16))
+            q = q.to(x_dtype) + 16.0 * (((qh >> (2 * group)) & 0x03).to(x_dtype))
             q_tile = (q - 32.0) * scale[:, None]
             acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 

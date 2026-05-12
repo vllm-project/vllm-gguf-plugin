@@ -96,6 +96,11 @@ TRITON_BLOCK_N = 128
 TRITON_BLOCK_K_BLOCKS = 4
 TRITON_NUM_WARPS = 2
 TRITON_NUM_STAGES = 2
+TRITON_SUPPORTED_ACTIVATION_DTYPES = (
+    torch.float16,
+    torch.bfloat16,
+    torch.float32,
+)
 
 
 @triton.jit
@@ -219,8 +224,11 @@ def _validate_args(
         raise ValueError("Triton kernels require CUDA tensors")
     if W.dtype is not torch.uint8:
         raise TypeError(f"Quantized weights must be torch.uint8, got {W.dtype}")
-    if X.dtype is not torch.float16:
-        raise TypeError(f"Triton kernels currently support torch.float16 activations, got {X.dtype}")
+    if X.dtype not in TRITON_SUPPORTED_ACTIVATION_DTYPES:
+        raise TypeError(
+            "Triton kernels support torch.float16, torch.bfloat16, and torch.float32 "
+            f"activations, got {X.dtype}"
+        )
     if X.dim() not in (2, 3):
         raise ValueError(f"X must be 2D or 3D, got {X.dim()}D")
     if row != W.shape[0]:

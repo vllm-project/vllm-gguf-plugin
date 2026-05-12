@@ -39,28 +39,13 @@ def iq3_xxs_gemm_kernel(
 
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 98
-        d = load_f16_from_u8(block_ptrs + 0, n_mask)
 
         for ib in range(8):
             aux32 = load_u32_from_u8(block_ptrs + 66 + 4 * ib, n_mask)
-            dscale = (d * ((aux32 >> 28).to(tl.float16) + 0.5) * 0.5).to(tl.float16)
             for il in range(4):
                 signs = tl.load(sign_ptr + ((aux32 >> (7 * il)) & 127), mask=n_mask, other=0)
                 idx1 = tl.load(block_ptrs + 2 + 8 * ib + 2 * il + 0, mask=n_mask, other=0).to(tl.int32)
                 idx2 = tl.load(block_ptrs + 2 + 8 * ib + 2 * il + 1, mask=n_mask, other=0).to(tl.int32)
-                grid1 = tl.load(
-                    grid_ptr + idx1[:, None] * 4 + offs_4[None, :],
-                    mask=n_mask[:, None],
-                    other=0,
-                ).to(tl.float16)
-                grid2 = tl.load(
-                    grid_ptr + idx2[:, None] * 4 + offs_4[None, :],
-                    mask=n_mask[:, None],
-                    other=0,
-                ).to(tl.float16)
-                q1 = (grid1 * tl.where((signs[:, None] & sign_mask_lo[None, :]) != 0, -1, 1).to(tl.float16) * dscale[:, None]).to(tl.float16)
-                q2 = (grid2 * tl.where((signs[:, None] & sign_mask_hi[None, :]) != 0, -1, 1).to(tl.float16) * dscale[:, None]).to(tl.float16)
-
                 x1 = load_x_chunk(
                     x_ptr,
                     stride_xm,
@@ -79,6 +64,21 @@ def iq3_xxs_gemm_kernel(
                     kb * 256 + 32 * ib + 8 * il + 4,
                     CHUNK=4,
                 )
+                x_dtype = x1.dtype
+                d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
+                dscale = (d * ((aux32 >> 28).to(x_dtype) + 0.5) * 0.5).to(x_dtype)
+                grid1 = tl.load(
+                    grid_ptr + idx1[:, None] * 4 + offs_4[None, :],
+                    mask=n_mask[:, None],
+                    other=0,
+                ).to(x_dtype)
+                grid2 = tl.load(
+                    grid_ptr + idx2[:, None] * 4 + offs_4[None, :],
+                    mask=n_mask[:, None],
+                    other=0,
+                ).to(x_dtype)
+                q1 = (grid1 * tl.where((signs[:, None] & sign_mask_lo[None, :]) != 0, -1, 1).to(x_dtype) * dscale[:, None]).to(x_dtype)
+                q2 = (grid2 * tl.where((signs[:, None] & sign_mask_hi[None, :]) != 0, -1, 1).to(x_dtype) * dscale[:, None]).to(x_dtype)
                 acc += tl.sum(x1[:, None, :] * q1[None, :, :], axis=2)
                 acc += tl.sum(x2[:, None, :] * q2[None, :, :], axis=2)
 

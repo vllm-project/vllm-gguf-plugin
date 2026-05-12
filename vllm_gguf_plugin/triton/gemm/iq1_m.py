@@ -41,8 +41,6 @@ def iq1_m_gemm_kernel(
         sc2 = load_u16_from_u8(block_ptrs + 48 + 4, n_mask)
         sc3 = load_u16_from_u8(block_ptrs + 48 + 6, n_mask)
         base_bits = (sc0 >> 12) | ((sc1 >> 8) & 0x00F0) | ((sc2 >> 4) & 0x0F00) | (sc3 & 0xF000)
-        base = tl.cast(base_bits.to(tl.uint16), tl.float16, bitcast=True)
-
         for ib in range(8):
             for il in range(4):
                 qh = tl.load(block_ptrs + 32 + 2 * ib + (il // 2), mask=n_mask, other=0).to(tl.int32)
@@ -51,14 +49,6 @@ def iq1_m_gemm_kernel(
                 delta_num = tl.where((qh & (0x08 << (4 * (il % 2)))) != 0, -9, -7).to(tl.int16)
                 ib16 = 2 * ib + (il // 2)
                 sc_sel = sc0 if ib16 // 4 == 0 else sc1 if ib16 // 4 == 1 else sc2 if ib16 // 4 == 2 else sc3
-                scale = (base * (2 * (((sc_sel >> (3 * (ib16 % 4))) & 0x07).to(tl.float16)) + 1.0) * 0.125).to(tl.float16)
-                grid = tl.load(
-                    grid_ptr + idx[:, None] * 8 + offs_8[None, :],
-                    mask=n_mask[:, None],
-                    other=0,
-                ).to(tl.float16)
-                q_tile = ((((grid.to(tl.int16) * 8) + delta_num[:, None]).to(tl.float16)) * scale[:, None]).to(tl.float16)
-
                 x_tile = load_x_chunk(
                     x_ptr,
                     stride_xm,
@@ -68,6 +58,15 @@ def iq1_m_gemm_kernel(
                     kb * 256 + 32 * ib + 8 * il,
                     CHUNK=8,
                 )
+                x_dtype = x_tile.dtype
+                base = tl.cast(base_bits.to(tl.uint16), tl.float16, bitcast=True).to(x_dtype)
+                scale = (base * (2 * (((sc_sel >> (3 * (ib16 % 4))) & 0x07).to(x_dtype)) + 1.0) * 0.125).to(x_dtype)
+                grid = tl.load(
+                    grid_ptr + idx[:, None] * 8 + offs_8[None, :],
+                    mask=n_mask[:, None],
+                    other=0,
+                ).to(x_dtype)
+                q_tile = ((((grid.to(tl.int16) * 8) + delta_num[:, None]).to(x_dtype)) * scale[:, None]).to(x_dtype)
                 acc += tl.sum(x_tile[:, None, :] * q_tile[None, :, :], axis=2)
 
     y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn

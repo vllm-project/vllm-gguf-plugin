@@ -38,23 +38,13 @@ def iq2_xs_gemm_kernel(
 
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 74
-        d = load_f16_from_u8(block_ptrs + 0, n_mask)
 
         for ib in range(8):
             scale_byte = tl.load(block_ptrs + 66 + ib, mask=n_mask, other=0)
             for il in range(4):
-                scale = (((scale_byte >> (4 * (il // 2))) & 0x0F).to(tl.float16) + 0.5) * 0.25
                 q2 = load_u16_from_u8(block_ptrs + 2 + 2 * (4 * ib + il), n_mask).to(tl.int32)
                 grid_idx = q2 & 0x1FF
                 signs = tl.load(sign_ptr + (q2 >> 9), mask=n_mask, other=0)
-                grid = tl.load(
-                    grid_ptr + grid_idx[:, None] * 8 + offs_8[None, :],
-                    mask=n_mask[:, None],
-                    other=0,
-                ).to(tl.float16)
-                sign = tl.where((signs[:, None] & sign_mask[None, :]) != 0, -1, 1).to(tl.float16)
-                q_tile = tl.cast(grid * sign * (d * scale).to(tl.float16)[:, None], tl.float16)
-
                 x_tile = load_x_chunk(
                     x_ptr,
                     stride_xm,
@@ -64,6 +54,16 @@ def iq2_xs_gemm_kernel(
                     kb * 256 + 32 * ib + 8 * il,
                     CHUNK=8,
                 )
+                x_dtype = x_tile.dtype
+                d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
+                scale = (((scale_byte >> (4 * (il // 2))) & 0x0F).to(x_dtype) + 0.5) * 0.25
+                grid = tl.load(
+                    grid_ptr + grid_idx[:, None] * 8 + offs_8[None, :],
+                    mask=n_mask[:, None],
+                    other=0,
+                ).to(x_dtype)
+                sign = tl.where((signs[:, None] & sign_mask[None, :]) != 0, -1, 1).to(x_dtype)
+                q_tile = (grid * sign * (d * scale).to(x_dtype)[:, None]).to(x_dtype)
                 acc += tl.sum(x_tile[:, None, :] * q_tile[None, :, :], axis=2)
 
     y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn

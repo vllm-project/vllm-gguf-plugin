@@ -35,7 +35,6 @@ def q3_k_gemm_kernel(
 
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 110
-        d = load_f16_from_u8(block_ptrs + 108, n_mask)
 
         for chunk in range(16):
             group = chunk // 8
@@ -71,6 +70,8 @@ def q3_k_gemm_kernel(
                 kb * 256 + 128 * group + 32 * j + 16 * half,
                 CHUNK=16,
             )
+            x_dtype = x_tile.dtype
+            d = load_f16_from_u8(block_ptrs + 108, n_mask).to(x_dtype)
             ql = tl.load(
                 block_ptrs[:, None] + 32 + 32 * group + 16 * half + offs_l[None, :],
                 mask=n_mask[:, None],
@@ -82,8 +83,8 @@ def q3_k_gemm_kernel(
                 other=0,
             )
             q = ((ql >> (2 * j)) & 0x03).to(tl.int16)
-            q = (q - tl.where((hm & hm_mask) != 0, 0, 4).to(tl.int16)).to(tl.float16)
-            dq = ((scale.to(tl.int16) - 32).to(tl.float16) * d)[:, None]
+            q = (q - tl.where((hm & hm_mask) != 0, 0, 4).to(tl.int16)).to(x_dtype)
+            dq = ((scale.to(tl.int16) - 32).to(x_dtype) * d)[:, None]
             q_tile = q * dq
             acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 

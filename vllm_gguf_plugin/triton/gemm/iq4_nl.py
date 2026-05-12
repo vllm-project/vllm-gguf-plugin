@@ -49,17 +49,18 @@ def iq4_nl_gemm_kernel(
             BLOCK_M=BLOCK_M,
             BLOCK_K_BLOCKS=BLOCK_K_BLOCKS,
         )
+        x_dtype = x_tile.dtype
 
         block_ptrs = w_row_ptrs + cur_kb[None, :] * 18
         scale_mask = (offs_n[:, None] < n) & kb_mask[None, :]
-        d = load_f16_from_u8(block_ptrs + 0, scale_mask)
+        d = load_f16_from_u8(block_ptrs + 0, scale_mask).to(x_dtype)
         packed = tl.load(
             block_ptrs[:, :, None] + 2 + offs_nibble[None, None, :],
             mask=(offs_n[:, None, None] < n) & kb_mask[None, :, None],
             other=0,
         )
-        low = tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(tl.float16) * d[:, :, None]
-        high = tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(tl.float16) * d[:, :, None]
+        low = tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
+        high = tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
         q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 

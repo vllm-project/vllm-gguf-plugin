@@ -36,23 +36,14 @@ def iq4_xs_gemm_kernel(
 
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 136
-        d = load_f16_from_u8(block_ptrs + 0, n_mask)
         scales_h = load_u16_from_u8(block_ptrs + 2, n_mask)
 
         for ib in range(8):
-            scales_l = tl.load(block_ptrs + 4 + (ib // 2), mask=n_mask, other=0).to(tl.int32)
-            scale = ((((scales_l >> (4 * (ib % 2))) & 0x0F) | (((scales_h.to(tl.int32) >> (2 * ib)) & 0x03) << 4)).to(tl.int16) - 32).to(tl.float16)
             packed = tl.load(
                 block_ptrs[:, None] + 8 + 16 * ib + offs_nibble[None, :],
                 mask=n_mask[:, None],
                 other=0,
             )
-            low = tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(tl.float16)
-            high = tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(tl.float16)
-            dscale = (d * scale).to(tl.float16)
-            q1 = (low * dscale[:, None]).to(tl.float16)
-            q2 = (high * dscale[:, None]).to(tl.float16)
-
             x1 = load_x_chunk(
                 x_ptr,
                 stride_xm,
@@ -71,6 +62,15 @@ def iq4_xs_gemm_kernel(
                 kb * 256 + 32 * ib + 16,
                 CHUNK=16,
             )
+            x_dtype = x1.dtype
+            d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
+            scales_l = tl.load(block_ptrs + 4 + (ib // 2), mask=n_mask, other=0).to(tl.int32)
+            scale = ((((scales_l >> (4 * (ib % 2))) & 0x0F) | (((scales_h.to(tl.int32) >> (2 * ib)) & 0x03) << 4)).to(tl.int16) - 32).to(x_dtype)
+            low = tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(x_dtype)
+            high = tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(x_dtype)
+            dscale = (d * scale).to(x_dtype)
+            q1 = (low * dscale[:, None]).to(x_dtype)
+            q2 = (high * dscale[:, None]).to(x_dtype)
             acc = tl.dot(x1, tl.trans(q1), acc=acc)
             acc = tl.dot(x2, tl.trans(q2), acc=acc)
 

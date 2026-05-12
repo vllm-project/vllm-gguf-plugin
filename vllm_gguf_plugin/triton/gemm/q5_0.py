@@ -55,10 +55,11 @@ def q5_0_gemm_kernel(
             BLOCK_M=BLOCK_M,
             BLOCK_K_BLOCKS=BLOCK_K_BLOCKS,
         )
+        x_dtype = x_tile.dtype
 
         block_ptrs = w_row_ptrs + cur_kb[None, :] * 22
         scale_mask = (offs_n[:, None] < n) & kb_mask[None, :]
-        d = load_f16_from_u8(block_ptrs + 0, scale_mask)
+        d = load_f16_from_u8(block_ptrs + 0, scale_mask).to(x_dtype)
         qh = load_u32_from_u8(block_ptrs + 2, scale_mask)
         packed = tl.load(
             block_ptrs[:, :, None] + 6 + offs_nibble[None, None, :],
@@ -67,8 +68,8 @@ def q5_0_gemm_kernel(
         )
         qh_low = ((qh[:, :, None] >> bit_low[None, None, :]) & 0x01).to(tl.uint8)
         qh_high = ((qh[:, :, None] >> bit_high[None, None, :]) & 0x01).to(tl.uint8)
-        low = (((packed & 0x0F) | (qh_low << 4)).to(tl.int16) - 16).to(tl.float16) * d[:, :, None]
-        high = ((((packed >> 4) & 0x0F) | (qh_high << 4)).to(tl.int16) - 16).to(tl.float16) * d[:, :, None]
+        low = (((packed & 0x0F) | (qh_low << 4)).to(tl.int16) - 16).to(x_dtype) * d[:, :, None]
+        high = ((((packed >> 4) & 0x0F) | (qh_high << 4)).to(tl.int16) - 16).to(x_dtype) * d[:, :, None]
         q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 

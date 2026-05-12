@@ -40,8 +40,6 @@ def q4_k_gemm_kernel(
 
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 144
-        dall = load_f16_from_u8(block_ptrs + 0, n_mask)
-        dmin = load_f16_from_u8(block_ptrs + 2, n_mask)
         scales_ptr = block_ptrs + 4
 
         for chunk in range(8):
@@ -67,14 +65,17 @@ def q4_k_gemm_kernel(
                 kb * 256 + 64 * group + 32 * part,
                 CHUNK=32,
             )
+            x_dtype = x_tile.dtype
+            dall = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
+            dmin = load_f16_from_u8(block_ptrs + 2, n_mask).to(x_dtype)
             q = tl.load(
                 block_ptrs[:, None] + 16 + 32 * group + offs_q[None, :],
                 mask=n_mask[:, None],
                 other=0,
             )
             q = (q & 0x0F) if part == 0 else (q >> 4)
-            q_tile = q.to(tl.float16) * (scale_q.to(tl.float16)[:, None] * dall[:, None])
-            q_tile = q_tile - min_q.to(tl.float16)[:, None] * dmin[:, None]
+            q_tile = q.to(x_dtype) * (scale_q.to(x_dtype)[:, None] * dall[:, None])
+            q_tile = q_tile - min_q.to(x_dtype)[:, None] * dmin[:, None]
             acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
     y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
