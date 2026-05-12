@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+jobs:
+  build-sdist:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate release tag matches package version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          version = project["project"]["version"]
+          release_tag = os.environ["RELEASE_TAG"]
+          normalized_tag = release_tag[1:] if release_tag.startswith("v") else release_tag
+
+          if normalized_tag != version:
+              raise SystemExit(
+                  f"Release tag {release_tag!r} does not match pyproject version {version!r}."
+              )
+
+          print(f"Building sdist for version {version}")
+          PY
+
+      - name: Show package version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tomllib
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          print(f"Building TestPyPI sdist for version {project['project']['version']}")
+          PY
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade "setuptools>=77.0.3,<81.0.0" build twine
+
+      - name: Build source distribution
+        run: python -m build --sdist --no-isolation --skip-dependency-check
+
+      - name: Check package metadata
+        run: python -m twine check dist/*
+
+      - name: Upload source distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-sdist
+          path: dist/*.tar.gz
+
+  publish-pypi:
+    needs: build-sdist
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+
+    environment:
+      name: pypi
+
+    steps:
+      - name: Download source distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: python-sdist
+          path: dist
+
+      - name: Publish package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-testpypi:
+    needs: build-sdist
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+
+    environment:
+      name: testpypi
+
+    steps:
+      - name: Download source distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: python-sdist
+          path: dist
+
+      - name: Publish package to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          repository-url: https://test.pypi.org/legacy/
