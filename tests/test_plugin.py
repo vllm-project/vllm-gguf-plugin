@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
+import re
+import sys
+from pathlib import Path
+
+import pytest
 import torch
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
@@ -18,6 +24,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
 
+import vllm_gguf_plugin._jit as jit_module
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
@@ -314,3 +321,145 @@ def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
 
     assert layer.qweight.device.type == "cuda"
     assert layer.qweight_type.device.type == "cuda"
+
+
+def test_gguf_cuda_extension_uses_jit_loader(monkeypatch):
+    state = {"loaded": False}
+    captured = {}
+
+    monkeypatch.setattr(jit_module, "_gguf_ops_available", lambda: state["loaded"])
+    monkeypatch.setattr(jit_module, "_precompiled_gguf_library_paths", lambda: [])
+    monkeypatch.setattr(jit_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(jit_module.torch.version, "cuda", "12.9", raising=False)
+    monkeypatch.setattr(jit_module.cpp_extension, "CUDA_HOME", "/usr/local/cuda")
+
+    def fake_load(**kwargs):
+        state["loaded"] = True
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(jit_module.cpp_extension, "load", fake_load)
+
+    jit_module.ensure_gguf_cuda_ops_loaded()
+    jit_module.ensure_gguf_cuda_ops_loaded()
+
+    assert captured["name"] == "_C_gguf"
+    assert captured["with_cuda"] is True
+    assert captured["sources"] == [
+        str(jit_module._csrc_root() / "torch_bindings.cpp"),
+        str(jit_module._csrc_root() / "gguf" / "gguf_kernel.cu"),
+    ]
+    assert captured["extra_include_paths"] == [
+        str(jit_module._csrc_root()),
+        str(jit_module._csrc_root() / "gguf"),
+    ]
+    assert captured["extra_cuda_cflags"] == [
+        "-O3",
+        "-std=c++17",
+        "--use_fast_math",
+        "-DUSE_CUDA",
+    ]
+
+
+def test_gguf_cuda_extension_prefers_precompiled_library(monkeypatch, tmp_path):
+    state = {"loaded": False}
+    library_path = tmp_path / "_C_gguf.so"
+    library_path.write_bytes(b"")
+    loaded_paths = []
+
+    monkeypatch.setattr(jit_module, "_gguf_ops_available", lambda: state["loaded"])
+    monkeypatch.setattr(
+        jit_module, "_precompiled_gguf_library_paths", lambda: [library_path]
+    )
+    monkeypatch.setattr(jit_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(jit_module.torch.version, "cuda", "12.9", raising=False)
+    monkeypatch.setattr(jit_module.cpp_extension, "CUDA_HOME", None)
+
+    def fake_load_library(path: str):
+        loaded_paths.append(path)
+        state["loaded"] = True
+
+    monkeypatch.setattr(jit_module.torch.ops, "load_library", fake_load_library)
+    monkeypatch.setattr(
+        jit_module.cpp_extension,
+        "load",
+        lambda **kwargs: pytest.fail(f"unexpected JIT compile: {kwargs}"),
+    )
+
+    jit_module.ensure_gguf_cuda_ops_loaded()
+    jit_module.ensure_gguf_cuda_ops_loaded()
+
+    assert loaded_paths == [str(library_path)]
+
+
+def test_gguf_cuda_extension_requires_cuda_device(monkeypatch):
+    monkeypatch.setattr(jit_module, "_gguf_ops_available", lambda: False)
+    monkeypatch.setattr(jit_module.torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="available CUDA device"):
+        jit_module.ensure_gguf_cuda_ops_loaded()
+
+
+def test_gguf_precompiled_artifact_tag(monkeypatch):
+    monkeypatch.setattr(jit_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(jit_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(jit_module.torch, "__version__", "2.11.0+cu129", raising=False)
+    monkeypatch.setattr(jit_module.torch.version, "cuda", "12.9", raising=False)
+
+    assert jit_module.get_gguf_precompiled_artifact_tag() == (
+        "linux-x86_64/torch-2.11.0/cuda-12.9/"
+        f"python-cp{sys.version_info.major}{sys.version_info.minor}"
+    )
+
+
+def test_jit_cache_wheel_backend_writes_build_meta():
+    backend_path = (
+        Path(__file__).resolve().parent.parent
+        / "vllm-gguf-plugin-jit-cache"
+        / "build_backend.py"
+    )
+    spec = importlib.util.spec_from_file_location("jit_cache_backend", backend_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    root_pyproject = (
+        Path(__file__).resolve().parent.parent / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    expected_version = re.search(
+        r'^version = "([^"]+)"$', root_pyproject, re.MULTILINE
+    ).group(1)
+    version = module._write_build_meta()
+    build_meta_path = (
+        Path(__file__).resolve().parent.parent
+        / "vllm-gguf-plugin-jit-cache"
+        / "vllm_gguf_plugin_precompiled"
+        / "_build_meta.py"
+    )
+
+    assert version == expected_version
+    assert (
+        build_meta_path.read_text(encoding="utf-8")
+        .strip()
+        .endswith(f'__version__ = "{expected_version}"')
+    )
+
+
+def test_jit_cache_wheel_backend_artifact_dir_matches_runtime_tag():
+    backend_path = (
+        Path(__file__).resolve().parent.parent
+        / "vllm-gguf-plugin-jit-cache"
+        / "build_backend.py"
+    )
+    spec = importlib.util.spec_from_file_location("jit_cache_backend", backend_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._artifact_output_dir() == (
+        Path(__file__).resolve().parent.parent
+        / "vllm-gguf-plugin-jit-cache"
+        / "vllm_gguf_plugin_precompiled"
+        / "artifacts"
+        / jit_module.get_gguf_precompiled_artifact_tag()
+    )

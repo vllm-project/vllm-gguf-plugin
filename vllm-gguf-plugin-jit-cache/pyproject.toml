@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77.0.3,<81.0.0", "wheel", "torch>=2.9"]
+build-backend = "build_backend"
+backend-path = ["."]
+
+[project]
+name = "vllm-gguf-plugin-jit-cache"
+dynamic = ["version"]
+description = "Optional precompiled JIT cache wheel for vllm-gguf-plugin"
+readme = {text = "This package contains a precompiled _C_gguf artifact for a specific runtime tag.", content-type = "text/plain"}
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+packages = ["vllm_gguf_plugin_precompiled"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "vllm_gguf_plugin_precompiled.__version__"}
+
+[tool.setuptools.package-data]
+vllm_gguf_plugin_precompiled = ["artifacts/**/*.so"]
