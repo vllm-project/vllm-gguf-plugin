@@ -74,25 +74,19 @@ jobs:
   build-wheel:
     runs-on: ubuntu-latest
 
-    # CUDA 12.8 on Ubuntu 22.04 → glibc 2.35 floor (manylinux_2_35_x86_64) and
-    # arch coverage matching vLLM's CUDA 12.8 CMakeLists list. Bump the tag to
-    # roll the wheel forward to a newer CUDA / glibc.
+    # PyTorch's manylinux2_28 builder image: AlmaLinux 8 (glibc 2.28 floor)
+    # with CUDA 13.0 + Python at /opt/python/cpXY-cpXY/ preinstalled. Same
+    # base image vLLM publishes its x86_64 wheels from.
     container:
-      image: nvidia/cuda:12.8.1-devel-ubuntu22.04
+      image: pytorch/manylinux2_28-builder:cuda13.0
 
     permissions:
       contents: read
 
     env:
-      DEBIAN_FRONTEND: noninteractive
+      PYTHON_VERSION: "3.12"
 
     steps:
-      - name: Install base tooling
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates curl git python3 python3-dev python3-venv
-
       - name: Check out code
         uses: actions/checkout@v4
 
@@ -103,22 +97,24 @@ jobs:
 
       - name: Create build venv
         run: |
-          uv venv /opt/build-venv --python python3
+          PYV_NODOT=${PYTHON_VERSION//./}
+          uv venv /opt/build-venv \
+            --python "/opt/python/cp${PYV_NODOT}-cp${PYV_NODOT}/bin/python${PYTHON_VERSION}"
           echo "/opt/build-venv/bin" >> "$GITHUB_PATH"
 
       - name: Install build dependencies
         run: |
           uv pip install "setuptools>=77.0.3,<81.0.0" wheel twine
-          uv pip install --index-url https://download.pytorch.org/whl/cu128 \
+          uv pip install --index-url https://download.pytorch.org/whl/cu130 \
             "torch>=2.9"
 
       - name: Build wheel
         run: ./scripts/build_release_wheel.sh
 
-      - name: Retag wheel as manylinux_2_35_x86_64
+      - name: Retag wheel as manylinux_2_28_x86_64
         run: |
           cd dist
-          python -m wheel tags --remove --platform-tag manylinux_2_35_x86_64 ./*.whl
+          python -m wheel tags --remove --platform-tag manylinux_2_28_x86_64 ./*.whl
 
       - name: Check wheel metadata
         run: python -m twine check dist/*.whl
