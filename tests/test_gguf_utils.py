@@ -43,6 +43,23 @@ class TestIsRemoteGGUF:
         assert not is_remote_gguf("repo/model:INVALID_M")
         assert not is_remote_gguf("repo/model:Q9_K_M")
 
+    def test_is_remote_gguf_file_type_only_quants(self):
+        """Test is_remote_gguf with file-type-only quants (LlamaFileType).
+
+        IQ2_M / IQ3_M / IQ3_XS / MXFP4_MOE exist only as GGUF file types
+        (LlamaFileType), not as GGML tensor types. Regression test for
+        https://github.com/vllm-project/vllm/issues/42734.
+        """
+        assert is_remote_gguf("unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ2_M")
+        assert is_remote_gguf("repo/model:IQ2_M")
+        assert is_remote_gguf("repo/model:IQ3_M")
+        assert is_remote_gguf("repo/model:IQ3_XS")
+        assert is_remote_gguf("repo/model:MXFP4_MOE")
+        assert is_remote_gguf("user/Model-GGUF:UD-IQ3_XS")
+
+        assert not is_remote_gguf("repo/model:IQ9_M")
+        assert not is_remote_gguf("repo/model:NOTATYPE")
+
     def test_is_remote_gguf_nonstandard_quant_type(self):
         """Test is_remote_gguf with non-standard quant types containing
         a known GGML type."""
