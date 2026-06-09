@@ -537,6 +537,16 @@ int64_t ggml_moe_get_block_size(int64_t type) {
       return MOE_X_Q5_K;
     case 14:
       return MOE_X_Q6_K;
+    case 16:
+    case 17:
+    case 18:
+    case 19:
+    case 20:
+    case 21:
+    case 22:
+    case 23:
+    case 29:
+      return MOE_X_Q2_K;
   }
   return 0;
 }

@@ -28,6 +28,7 @@ QUANT_TYPES = [
     # i-matrix
     GGMLQuantizationType.IQ1_M,
     GGMLQuantizationType.IQ1_S,
+    GGMLQuantizationType.IQ2_XXS,
     GGMLQuantizationType.IQ2_S,
     GGMLQuantizationType.IQ2_XS,
     GGMLQuantizationType.IQ3_S,
@@ -46,6 +47,15 @@ QUANT_TYPES = [
     GGMLQuantizationType.Q8_0,
 ]
 TRITON_MOE_QUANT_TYPES = [
+    GGMLQuantizationType.IQ1_M,
+    GGMLQuantizationType.IQ1_S,
+    GGMLQuantizationType.IQ2_XXS,
+    GGMLQuantizationType.IQ2_S,
+    GGMLQuantizationType.IQ2_XS,
+    GGMLQuantizationType.IQ3_S,
+    GGMLQuantizationType.IQ3_XXS,
+    GGMLQuantizationType.IQ4_NL,
+    GGMLQuantizationType.IQ4_XS,
     GGMLQuantizationType.Q2_K,
     GGMLQuantizationType.Q3_K,
     GGMLQuantizationType.Q4_K,
@@ -165,6 +175,7 @@ def test_mmq(
         # i-matrix quants
         (GGMLQuantizationType.IQ1_M, "IQ1_M"),
         (GGMLQuantizationType.IQ1_S, "IQ1_S"),
+        (GGMLQuantizationType.IQ2_XXS, "IQ2_XXS"),
         (GGMLQuantizationType.IQ2_S, "IQ2_S"),
         (GGMLQuantizationType.IQ2_XS, "IQ2_XS"),
         (GGMLQuantizationType.IQ3_S, "IQ3_S"),

@@ -9,6 +9,15 @@ import triton.language as tl
 from ..gemm.utils import (
     BLOCK_BYTES_BY_TYPE,
     BLOCK_QK_BY_TYPE,
+    GGML_TYPE_IQ1_M,
+    GGML_TYPE_IQ1_S,
+    GGML_TYPE_IQ2_S,
+    GGML_TYPE_IQ2_XXS,
+    GGML_TYPE_IQ2_XS,
+    GGML_TYPE_IQ3_S,
+    GGML_TYPE_IQ3_XXS,
+    GGML_TYPE_IQ4_NL,
+    GGML_TYPE_IQ4_XS,
     GGML_TYPE_Q2_K,
     GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_0,
@@ -25,7 +34,7 @@ from ..gemm.utils import (
     TRITON_SUPPORTED_ACTIVATION_DTYPES,
 )
 
-TRITON_FUSED_MOE_STANDARD_TYPES = frozenset(
+TRITON_FUSED_MOE_SUPPORTED_TYPES = frozenset(
     {
         GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_1,
@@ -38,6 +47,15 @@ TRITON_FUSED_MOE_STANDARD_TYPES = frozenset(
         GGML_TYPE_Q4_K,
         GGML_TYPE_Q5_K,
         GGML_TYPE_Q6_K,
+        GGML_TYPE_IQ1_M,
+        GGML_TYPE_IQ1_S,
+        GGML_TYPE_IQ2_S,
+        GGML_TYPE_IQ2_XXS,
+        GGML_TYPE_IQ2_XS,
+        GGML_TYPE_IQ3_S,
+        GGML_TYPE_IQ3_XXS,
+        GGML_TYPE_IQ4_NL,
+        GGML_TYPE_IQ4_XS,
     }
 )
 
@@ -116,7 +134,7 @@ def _validate_args(
     tokens: int,
     quant_type: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
-    if quant_type not in TRITON_FUSED_MOE_STANDARD_TYPES:
+    if quant_type not in TRITON_FUSED_MOE_SUPPORTED_TYPES:
         raise ValueError(f"Unsupported Triton fused MoE quant type: {quant_type}")
     if not all(
         t.is_cuda for t in (W, X, sorted_token_ids, expert_ids, num_tokens_post_padded)

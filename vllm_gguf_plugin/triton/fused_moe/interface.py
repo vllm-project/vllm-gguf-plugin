@@ -3,6 +3,15 @@
 import torch
 
 from ..gemm.utils import (
+    GGML_TYPE_IQ1_M,
+    GGML_TYPE_IQ1_S,
+    GGML_TYPE_IQ2_S,
+    GGML_TYPE_IQ2_XXS,
+    GGML_TYPE_IQ2_XS,
+    GGML_TYPE_IQ3_S,
+    GGML_TYPE_IQ3_XXS,
+    GGML_TYPE_IQ4_NL,
+    GGML_TYPE_IQ4_XS,
     GGML_TYPE_Q2_K,
     GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_0,
@@ -30,9 +39,29 @@ from .standard_quant import (
     ggml_moe_q8_0_triton,
     ggml_moe_q8_1_triton,
 )
+from .iq_quant import (
+    ggml_moe_iq1_m_triton,
+    ggml_moe_iq1_s_triton,
+    ggml_moe_iq2_s_triton,
+    ggml_moe_iq2_xxs_triton,
+    ggml_moe_iq2_xs_triton,
+    ggml_moe_iq3_s_triton,
+    ggml_moe_iq3_xxs_triton,
+    ggml_moe_iq4_nl_triton,
+    ggml_moe_iq4_xs_triton,
+)
 
 TRITON_MOE_SUPPORTED_TYPES = frozenset(
     {
+        GGML_TYPE_IQ1_M,
+        GGML_TYPE_IQ1_S,
+        GGML_TYPE_IQ2_S,
+        GGML_TYPE_IQ2_XXS,
+        GGML_TYPE_IQ2_XS,
+        GGML_TYPE_IQ3_S,
+        GGML_TYPE_IQ3_XXS,
+        GGML_TYPE_IQ4_NL,
+        GGML_TYPE_IQ4_XS,
         GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_1,
         GGML_TYPE_Q5_0,
@@ -48,6 +77,15 @@ TRITON_MOE_SUPPORTED_TYPES = frozenset(
 )
 
 TRITON_MOE_DISPATCH = {
+    GGML_TYPE_IQ1_M: ggml_moe_iq1_m_triton,
+    GGML_TYPE_IQ1_S: ggml_moe_iq1_s_triton,
+    GGML_TYPE_IQ2_S: ggml_moe_iq2_s_triton,
+    GGML_TYPE_IQ2_XXS: ggml_moe_iq2_xxs_triton,
+    GGML_TYPE_IQ2_XS: ggml_moe_iq2_xs_triton,
+    GGML_TYPE_IQ3_S: ggml_moe_iq3_s_triton,
+    GGML_TYPE_IQ3_XXS: ggml_moe_iq3_xxs_triton,
+    GGML_TYPE_IQ4_NL: ggml_moe_iq4_nl_triton,
+    GGML_TYPE_IQ4_XS: ggml_moe_iq4_xs_triton,
     GGML_TYPE_Q4_0: ggml_moe_q4_0_triton,
     GGML_TYPE_Q4_1: ggml_moe_q4_1_triton,
     GGML_TYPE_Q5_0: ggml_moe_q5_0_triton,
