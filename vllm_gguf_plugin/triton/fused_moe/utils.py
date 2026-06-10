@@ -183,7 +183,8 @@ def _validate_args(
     hidden_size = num_k_blocks * BLOCK_QK_BY_TYPE[quant_type]
     if X.shape[1] != hidden_size:
         raise ValueError(
-            f"X hidden size {X.shape[1]} does not match quantized expert width {hidden_size}"
+            f"X hidden size {X.shape[1]} does not match "
+            f"quantized expert width {hidden_size}"
         )
 
     padded_count = int(num_tokens_post_padded.item())

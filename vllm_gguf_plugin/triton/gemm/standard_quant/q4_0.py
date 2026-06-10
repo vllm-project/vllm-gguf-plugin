@@ -116,14 +116,16 @@ def ggml_gemm_q4_0_triton(
         )
     if W.shape[1] % Q4_0_BLOCK_BYTES != 0:
         raise ValueError(
-            f"Invalid Q4_0 row width {W.shape[1]}: must be divisible by {Q4_0_BLOCK_BYTES}"
+            f"Invalid Q4_0 row width {W.shape[1]}: "
+            f"must be divisible by {Q4_0_BLOCK_BYTES}"
         )
 
     num_k_blocks = W.shape[1] // Q4_0_BLOCK_BYTES
     hidden_size = num_k_blocks * Q4_0_BLOCK_SIZE
     if X.shape[-1] != hidden_size:
         raise ValueError(
-            f"X hidden size {X.shape[-1]} does not match Q4_0 weight width {hidden_size}"
+            f"X hidden size {X.shape[-1]} does not match "
+            f"Q4_0 weight width {hidden_size}"
         )
 
     W = W.contiguous()
