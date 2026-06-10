@@ -43,7 +43,6 @@ def q4_0_moe_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K_BLOCKS: tl.constexpr,
-    EVEN_N: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
@@ -56,6 +55,7 @@ def q4_0_moe_kernel(
         return
 
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_mask = offs_n < n
     offs_kb = tl.arange(0, BLOCK_K_BLOCKS)
     offs_byte = tl.arange(0, 16)
 
@@ -82,11 +82,7 @@ def q4_0_moe_kernel(
         x_dtype = x_tile.dtype
 
         scale_ptrs = w_block_row_ptrs + cur_kb[None, :] * 18
-        if EVEN_N:
-            scale_mask = kb_mask[None, :]
-        else:
-            n_mask = offs_n < n
-            scale_mask = n_mask[:, None] & kb_mask[None, :]
+        scale_mask = n_mask[:, None] & kb_mask[None, :]
         scale_lo = tl.load(scale_ptrs + 0, mask=scale_mask, other=0)
         scale_hi = tl.load(scale_ptrs + 1, mask=scale_mask, other=0)
         scale_bits = scale_lo.to(tl.uint16) | (scale_hi.to(tl.uint16) << 8)
@@ -98,10 +94,7 @@ def q4_0_moe_kernel(
             + 2
             + offs_byte[None, None, :]
         )
-        if EVEN_N:
-            packed_mask = kb_mask[None, :, None]
-        else:
-            packed_mask = n_mask[:, None, None] & kb_mask[None, :, None]
+        packed_mask = n_mask[:, None, None] & kb_mask[None, :, None]
         packed = tl.load(packed_ptrs, mask=packed_mask, other=0)
 
         low = ((packed & 0x0F).to(x_dtype) - 8.0) * scales[:, :, None]
@@ -110,11 +103,7 @@ def q4_0_moe_kernel(
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
     y_ptrs = y_ptr + offs_output[:, None] * stride_ym + offs_n[None, :] * stride_yn
-    if EVEN_N:
-        y_mask = token_mask[:, None]
-    else:
-        n_mask = offs_n < n
-        y_mask = token_mask[:, None] & n_mask[None, :]
+    y_mask = token_mask[:, None] & n_mask[None, :]
     tl.store(y_ptrs, acc, mask=y_mask)
 
 
@@ -139,7 +128,6 @@ def ggml_moe_q4_0_triton(
         top_k,
         tokens,
         GGML_TYPE_Q4_0,
-        extra_meta={"EVEN_N": row % Q4_0_MOE_BLOCK_N == 0},
         block_n=Q4_0_MOE_BLOCK_N,
         block_k_blocks=Q4_0_MOE_BLOCK_K_BLOCKS,
         num_warps=Q4_0_MOE_NUM_WARPS,

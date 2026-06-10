@@ -221,7 +221,6 @@ def run_triton_fused_moe_kernel(
     tokens: int,
     quant_type: int,
     extra_args: tuple = (),
-    extra_meta: dict | None = None,
     block_n: int = TRITON_FUSED_MOE_BLOCK_N,
     block_k_blocks: int = TRITON_FUSED_MOE_BLOCK_K_BLOCKS,
     num_warps: int = TRITON_NUM_WARPS,
@@ -247,7 +246,7 @@ def run_triton_fused_moe_kernel(
         quant_type,
     )
 
-    out = torch.empty((num_valid_tokens, row), device=X.device, dtype=X.dtype)
+    out = torch.zeros((num_valid_tokens, row), device=X.device, dtype=X.dtype)
 
     # Use expert_ids.shape[0] (CPU-known) for grid sizing instead of
     # num_tokens_post_padded.item() to avoid GPU→CPU sync during CUDA graph
@@ -257,15 +256,6 @@ def run_triton_fused_moe_kernel(
         expert_ids.shape[0],
         triton.cdiv(row, block_n),
     )
-    meta = {
-        "BLOCK_M": TRITON_FUSED_MOE_BLOCK_M,
-        "BLOCK_N": block_n,
-        "BLOCK_K_BLOCKS": block_k_blocks,
-        "num_warps": num_warps,
-        "num_stages": num_stages,
-    }
-    if extra_meta is not None:
-        meta.update(extra_meta)
     kernel[grid](
         X,
         W,
@@ -285,6 +275,10 @@ def run_triton_fused_moe_kernel(
         out.stride(0),
         out.stride(1),
         *extra_args,
-        **meta,
+        BLOCK_M=TRITON_FUSED_MOE_BLOCK_M,
+        BLOCK_N=block_n,
+        BLOCK_K_BLOCKS=block_k_blocks,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return out
