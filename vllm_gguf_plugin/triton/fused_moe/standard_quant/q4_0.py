@@ -13,7 +13,6 @@ from ..utils import (
     load_moe_token_info,
     load_moe_x_tile,
     run_triton_fused_moe_kernel,
-    store_moe_output,
 )
 
 
@@ -36,9 +35,6 @@ def q4_0_moe_kernel(
     stride_wk,
     stride_ym,
     stride_yn,
-    topk_weights_ptr,
-    routed_top_k,
-    FUSED_WEIGHTED_SUM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K_BLOCKS: tl.constexpr,
@@ -54,7 +50,6 @@ def q4_0_moe_kernel(
         return
 
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    n_mask = offs_n < n
     offs_kb = tl.arange(0, BLOCK_K_BLOCKS)
     offs_byte = tl.arange(0, 16)
 
@@ -81,7 +76,7 @@ def q4_0_moe_kernel(
         x_dtype = x_tile.dtype
 
         scale_ptrs = w_block_row_ptrs + cur_kb[None, :] * 18
-        scale_mask = n_mask[:, None] & kb_mask[None, :]
+        scale_mask = (offs_n[:, None] < n) & kb_mask[None, :]
         scale_lo = tl.load(scale_ptrs + 0, mask=scale_mask, other=0)
         scale_hi = tl.load(scale_ptrs + 1, mask=scale_mask, other=0)
         scale_bits = scale_lo.to(tl.uint16) | (scale_hi.to(tl.uint16) << 8)
@@ -93,7 +88,7 @@ def q4_0_moe_kernel(
             + 2
             + offs_byte[None, None, :]
         )
-        packed_mask = n_mask[:, None, None] & kb_mask[None, :, None]
+        packed_mask = (offs_n[:, None, None] < n) & kb_mask[None, :, None]
         packed = tl.load(packed_ptrs, mask=packed_mask, other=0)
 
         low = ((packed & 0x0F).to(x_dtype) - 8.0) * scales[:, :, None]
@@ -101,19 +96,9 @@ def q4_0_moe_kernel(
         q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
-    store_moe_output(
-        y_ptr,
-        topk_weights_ptr,
-        acc,
-        offs_output,
-        token_mask,
-        offs_n,
-        n_mask,
-        stride_ym,
-        stride_yn,
-        routed_top_k,
-        FUSED_WEIGHTED_SUM=FUSED_WEIGHTED_SUM,
-    )
+    y_ptrs = y_ptr + offs_output[:, None] * stride_ym + offs_n[None, :] * stride_yn
+    y_mask = token_mask[:, None] & (offs_n[None, :] < n)
+    tl.store(y_ptrs, acc, mask=y_mask)
 
 
 def ggml_moe_q4_0_triton(
@@ -125,9 +110,6 @@ def ggml_moe_q4_0_triton(
     row: int,
     top_k: int,
     tokens: int,
-    topk_weights: torch.Tensor | None = None,
-    routed_top_k: int = 1,
-    fused_weighted_sum: bool = False,
 ) -> torch.Tensor:
     return run_triton_fused_moe_kernel(
         q4_0_moe_kernel,
@@ -140,7 +122,4 @@ def ggml_moe_q4_0_triton(
         top_k,
         tokens,
         GGML_TYPE_Q4_0,
-        topk_weights=topk_weights,
-        routed_top_k=routed_top_k,
-        fused_weighted_sum=fused_weighted_sum,
     )

@@ -123,31 +123,3 @@ def ggml_moe_a8_triton(
         top_k,
         tokens,
     )
-
-
-def ggml_moe_a8_weighted_sum_triton(
-    X: torch.Tensor,
-    W: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
-    topk_weights: torch.Tensor,
-    quant_type: int,
-    row: int,
-    routed_top_k: int,
-) -> torch.Tensor:
-    if quant_type not in TRITON_MOE_DISPATCH:
-        raise ValueError(f"Unsupported Triton fused MoE quant type: {quant_type}")
-    return TRITON_MOE_DISPATCH[quant_type](
-        X,
-        W,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        row,
-        1,
-        X.shape[0],
-        topk_weights=topk_weights,
-        routed_top_k=routed_top_k,
-        fused_weighted_sum=True,
-    )
