@@ -4,7 +4,7 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
@@ -89,7 +89,7 @@ class GGUFConfig(QuantizationConfig):
             ):
                 return UnquantizedEmbeddingMethod()
             return GGUFEmbeddingMethod(self)
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             return GGUFMoEMethod(self, layer.moe_config)
         return None
 
