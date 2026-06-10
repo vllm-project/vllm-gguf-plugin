@@ -2,8 +2,14 @@ import torch
 import triton
 import triton.language as tl
 
+from ..utils import (
+    GGML_TYPE_IQ4_XS,
+    load_f16_from_u8,
+    load_u16_from_u8,
+    load_x_chunk,
+    run_triton_kernel,
+)
 from .iq_tables import get_iq_table_tensors
-from ..utils import GGML_TYPE_IQ4_XS, load_f16_from_u8, load_u16_from_u8, load_x_chunk, run_triton_kernel
 
 
 @triton.jit
@@ -64,8 +70,16 @@ def iq4_xs_gemm_kernel(
             )
             x_dtype = x1.dtype
             d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
-            scales_l = tl.load(block_ptrs + 4 + (ib // 2), mask=n_mask, other=0).to(tl.int32)
-            scale = ((((scales_l >> (4 * (ib % 2))) & 0x0F) | (((scales_h.to(tl.int32) >> (2 * ib)) & 0x03) << 4)).to(tl.int16) - 32).to(x_dtype)
+            scales_l = tl.load(block_ptrs + 4 + (ib // 2), mask=n_mask, other=0).to(
+                tl.int32
+            )
+            scale = (
+                (
+                    ((scales_l >> (4 * (ib % 2))) & 0x0F)
+                    | (((scales_h.to(tl.int32) >> (2 * ib)) & 0x03) << 4)
+                ).to(tl.int16)
+                - 32
+            ).to(x_dtype)
             low = tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(x_dtype)
             high = tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(x_dtype)
             dscale = (d * scale).to(x_dtype)

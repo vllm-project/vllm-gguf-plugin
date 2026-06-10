@@ -7,11 +7,7 @@ import triton
 import triton.language as tl
 
 from ...gemm.utils import (
-    GGML_TYPE_Q2_K,
-    GGML_TYPE_Q3_K,
-    GGML_TYPE_Q4_K,
     GGML_TYPE_Q5_K,
-    GGML_TYPE_Q6_K,
     load_f16_from_u8,
 )
 from ..utils import (
@@ -63,7 +59,9 @@ def q5_k_moe_kernel(
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 176
         scales_ptr = block_ptrs + 4
-        qh = tl.load(block_ptrs[:, None] + 16 + offs_q[None, :], mask=n_mask[:, None], other=0)
+        qh = tl.load(
+            block_ptrs[:, None] + 16 + offs_q[None, :], mask=n_mask[:, None], other=0
+        )
 
         for chunk in range(8):
             group = chunk // 2
@@ -97,7 +95,9 @@ def q5_k_moe_kernel(
                 other=0,
             )
             q = (q & 0x0F) if part == 0 else (q >> 4)
-            q = q.to(x_dtype) + 16.0 * ((qh & (1 << (2 * group + part))) != 0).to(x_dtype)
+            q = q.to(x_dtype) + 16.0 * ((qh & (1 << (2 * group + part))) != 0).to(
+                x_dtype
+            )
             q_tile = q * (scale_q.to(x_dtype)[:, None] * dall[:, None])
             q_tile = q_tile - min_q.to(x_dtype)[:, None] * dmin[:, None]
             acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
@@ -118,5 +118,14 @@ def ggml_moe_q5_k_triton(
     tokens: int,
 ) -> torch.Tensor:
     return run_triton_fused_moe_kernel(
-        q5_k_moe_kernel, W, X, sorted_token_ids, expert_ids, num_tokens_post_padded, row, top_k, tokens, GGML_TYPE_Q5_K
+        q5_k_moe_kernel,
+        W,
+        X,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        row,
+        top_k,
+        tokens,
+        GGML_TYPE_Q5_K,
     )

@@ -7,14 +7,8 @@ import triton
 import triton.language as tl
 
 from ...gemm.utils import (
-    GGML_TYPE_Q4_0,
-    GGML_TYPE_Q4_1,
-    GGML_TYPE_Q5_0,
-    GGML_TYPE_Q5_1,
-    GGML_TYPE_Q8_0,
     GGML_TYPE_Q8_1,
     load_f16_from_u8,
-    load_u32_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
@@ -115,5 +109,14 @@ def ggml_moe_q8_1_triton(
     tokens: int,
 ) -> torch.Tensor:
     return run_triton_fused_moe_kernel(
-        q8_1_moe_kernel, W, X, sorted_token_ids, expert_ids, num_tokens_post_padded, row, top_k, tokens, GGML_TYPE_Q8_1
+        q8_1_moe_kernel,
+        W,
+        X,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        row,
+        top_k,
+        tokens,
+        GGML_TYPE_Q8_1,
     )

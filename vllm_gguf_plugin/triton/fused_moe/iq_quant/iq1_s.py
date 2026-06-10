@@ -8,23 +8,13 @@ import triton.language as tl
 
 from ...gemm.iq_quant.iq_tables import get_iq_table_tensors
 from ...gemm.utils import (
-    GGML_TYPE_IQ1_M,
     GGML_TYPE_IQ1_S,
-    GGML_TYPE_IQ2_S,
-    GGML_TYPE_IQ2_XXS,
-    GGML_TYPE_IQ2_XS,
-    GGML_TYPE_IQ3_S,
-    GGML_TYPE_IQ3_XXS,
-    GGML_TYPE_IQ4_NL,
-    GGML_TYPE_IQ4_XS,
     load_f16_from_u8,
     load_u16_from_u8,
-    load_u32_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
     load_moe_x_chunk,
-    load_moe_x_tile,
     run_triton_fused_moe_kernel,
 )
 
@@ -76,7 +66,9 @@ def iq1_s_moe_kernel(
             qh = load_u16_from_u8(block_ptrs + 34 + 2 * ib, n_mask)
             delta_num = tl.where((qh & 0x8000) != 0, -9, -7).to(tl.int16)
             for il in range(4):
-                idx = tl.load(block_ptrs + 2 + 4 * ib + il, mask=n_mask, other=0).to(tl.int32)
+                idx = tl.load(block_ptrs + 2 + 4 * ib + il, mask=n_mask, other=0).to(
+                    tl.int32
+                )
                 idx = idx | ((((qh >> (3 * il)) & 0x7).to(tl.int32)) << 8)
                 x_tile = load_moe_x_chunk(
                     x_ptr,
@@ -89,14 +81,17 @@ def iq1_s_moe_kernel(
                 )
                 x_dtype = x_tile.dtype
                 d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
-                scale = (d * (2 * ((qh >> 12) & 0x7).to(x_dtype) + 1.0) * 0.125).to(x_dtype)
+                scale = (d * (2 * ((qh >> 12) & 0x7).to(x_dtype) + 1.0) * 0.125).to(
+                    x_dtype
+                )
                 grid = tl.load(
                     grid_ptr + idx[:, None] * 8 + offs_8[None, :],
                     mask=n_mask[:, None],
                     other=0,
                 ).to(x_dtype)
                 q_tile = (
-                    (((grid.to(tl.int16) * 8) + delta_num[:, None]).to(x_dtype)) * scale[:, None]
+                    (((grid.to(tl.int16) * 8) + delta_num[:, None]).to(x_dtype))
+                    * scale[:, None]
                 ).to(x_dtype)
                 acc += tl.sum(x_tile[:, None, :] * q_tile[None, :, :], axis=2)
 

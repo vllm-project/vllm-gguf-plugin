@@ -63,7 +63,7 @@ def q8_1_gemm_kernel(
             other=0,
         )
         q_tile = tl.reshape(
-                tl.join(
+            tl.join(
                 tl.cast(q_low, tl.int8, bitcast=True).to(x_dtype) * d[:, :, None],
                 tl.cast(q_high, tl.int8, bitcast=True).to(x_dtype) * d[:, :, None],
             ),

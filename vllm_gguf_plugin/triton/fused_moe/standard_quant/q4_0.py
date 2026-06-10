@@ -8,13 +8,6 @@ import triton.language as tl
 
 from ...gemm.utils import (
     GGML_TYPE_Q4_0,
-    GGML_TYPE_Q4_1,
-    GGML_TYPE_Q5_0,
-    GGML_TYPE_Q5_1,
-    GGML_TYPE_Q8_0,
-    GGML_TYPE_Q8_1,
-    load_f16_from_u8,
-    load_u32_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
@@ -61,7 +54,9 @@ def q4_0_moe_kernel(
     offs_byte = tl.arange(0, 16)
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    w_packed_row_ptrs = w_u8_ptr + expert * stride_we + offs_n[:, None, None] * stride_wn
+    w_packed_row_ptrs = (
+        w_u8_ptr + expert * stride_we + offs_n[:, None, None] * stride_wn
+    )
     w_block_row_ptrs = w_u8_ptr + expert * stride_we + offs_n[:, None] * stride_wn
 
     for kb_start in range(0, num_k_blocks, BLOCK_K_BLOCKS):
@@ -87,7 +82,12 @@ def q4_0_moe_kernel(
         scale_bits = scale_lo.to(tl.uint16) | (scale_hi.to(tl.uint16) << 8)
         scales = tl.cast(scale_bits, tl.float16, bitcast=True).to(x_dtype)
 
-        packed_ptrs = w_packed_row_ptrs + cur_kb[None, :, None] * 18 + 2 + offs_byte[None, None, :]
+        packed_ptrs = (
+            w_packed_row_ptrs
+            + cur_kb[None, :, None] * 18
+            + 2
+            + offs_byte[None, None, :]
+        )
         packed_mask = (offs_n[:, None, None] < n) & kb_mask[None, :, None]
         packed = tl.load(packed_ptrs, mask=packed_mask, other=0)
 
@@ -112,5 +112,14 @@ def ggml_moe_q4_0_triton(
     tokens: int,
 ) -> torch.Tensor:
     return run_triton_fused_moe_kernel(
-        q4_0_moe_kernel, W, X, sorted_token_ids, expert_ids, num_tokens_post_padded, row, top_k, tokens, GGML_TYPE_Q4_0
+        q4_0_moe_kernel,
+        W,
+        X,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        row,
+        top_k,
+        tokens,
+        GGML_TYPE_Q4_0,
     )

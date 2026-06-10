@@ -8,23 +8,12 @@ import triton.language as tl
 
 from ...gemm.iq_quant.iq_tables import get_iq_table_tensors
 from ...gemm.utils import (
-    GGML_TYPE_IQ1_M,
-    GGML_TYPE_IQ1_S,
     GGML_TYPE_IQ2_S,
-    GGML_TYPE_IQ2_XXS,
-    GGML_TYPE_IQ2_XS,
-    GGML_TYPE_IQ3_S,
-    GGML_TYPE_IQ3_XXS,
-    GGML_TYPE_IQ4_NL,
-    GGML_TYPE_IQ4_XS,
     load_f16_from_u8,
-    load_u16_from_u8,
-    load_u32_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
     load_moe_x_chunk,
-    load_moe_x_tile,
     run_triton_fused_moe_kernel,
 )
 
@@ -77,7 +66,9 @@ def iq2_s_moe_kernel(
             qh = tl.load(block_ptrs + 66 + ib, mask=n_mask, other=0).to(tl.int32)
             scale_byte = tl.load(block_ptrs + 74 + ib, mask=n_mask, other=0)
             for il in range(4):
-                grid_idx = tl.load(block_ptrs + 2 + 4 * ib + il, mask=n_mask, other=0).to(tl.int32)
+                grid_idx = tl.load(
+                    block_ptrs + 2 + 4 * ib + il, mask=n_mask, other=0
+                ).to(tl.int32)
                 grid_idx = grid_idx | ((qh << (8 - 2 * il)) & 0x300)
                 signs = tl.load(block_ptrs + 34 + 4 * ib + il, mask=n_mask, other=0)
                 x_tile = load_moe_x_chunk(
@@ -91,13 +82,17 @@ def iq2_s_moe_kernel(
                 )
                 x_dtype = x_tile.dtype
                 d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
-                scale = (((scale_byte >> (4 * (il // 2))) & 0x0F).to(x_dtype) + 0.5) * 0.25
+                scale = (
+                    ((scale_byte >> (4 * (il // 2))) & 0x0F).to(x_dtype) + 0.5
+                ) * 0.25
                 grid = tl.load(
                     grid_ptr + grid_idx[:, None] * 8 + offs_8[None, :],
                     mask=n_mask[:, None],
                     other=0,
                 ).to(x_dtype)
-                sign = tl.where((signs[:, None] & sign_mask[None, :]) != 0, -1, 1).to(x_dtype)
+                sign = tl.where((signs[:, None] & sign_mask[None, :]) != 0, -1, 1).to(
+                    x_dtype
+                )
                 q_tile = (grid * sign * (d * scale).to(x_dtype)[:, None]).to(x_dtype)
                 acc += tl.sum(x_tile[:, None, :] * q_tile[None, :, :], axis=2)
 

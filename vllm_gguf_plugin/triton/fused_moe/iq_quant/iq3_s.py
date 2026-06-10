@@ -8,23 +8,12 @@ import triton.language as tl
 
 from ...gemm.iq_quant.iq_tables import get_iq_table_tensors
 from ...gemm.utils import (
-    GGML_TYPE_IQ1_M,
-    GGML_TYPE_IQ1_S,
-    GGML_TYPE_IQ2_S,
-    GGML_TYPE_IQ2_XXS,
-    GGML_TYPE_IQ2_XS,
     GGML_TYPE_IQ3_S,
-    GGML_TYPE_IQ3_XXS,
-    GGML_TYPE_IQ4_NL,
-    GGML_TYPE_IQ4_XS,
     load_f16_from_u8,
-    load_u16_from_u8,
-    load_u32_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
     load_moe_x_chunk,
-    load_moe_x_tile,
     run_triton_fused_moe_kernel,
 )
 
@@ -80,12 +69,12 @@ def iq3_s_moe_kernel(
             for il in range(4):
                 signs = tl.load(block_ptrs + 74 + 4 * ib + il, mask=n_mask, other=0)
                 qs_base = block_ptrs + 2 + 8 * ib
-                idx1 = tl.load(qs_base + 2 * il + 0, mask=n_mask, other=0).to(tl.int32) | (
-                    (qh << (8 - 2 * il)) & 0x100
-                )
-                idx2 = tl.load(qs_base + 2 * il + 1, mask=n_mask, other=0).to(tl.int32) | (
-                    (qh << (7 - 2 * il)) & 0x100
-                )
+                idx1 = tl.load(qs_base + 2 * il + 0, mask=n_mask, other=0).to(
+                    tl.int32
+                ) | ((qh << (8 - 2 * il)) & 0x100)
+                idx2 = tl.load(qs_base + 2 * il + 1, mask=n_mask, other=0).to(
+                    tl.int32
+                ) | ((qh << (7 - 2 * il)) & 0x100)
                 x1 = load_moe_x_chunk(
                     x_ptr,
                     stride_xm,
@@ -121,12 +110,16 @@ def iq3_s_moe_kernel(
                 ).to(x_dtype)
                 q1 = (
                     grid1
-                    * tl.where((signs[:, None] & sign_mask_lo[None, :]) != 0, -1, 1).to(x_dtype)
+                    * tl.where((signs[:, None] & sign_mask_lo[None, :]) != 0, -1, 1).to(
+                        x_dtype
+                    )
                     * dscale[:, None]
                 ).to(x_dtype)
                 q2 = (
                     grid2
-                    * tl.where((signs[:, None] & sign_mask_hi[None, :]) != 0, -1, 1).to(x_dtype)
+                    * tl.where((signs[:, None] & sign_mask_hi[None, :]) != 0, -1, 1).to(
+                        x_dtype
+                    )
                     * dscale[:, None]
                 ).to(x_dtype)
                 acc += tl.sum(x1[:, None, :] * q1[None, :, :], axis=2)

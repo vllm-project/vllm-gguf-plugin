@@ -3,8 +3,8 @@ import torch
 from .iq_quant.iq1_m import ggml_gemm_iq1_m_triton
 from .iq_quant.iq1_s import ggml_gemm_iq1_s_triton
 from .iq_quant.iq2_s import ggml_gemm_iq2_s_triton
-from .iq_quant.iq2_xxs import ggml_gemm_iq2_xxs_triton
 from .iq_quant.iq2_xs import ggml_gemm_iq2_xs_triton
+from .iq_quant.iq2_xxs import ggml_gemm_iq2_xxs_triton
 from .iq_quant.iq3_s import ggml_gemm_iq3_s_triton
 from .iq_quant.iq3_xxs import ggml_gemm_iq3_xxs_triton
 from .iq_quant.iq4_nl import ggml_gemm_iq4_nl_triton
@@ -24,8 +24,8 @@ from .utils import (
     GGML_TYPE_IQ1_M,
     GGML_TYPE_IQ1_S,
     GGML_TYPE_IQ2_S,
-    GGML_TYPE_IQ2_XXS,
     GGML_TYPE_IQ2_XS,
+    GGML_TYPE_IQ2_XXS,
     GGML_TYPE_IQ3_S,
     GGML_TYPE_IQ3_XXS,
     GGML_TYPE_IQ4_NL,
@@ -44,7 +44,9 @@ from .utils import (
 )
 
 
-def ggml_mul_mat_a8_triton(W: torch.Tensor, X: torch.Tensor, quant_type: int, row: int) -> torch.Tensor:
+def ggml_mul_mat_a8_triton(
+    W: torch.Tensor, X: torch.Tensor, quant_type: int, row: int
+) -> torch.Tensor:
     kernel = {
         GGML_TYPE_IQ1_M: ggml_gemm_iq1_m_triton,
         GGML_TYPE_IQ1_S: ggml_gemm_iq1_s_triton,

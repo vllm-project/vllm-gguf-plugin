@@ -9,22 +9,11 @@ import triton.language as tl
 from ...gemm.iq_quant.iq_tables import get_iq_table_tensors
 from ...gemm.utils import (
     GGML_TYPE_IQ1_M,
-    GGML_TYPE_IQ1_S,
-    GGML_TYPE_IQ2_S,
-    GGML_TYPE_IQ2_XXS,
-    GGML_TYPE_IQ2_XS,
-    GGML_TYPE_IQ3_S,
-    GGML_TYPE_IQ3_XXS,
-    GGML_TYPE_IQ4_NL,
-    GGML_TYPE_IQ4_XS,
-    load_f16_from_u8,
     load_u16_from_u8,
-    load_u32_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
     load_moe_x_chunk,
-    load_moe_x_tile,
     run_triton_fused_moe_kernel,
 )
 
@@ -75,15 +64,31 @@ def iq1_m_moe_kernel(
         sc1 = load_u16_from_u8(block_ptrs + 48 + 2, n_mask)
         sc2 = load_u16_from_u8(block_ptrs + 48 + 4, n_mask)
         sc3 = load_u16_from_u8(block_ptrs + 48 + 6, n_mask)
-        base_bits = (sc0 >> 12) | ((sc1 >> 8) & 0x00F0) | ((sc2 >> 4) & 0x0F00) | (sc3 & 0xF000)
+        base_bits = (
+            (sc0 >> 12) | ((sc1 >> 8) & 0x00F0) | ((sc2 >> 4) & 0x0F00) | (sc3 & 0xF000)
+        )
         for ib in range(8):
             for il in range(4):
-                qh = tl.load(block_ptrs + 32 + 2 * ib + (il // 2), mask=n_mask, other=0).to(tl.int32)
-                idx = tl.load(block_ptrs + 4 * ib + il, mask=n_mask, other=0).to(tl.int32)
+                qh = tl.load(
+                    block_ptrs + 32 + 2 * ib + (il // 2), mask=n_mask, other=0
+                ).to(tl.int32)
+                idx = tl.load(block_ptrs + 4 * ib + il, mask=n_mask, other=0).to(
+                    tl.int32
+                )
                 idx = idx | (((qh >> (4 * (il % 2))) & 0x07) << 8)
-                delta_num = tl.where((qh & (0x08 << (4 * (il % 2)))) != 0, -9, -7).to(tl.int16)
+                delta_num = tl.where((qh & (0x08 << (4 * (il % 2)))) != 0, -9, -7).to(
+                    tl.int16
+                )
                 ib16 = 2 * ib + (il // 2)
-                sc_sel = sc0 if ib16 // 4 == 0 else sc1 if ib16 // 4 == 1 else sc2 if ib16 // 4 == 2 else sc3
+                sc_sel = (
+                    sc0
+                    if ib16 // 4 == 0
+                    else sc1
+                    if ib16 // 4 == 1
+                    else sc2
+                    if ib16 // 4 == 2
+                    else sc3
+                )
                 x_tile = load_moe_x_chunk(
                     x_ptr,
                     stride_xm,
@@ -94,9 +99,13 @@ def iq1_m_moe_kernel(
                     CHUNK=8,
                 )
                 x_dtype = x_tile.dtype
-                base = tl.cast(base_bits.to(tl.uint16), tl.float16, bitcast=True).to(x_dtype)
+                base = tl.cast(base_bits.to(tl.uint16), tl.float16, bitcast=True).to(
+                    x_dtype
+                )
                 scale = (
-                    base * (2 * (((sc_sel >> (3 * (ib16 % 4))) & 0x07).to(x_dtype)) + 1.0) * 0.125
+                    base
+                    * (2 * (((sc_sel >> (3 * (ib16 % 4))) & 0x07).to(x_dtype)) + 1.0)
+                    * 0.125
                 ).to(x_dtype)
                 grid = tl.load(
                     grid_ptr + idx[:, None] * 8 + offs_8[None, :],
@@ -104,7 +113,8 @@ def iq1_m_moe_kernel(
                     other=0,
                 ).to(x_dtype)
                 q_tile = (
-                    (((grid.to(tl.int16) * 8) + delta_num[:, None]).to(x_dtype)) * scale[:, None]
+                    (((grid.to(tl.int16) * 8) + delta_num[:, None]).to(x_dtype))
+                    * scale[:, None]
                 ).to(x_dtype)
                 acc += tl.sum(x_tile[:, None, :] * q_tile[None, :, :], axis=2)
 

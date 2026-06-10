@@ -2,7 +2,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 GGML_TYPE_Q4_0 = 2
 GGML_TYPE_Q4_1 = 3
 GGML_TYPE_Q5_0 = 6
@@ -160,7 +159,11 @@ def load_x_tile(
         mask=(offs_m[:, None, None] < m) & kb_mask[None, :, None],
         other=0.0,
     )
-    return tl.reshape(tl.join(x_even, x_odd), (BLOCK_M, BLOCK_K_BLOCKS * 32)), cur_kb, kb_mask
+    return (
+        tl.reshape(tl.join(x_even, x_odd), (BLOCK_M, BLOCK_K_BLOCKS * 32)),
+        cur_kb,
+        kb_mask,
+    )
 
 
 @triton.jit
@@ -236,7 +239,9 @@ def _validate_args(
     if X.dim() not in (2, 3):
         raise ValueError(f"X must be 2D or 3D, got {X.dim()}D")
     if row != W.shape[0]:
-        raise ValueError(f"row must match W.shape[0], got row={row}, W.shape[0]={W.shape[0]}")
+        raise ValueError(
+            f"row must match W.shape[0], got row={row}, W.shape[0]={W.shape[0]}"
+        )
 
     block_bytes = BLOCK_BYTES_BY_TYPE[quant_type]
     if W.shape[1] % block_bytes != 0:
@@ -252,7 +257,12 @@ def _validate_args(
             f"X hidden size {X.shape[-1]} does not match quantized weight width {hidden_size}"
         )
 
-    return W.contiguous(), X.reshape(-1, hidden_size).contiguous(), X.shape, num_k_blocks
+    return (
+        W.contiguous(),
+        X.reshape(-1, hidden_size).contiguous(),
+        X.shape,
+        num_k_blocks,
+    )
 
 
 def run_triton_kernel(

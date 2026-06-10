@@ -58,8 +58,12 @@ def q2_k_gemm_kernel(
                 mask=n_mask[:, None],
                 other=0,
             )
-            scale0 = tl.load(block_ptrs + (8 * group + 2 * part + 0), mask=n_mask, other=0)
-            scale1 = tl.load(block_ptrs + (8 * group + 2 * part + 1), mask=n_mask, other=0)
+            scale0 = tl.load(
+                block_ptrs + (8 * group + 2 * part + 0), mask=n_mask, other=0
+            )
+            scale1 = tl.load(
+                block_ptrs + (8 * group + 2 * part + 1), mask=n_mask, other=0
+            )
             scale_byte = tl.where(use_hi[None, :], scale1[:, None], scale0[:, None])
 
             scale = (scale_byte & 0x0F).to(x_dtype) * d[:, None]

@@ -8,10 +8,6 @@ import triton.language as tl
 
 from ...gemm.utils import (
     GGML_TYPE_Q2_K,
-    GGML_TYPE_Q3_K,
-    GGML_TYPE_Q4_K,
-    GGML_TYPE_Q5_K,
-    GGML_TYPE_Q6_K,
     load_f16_from_u8,
 )
 from ..utils import (
@@ -84,8 +80,12 @@ def q2_k_moe_kernel(
                 mask=n_mask[:, None],
                 other=0,
             )
-            scale0 = tl.load(block_ptrs + (8 * group + 2 * part + 0), mask=n_mask, other=0)
-            scale1 = tl.load(block_ptrs + (8 * group + 2 * part + 1), mask=n_mask, other=0)
+            scale0 = tl.load(
+                block_ptrs + (8 * group + 2 * part + 0), mask=n_mask, other=0
+            )
+            scale1 = tl.load(
+                block_ptrs + (8 * group + 2 * part + 1), mask=n_mask, other=0
+            )
             scale_byte = tl.where(use_hi[None, :], scale1[:, None], scale0[:, None])
             scale = (scale_byte & 0x0F).to(x_dtype) * d[:, None]
             minv = (scale_byte >> 4).to(x_dtype) * dmin[:, None]
@@ -108,5 +108,14 @@ def ggml_moe_q2_k_triton(
     tokens: int,
 ) -> torch.Tensor:
     return run_triton_fused_moe_kernel(
-        q2_k_moe_kernel, W, X, sorted_token_ids, expert_ids, num_tokens_post_padded, row, top_k, tokens, GGML_TYPE_Q2_K
+        q2_k_moe_kernel,
+        W,
+        X,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        row,
+        top_k,
+        tokens,
+        GGML_TYPE_Q2_K,
     )

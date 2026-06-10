@@ -8,23 +8,13 @@ import triton.language as tl
 
 from ...gemm.iq_quant.iq_tables import get_iq_table_tensors
 from ...gemm.utils import (
-    GGML_TYPE_IQ1_M,
-    GGML_TYPE_IQ1_S,
-    GGML_TYPE_IQ2_S,
-    GGML_TYPE_IQ2_XXS,
-    GGML_TYPE_IQ2_XS,
-    GGML_TYPE_IQ3_S,
-    GGML_TYPE_IQ3_XXS,
-    GGML_TYPE_IQ4_NL,
     GGML_TYPE_IQ4_XS,
     load_f16_from_u8,
     load_u16_from_u8,
-    load_u32_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
     load_moe_x_chunk,
-    load_moe_x_tile,
     run_triton_fused_moe_kernel,
 )
 
@@ -99,13 +89,12 @@ def iq4_xs_moe_kernel(
             )
             x_dtype = x1.dtype
             d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
-            scales_l = tl.load(block_ptrs + 4 + (ib // 2), mask=n_mask, other=0).to(tl.int32)
+            scales_l = tl.load(block_ptrs + 4 + (ib // 2), mask=n_mask, other=0).to(
+                tl.int32
+            )
             scale = (
                 (
-                    (
-                        (scales_l >> (4 * (ib % 2)))
-                        & 0x0F
-                    )
+                    ((scales_l >> (4 * (ib % 2))) & 0x0F)
                     | (((scales_h.to(tl.int32) >> (2 * ib)) & 0x03) << 4)
                 ).to(tl.int16)
                 - 32

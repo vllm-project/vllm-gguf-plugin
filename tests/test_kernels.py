@@ -1,12 +1,11 @@
 import pytest
 import torch
 from gguf import GGMLQuantizationType, dequantize
-
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
 )
-from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
 import vllm_gguf_plugin.ops as ops
@@ -14,8 +13,7 @@ from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
 from vllm_gguf_plugin.triton.fused_moe import ggml_moe_a8_triton
 from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton
 
-from .utils import seed_everything, get_gguf_sample_tensors, get_gguf_moe_tensors
-
+from .utils import get_gguf_moe_tensors, get_gguf_sample_tensors, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float32]
 # Hidden_size for testing, must match the sample file in HF repo,
@@ -72,6 +70,8 @@ def _silu_and_mul(inp: torch.Tensor) -> torch.Tensor:
     out = torch.empty(inp.shape[:-1] + (d,), dtype=inp.dtype, device=inp.device)
     apply_moe_activation(MoEActivation.SILU, out, inp)
     return out
+
+
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_type", QUANT_TYPES)
@@ -88,7 +88,10 @@ def test_dequantize(
             dequantize(tensor.data, quant_type), device="cuda"
         ).to(dtype)
         output = ops.ggml_dequantize(
-            torch.tensor(tensor.data, device="cuda"), quant_type, *list(shape), dtype=dtype
+            torch.tensor(tensor.data, device="cuda"),
+            quant_type,
+            *list(shape),
+            dtype=dtype,
         )
 
         torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=4e-2)
@@ -207,7 +210,9 @@ def test_mmq_triton_dispatch(
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     x = torch.rand((num_tokens, hidden_size), dtype=dtype, device="cuda")
     for tensor in tensors:
-        weight = torch.tensor(dequantize(tensor.data, quant_type), device="cuda").to(dtype)
+        weight = torch.tensor(dequantize(tensor.data, quant_type), device="cuda").to(
+            dtype
+        )
         ref_output = x @ weight.T
 
         qweight = torch.tensor(tensor.data, device="cuda")
@@ -354,7 +359,9 @@ def test_moe_triton(
     w13, w2 = get_gguf_moe_tensors(hidden_size, quant_type)
     w13_q = torch.tensor(w13.data, device="cuda")
     w2_q = torch.tensor(w2.data, device="cuda")
-    w13_dequant = torch.tensor(dequantize(w13.data, quant_type), device="cuda").to(dtype)
+    w13_dequant = torch.tensor(dequantize(w13.data, quant_type), device="cuda").to(
+        dtype
+    )
     w2_dequant = torch.tensor(dequantize(w2.data, quant_type), device="cuda").to(dtype)
 
     block_size = ops.ggml_moe_get_block_size(quant_type)

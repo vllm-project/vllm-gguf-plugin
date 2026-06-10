@@ -8,23 +8,13 @@ import triton.language as tl
 
 from ...gemm.iq_quant.iq_tables import get_iq_table_tensors
 from ...gemm.utils import (
-    GGML_TYPE_IQ1_M,
-    GGML_TYPE_IQ1_S,
-    GGML_TYPE_IQ2_S,
     GGML_TYPE_IQ2_XXS,
-    GGML_TYPE_IQ2_XS,
-    GGML_TYPE_IQ3_S,
-    GGML_TYPE_IQ3_XXS,
-    GGML_TYPE_IQ4_NL,
-    GGML_TYPE_IQ4_XS,
     load_f16_from_u8,
-    load_u16_from_u8,
     load_u32_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
     load_moe_x_chunk,
-    load_moe_x_tile,
     run_triton_fused_moe_kernel,
 )
 
@@ -81,7 +71,9 @@ def iq2_xxs_moe_kernel(
             dscale = (d * ((aux32 >> 28).to(tl.float32) + 0.5) * 0.25).to(tl.float32)
             for il in range(4):
                 grid_idx = tl.load(q2_base + il, mask=n_mask, other=0).to(tl.int32)
-                signs = tl.load(sign_ptr + ((aux32 >> (7 * il)) & 127), mask=n_mask, other=0)
+                signs = tl.load(
+                    sign_ptr + ((aux32 >> (7 * il)) & 127), mask=n_mask, other=0
+                )
                 x_tile = load_moe_x_chunk(
                     x_ptr,
                     stride_xm,
@@ -97,7 +89,9 @@ def iq2_xxs_moe_kernel(
                     mask=n_mask[:, None],
                     other=0,
                 ).to(x_dtype)
-                sign = tl.where((signs[:, None] & sign_mask[None, :]) != 0, -1, 1).to(x_dtype)
+                sign = tl.where((signs[:, None] & sign_mask[None, :]) != 0, -1, 1).to(
+                    x_dtype
+                )
                 q_tile = (grid * sign * dscale.to(x_dtype)[:, None]).to(x_dtype)
                 acc += tl.sum(x_tile[:, None, :] * q_tile[None, :, :], axis=2)
 

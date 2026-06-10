@@ -2,8 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
-from .iq_tables import get_iq_table_tensors
 from ..utils import GGML_TYPE_IQ3_S, load_f16_from_u8, load_x_chunk, run_triton_kernel
+from .iq_tables import get_iq_table_tensors
 
 
 @triton.jit
@@ -45,8 +45,12 @@ def iq3_s_gemm_kernel(
             for il in range(4):
                 signs = tl.load(block_ptrs + 74 + 4 * ib + il, mask=n_mask, other=0)
                 qs_base = block_ptrs + 2 + 8 * ib
-                idx1 = tl.load(qs_base + 2 * il + 0, mask=n_mask, other=0).to(tl.int32) | ((qh << (8 - 2 * il)) & 0x100)
-                idx2 = tl.load(qs_base + 2 * il + 1, mask=n_mask, other=0).to(tl.int32) | ((qh << (7 - 2 * il)) & 0x100)
+                idx1 = tl.load(qs_base + 2 * il + 0, mask=n_mask, other=0).to(
+                    tl.int32
+                ) | ((qh << (8 - 2 * il)) & 0x100)
+                idx2 = tl.load(qs_base + 2 * il + 1, mask=n_mask, other=0).to(
+                    tl.int32
+                ) | ((qh << (7 - 2 * il)) & 0x100)
                 x1 = load_x_chunk(
                     x_ptr,
                     stride_xm,
@@ -67,7 +71,9 @@ def iq3_s_gemm_kernel(
                 )
                 x_dtype = x1.dtype
                 d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
-                dscale = (d * (1 + 2 * ((scale_byte >> (4 * (ib % 2))) & 0x0F).to(x_dtype))).to(x_dtype)
+                dscale = (
+                    d * (1 + 2 * ((scale_byte >> (4 * (ib % 2))) & 0x0F).to(x_dtype))
+                ).to(x_dtype)
                 grid1 = tl.load(
                     grid_ptr + idx1[:, None] * 4 + offs_4[None, :],
                     mask=n_mask[:, None],
@@ -78,8 +84,20 @@ def iq3_s_gemm_kernel(
                     mask=n_mask[:, None],
                     other=0,
                 ).to(x_dtype)
-                q1 = (grid1 * tl.where((signs[:, None] & sign_mask_lo[None, :]) != 0, -1, 1).to(x_dtype) * dscale[:, None]).to(x_dtype)
-                q2 = (grid2 * tl.where((signs[:, None] & sign_mask_hi[None, :]) != 0, -1, 1).to(x_dtype) * dscale[:, None]).to(x_dtype)
+                q1 = (
+                    grid1
+                    * tl.where((signs[:, None] & sign_mask_lo[None, :]) != 0, -1, 1).to(
+                        x_dtype
+                    )
+                    * dscale[:, None]
+                ).to(x_dtype)
+                q2 = (
+                    grid2
+                    * tl.where((signs[:, None] & sign_mask_hi[None, :]) != 0, -1, 1).to(
+                        x_dtype
+                    )
+                    * dscale[:, None]
+                ).to(x_dtype)
                 acc += tl.sum(x1[:, None, :] * q1[None, :, :], axis=2)
                 acc += tl.sum(x2[:, None, :] * q2[None, :, :], axis=2)
 

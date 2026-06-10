@@ -2,8 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
-from .iq_tables import get_iq_table_tensors
 from ..utils import GGML_TYPE_IQ4_NL, load_f16_from_u8, load_x_tile, run_triton_kernel
+from .iq_tables import get_iq_table_tensors
 
 
 @triton.jit
@@ -59,8 +59,14 @@ def iq4_nl_gemm_kernel(
             mask=(offs_n[:, None, None] < n) & kb_mask[None, :, None],
             other=0,
         )
-        low = tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
-        high = tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
+        low = (
+            tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(x_dtype)
+            * d[:, :, None]
+        )
+        high = (
+            tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(x_dtype)
+            * d[:, :, None]
+        )
         q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 

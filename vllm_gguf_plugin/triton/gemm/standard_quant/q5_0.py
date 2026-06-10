@@ -68,8 +68,12 @@ def q5_0_gemm_kernel(
         )
         qh_low = ((qh[:, :, None] >> bit_low[None, None, :]) & 0x01).to(tl.uint8)
         qh_high = ((qh[:, :, None] >> bit_high[None, None, :]) & 0x01).to(tl.uint8)
-        low = (((packed & 0x0F) | (qh_low << 4)).to(tl.int16) - 16).to(x_dtype) * d[:, :, None]
-        high = ((((packed >> 4) & 0x0F) | (qh_high << 4)).to(tl.int16) - 16).to(x_dtype) * d[:, :, None]
+        low = (((packed & 0x0F) | (qh_low << 4)).to(tl.int16) - 16).to(x_dtype) * d[
+            :, :, None
+        ]
+        high = ((((packed >> 4) & 0x0F) | (qh_high << 4)).to(tl.int16) - 16).to(
+            x_dtype
+        ) * d[:, :, None]
         q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 

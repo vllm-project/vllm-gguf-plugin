@@ -46,8 +46,7 @@ def get_iq_table_tensors(device: torch.device) -> dict[str, torch.Tensor]:
 
     cpu_tables = _cpu_iq_tables()
     device_tables = {
-        name: torch.tensor(values, device=device)
-        for name, values in cpu_tables.items()
+        name: torch.tensor(values, device=device) for name, values in cpu_tables.items()
     }
     _DEVICE_TABLES[key] = device_tables
     return device_tables

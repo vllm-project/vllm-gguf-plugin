@@ -8,22 +8,11 @@ import triton.language as tl
 
 from ...gemm.iq_quant.iq_tables import get_iq_table_tensors
 from ...gemm.utils import (
-    GGML_TYPE_IQ1_M,
-    GGML_TYPE_IQ1_S,
-    GGML_TYPE_IQ2_S,
-    GGML_TYPE_IQ2_XXS,
-    GGML_TYPE_IQ2_XS,
-    GGML_TYPE_IQ3_S,
-    GGML_TYPE_IQ3_XXS,
     GGML_TYPE_IQ4_NL,
-    GGML_TYPE_IQ4_XS,
     load_f16_from_u8,
-    load_u16_from_u8,
-    load_u32_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
-    load_moe_x_chunk,
     load_moe_x_tile,
     run_triton_fused_moe_kernel,
 )
@@ -93,8 +82,14 @@ def iq4_nl_moe_kernel(
             mask=n_mask[:, None, None] & kb_mask[None, :, None],
             other=0,
         )
-        low = tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
-        high = tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(x_dtype) * d[:, :, None]
+        low = (
+            tl.load(values_ptr + (packed & 0x0F).to(tl.int32)).to(x_dtype)
+            * d[:, :, None]
+        )
+        high = (
+            tl.load(values_ptr + ((packed >> 4) & 0x0F).to(tl.int32)).to(x_dtype)
+            * d[:, :, None]
+        )
         q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 

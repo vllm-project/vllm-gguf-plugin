@@ -6,8 +6,8 @@ from ..gemm.utils import (
     GGML_TYPE_IQ1_M,
     GGML_TYPE_IQ1_S,
     GGML_TYPE_IQ2_S,
-    GGML_TYPE_IQ2_XXS,
     GGML_TYPE_IQ2_XS,
+    GGML_TYPE_IQ2_XXS,
     GGML_TYPE_IQ3_S,
     GGML_TYPE_IQ3_XXS,
     GGML_TYPE_IQ4_NL,
@@ -24,6 +24,17 @@ from ..gemm.utils import (
     GGML_TYPE_Q8_0,
     GGML_TYPE_Q8_1,
 )
+from .iq_quant import (
+    ggml_moe_iq1_m_triton,
+    ggml_moe_iq1_s_triton,
+    ggml_moe_iq2_s_triton,
+    ggml_moe_iq2_xs_triton,
+    ggml_moe_iq2_xxs_triton,
+    ggml_moe_iq3_s_triton,
+    ggml_moe_iq3_xxs_triton,
+    ggml_moe_iq4_nl_triton,
+    ggml_moe_iq4_xs_triton,
+)
 from .k_quant import (
     ggml_moe_q2_k_triton,
     ggml_moe_q3_k_triton,
@@ -38,17 +49,6 @@ from .standard_quant import (
     ggml_moe_q5_1_triton,
     ggml_moe_q8_0_triton,
     ggml_moe_q8_1_triton,
-)
-from .iq_quant import (
-    ggml_moe_iq1_m_triton,
-    ggml_moe_iq1_s_triton,
-    ggml_moe_iq2_s_triton,
-    ggml_moe_iq2_xxs_triton,
-    ggml_moe_iq2_xs_triton,
-    ggml_moe_iq3_s_triton,
-    ggml_moe_iq3_xxs_triton,
-    ggml_moe_iq4_nl_triton,
-    ggml_moe_iq4_xs_triton,
 )
 
 TRITON_MOE_SUPPORTED_TYPES = frozenset(

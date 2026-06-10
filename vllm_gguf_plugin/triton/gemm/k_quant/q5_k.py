@@ -41,7 +41,9 @@ def q5_k_gemm_kernel(
     for kb in range(0, num_k_blocks):
         block_ptrs = w_row_ptrs + kb * 176
         scales_ptr = block_ptrs + 4
-        qh = tl.load(block_ptrs[:, None] + 16 + offs_q[None, :], mask=n_mask[:, None], other=0)
+        qh = tl.load(
+            block_ptrs[:, None] + 16 + offs_q[None, :], mask=n_mask[:, None], other=0
+        )
 
         for chunk in range(8):
             group = chunk // 2
@@ -75,7 +77,9 @@ def q5_k_gemm_kernel(
                 other=0,
             )
             q = (q & 0x0F) if part == 0 else (q >> 4)
-            q = q.to(x_dtype) + 16.0 * ((qh & (1 << (2 * group + part))) != 0).to(x_dtype)
+            q = q.to(x_dtype) + 16.0 * ((qh & (1 << (2 * group + part))) != 0).to(
+                x_dtype
+            )
             q_tile = q * (scale_q.to(x_dtype)[:, None] * dall[:, None])
             q_tile = q_tile - min_q.to(x_dtype)[:, None] * dmin[:, None]
             acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)

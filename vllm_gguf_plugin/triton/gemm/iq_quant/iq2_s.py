@@ -2,8 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
-from .iq_tables import get_iq_table_tensors
 from ..utils import GGML_TYPE_IQ2_S, load_f16_from_u8, load_x_chunk, run_triton_kernel
+from .iq_tables import get_iq_table_tensors
 
 
 @triton.jit
@@ -42,7 +42,9 @@ def iq2_s_gemm_kernel(
             qh = tl.load(block_ptrs + 66 + ib, mask=n_mask, other=0).to(tl.int32)
             scale_byte = tl.load(block_ptrs + 74 + ib, mask=n_mask, other=0)
             for il in range(4):
-                grid_idx = tl.load(block_ptrs + 2 + 4 * ib + il, mask=n_mask, other=0).to(tl.int32)
+                grid_idx = tl.load(
+                    block_ptrs + 2 + 4 * ib + il, mask=n_mask, other=0
+                ).to(tl.int32)
                 grid_idx = grid_idx | ((qh << (8 - 2 * il)) & 0x300)
                 signs = tl.load(block_ptrs + 34 + 4 * ib + il, mask=n_mask, other=0)
                 x_tile = load_x_chunk(
@@ -56,13 +58,17 @@ def iq2_s_gemm_kernel(
                 )
                 x_dtype = x_tile.dtype
                 d = load_f16_from_u8(block_ptrs + 0, n_mask).to(x_dtype)
-                scale = (((scale_byte >> (4 * (il // 2))) & 0x0F).to(x_dtype) + 0.5) * 0.25
+                scale = (
+                    ((scale_byte >> (4 * (il // 2))) & 0x0F).to(x_dtype) + 0.5
+                ) * 0.25
                 grid = tl.load(
                     grid_ptr + grid_idx[:, None] * 8 + offs_8[None, :],
                     mask=n_mask[:, None],
                     other=0,
                 ).to(x_dtype)
-                sign = tl.where((signs[:, None] & sign_mask[None, :]) != 0, -1, 1).to(x_dtype)
+                sign = tl.where((signs[:, None] & sign_mask[None, :]) != 0, -1, 1).to(
+                    x_dtype
+                )
                 q_tile = (grid * sign * (d * scale).to(x_dtype)[:, None]).to(x_dtype)
                 acc += tl.sum(x_tile[:, None, :] * q_tile[None, :, :], axis=2)
 

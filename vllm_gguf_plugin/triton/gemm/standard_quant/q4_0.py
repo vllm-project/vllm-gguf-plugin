@@ -2,7 +2,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 Q4_0_BLOCK_SIZE = 32
 Q4_0_BLOCK_BYTES = 18
 
@@ -70,7 +69,12 @@ def q4_0_gemm_kernel(
         scale_bits = scale_lo.to(tl.uint16) | (scale_hi.to(tl.uint16) << 8)
         scales = tl.cast(scale_bits, tl.float16, bitcast=True).to(x_dtype)
 
-        packed_ptrs = w_packed_row_ptrs + cur_kb[None, :, None] * 18 + 2 + offs_byte[None, None, :]
+        packed_ptrs = (
+            w_packed_row_ptrs
+            + cur_kb[None, :, None] * 18
+            + 2
+            + offs_byte[None, None, :]
+        )
         packed_mask = (offs_n[:, None, None] < n) & kb_mask[None, :, None]
         packed = tl.load(packed_ptrs, mask=packed_mask, other=0)
 
@@ -107,7 +111,9 @@ def ggml_gemm_q4_0_triton(
     if X.dim() not in (2, 3):
         raise ValueError(f"X must be 2D or 3D, got {X.dim()}D")
     if row != W.shape[0]:
-        raise ValueError(f"row must match W.shape[0], got row={row}, W.shape[0]={W.shape[0]}")
+        raise ValueError(
+            f"row must match W.shape[0], got row={row}, W.shape[0]={W.shape[0]}"
+        )
     if W.shape[1] % Q4_0_BLOCK_BYTES != 0:
         raise ValueError(
             f"Invalid Q4_0 row width {W.shape[1]}: must be divisible by {Q4_0_BLOCK_BYTES}"

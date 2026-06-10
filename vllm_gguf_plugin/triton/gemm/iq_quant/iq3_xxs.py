@@ -2,8 +2,14 @@ import torch
 import triton
 import triton.language as tl
 
+from ..utils import (
+    GGML_TYPE_IQ3_XXS,
+    load_f16_from_u8,
+    load_u32_from_u8,
+    load_x_chunk,
+    run_triton_kernel,
+)
 from .iq_tables import get_iq_table_tensors
-from ..utils import GGML_TYPE_IQ3_XXS, load_f16_from_u8, load_u32_from_u8, load_x_chunk, run_triton_kernel
 
 
 @triton.jit
@@ -43,9 +49,15 @@ def iq3_xxs_gemm_kernel(
         for ib in range(8):
             aux32 = load_u32_from_u8(block_ptrs + 66 + 4 * ib, n_mask)
             for il in range(4):
-                signs = tl.load(sign_ptr + ((aux32 >> (7 * il)) & 127), mask=n_mask, other=0)
-                idx1 = tl.load(block_ptrs + 2 + 8 * ib + 2 * il + 0, mask=n_mask, other=0).to(tl.int32)
-                idx2 = tl.load(block_ptrs + 2 + 8 * ib + 2 * il + 1, mask=n_mask, other=0).to(tl.int32)
+                signs = tl.load(
+                    sign_ptr + ((aux32 >> (7 * il)) & 127), mask=n_mask, other=0
+                )
+                idx1 = tl.load(
+                    block_ptrs + 2 + 8 * ib + 2 * il + 0, mask=n_mask, other=0
+                ).to(tl.int32)
+                idx2 = tl.load(
+                    block_ptrs + 2 + 8 * ib + 2 * il + 1, mask=n_mask, other=0
+                ).to(tl.int32)
                 x1 = load_x_chunk(
                     x_ptr,
                     stride_xm,
@@ -77,8 +89,20 @@ def iq3_xxs_gemm_kernel(
                     mask=n_mask[:, None],
                     other=0,
                 ).to(x_dtype)
-                q1 = (grid1 * tl.where((signs[:, None] & sign_mask_lo[None, :]) != 0, -1, 1).to(x_dtype) * dscale[:, None]).to(x_dtype)
-                q2 = (grid2 * tl.where((signs[:, None] & sign_mask_hi[None, :]) != 0, -1, 1).to(x_dtype) * dscale[:, None]).to(x_dtype)
+                q1 = (
+                    grid1
+                    * tl.where((signs[:, None] & sign_mask_lo[None, :]) != 0, -1, 1).to(
+                        x_dtype
+                    )
+                    * dscale[:, None]
+                ).to(x_dtype)
+                q2 = (
+                    grid2
+                    * tl.where((signs[:, None] & sign_mask_hi[None, :]) != 0, -1, 1).to(
+                        x_dtype
+                    )
+                    * dscale[:, None]
+                ).to(x_dtype)
                 acc += tl.sum(x1[:, None, :] * q1[None, :, :], axis=2)
                 acc += tl.sum(x2[:, None, :] * q2[None, :, :], axis=2)
 
@@ -87,7 +111,9 @@ def iq3_xxs_gemm_kernel(
     tl.store(y_ptrs, acc, mask=y_mask)
 
 
-def ggml_gemm_iq3_xxs_triton(W: torch.Tensor, X: torch.Tensor, row: int) -> torch.Tensor:
+def ggml_gemm_iq3_xxs_triton(
+    W: torch.Tensor, X: torch.Tensor, row: int
+) -> torch.Tensor:
     tables = get_iq_table_tensors(W.device)
     return run_triton_kernel(
         iq3_xxs_gemm_kernel,

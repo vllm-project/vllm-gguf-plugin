@@ -4,6 +4,10 @@ import os
 
 import torch
 
+from .triton.fused_moe.interface import ggml_moe_a8_triton
+from .triton.fused_moe.utils import TRITON_FUSED_MOE_BLOCK_M
+from .triton.gemm.interface import ggml_mul_mat_a8_triton
+
 try:
     from torch.library import register_fake
 except ImportError:
@@ -21,10 +25,6 @@ except ImportError:
     _C_gguf = None
     _CUDA_AVAILABLE = False
 
-# Import Triton kernels (default backend)
-from .triton.fused_moe.interface import ggml_moe_a8_triton
-from .triton.fused_moe.utils import TRITON_FUSED_MOE_BLOCK_M
-from .triton.gemm.interface import ggml_mul_mat_a8_triton
 
 # Effective CUDA usage: only when explicitly requested AND available
 _CUDA_ENABLED = _USE_CUDA and _CUDA_AVAILABLE
@@ -98,9 +98,7 @@ if (
         row: torch.SymInt,
         tokens: torch.SymInt,
     ) -> torch.Tensor:
-        return torch.empty(
-            (X.size(0) * top_k, row), dtype=X.dtype, device=W.device
-        )
+        return torch.empty((X.size(0) * top_k, row), dtype=X.dtype, device=W.device)
 
 
 # --- Public API ---

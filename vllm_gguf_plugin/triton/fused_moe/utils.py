@@ -12,8 +12,8 @@ from ..gemm.utils import (
     GGML_TYPE_IQ1_M,
     GGML_TYPE_IQ1_S,
     GGML_TYPE_IQ2_S,
-    GGML_TYPE_IQ2_XXS,
     GGML_TYPE_IQ2_XS,
+    GGML_TYPE_IQ2_XXS,
     GGML_TYPE_IQ3_S,
     GGML_TYPE_IQ3_XXS,
     GGML_TYPE_IQ4_NL,
@@ -65,7 +65,9 @@ TRITON_FUSED_MOE_BLOCK_K_BLOCKS = 4
 
 
 @triton.jit
-def load_moe_token_info(sorted_token_ids_ptr, pid_m, top_k, num_valid_tokens, BLOCK_M: tl.constexpr):
+def load_moe_token_info(
+    sorted_token_ids_ptr, pid_m, top_k, num_valid_tokens, BLOCK_M: tl.constexpr
+):
     offs_block = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_output = tl.load(sorted_token_ids_ptr + offs_block).to(tl.int64)
     token_mask = (offs_output >= 0) & (offs_output < num_valid_tokens)
@@ -102,7 +104,11 @@ def load_moe_x_tile(
         mask=token_mask[:, None, None] & kb_mask[None, :, None],
         other=0.0,
     )
-    return tl.reshape(tl.join(x_even, x_odd), (BLOCK_M, BLOCK_K_BLOCKS * 32)), cur_kb, kb_mask
+    return (
+        tl.reshape(tl.join(x_even, x_odd), (BLOCK_M, BLOCK_K_BLOCKS * 32)),
+        cur_kb,
+        kb_mask,
+    )
 
 
 @triton.jit
@@ -133,7 +139,9 @@ def _validate_args(
     top_k: int,
     tokens: int,
     quant_type: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int
+]:
     if quant_type not in TRITON_FUSED_MOE_SUPPORTED_TYPES:
         raise ValueError(f"Unsupported Triton fused MoE quant type: {quant_type}")
     if not all(
@@ -152,7 +160,9 @@ def _validate_args(
     if W.dim() != 3:
         raise ValueError(f"W must be 3D [experts, rows, packed_cols], got {W.dim()}D")
     if row != W.shape[1]:
-        raise ValueError(f"row must match W.shape[1], got row={row}, W.shape[1]={W.shape[1]}")
+        raise ValueError(
+            f"row must match W.shape[1], got row={row}, W.shape[1]={W.shape[1]}"
+        )
     if top_k <= 0:
         raise ValueError(f"top_k must be positive, got {top_k}")
     if X.shape[0] != tokens:
