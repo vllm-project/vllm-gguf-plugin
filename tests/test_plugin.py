@@ -510,6 +510,30 @@ def test_qwen3_5_adapter_reshapes_gguf_weights():
     assert torch.equal(transformed_conv[:, 0, :], conv1d)
 
 
+def test_qwen3_5_adapter_combines_split_patch_embed_weight():
+    adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5_moe"))
+    patch_weight = torch.zeros((4, 3, 16, 16))
+    patch_weight_1 = torch.ones((4, 3, 16, 16))
+    other_weight = torch.full((2, 2), 2.0)
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                ("model.visual.patch_embed.proj.weight.1", patch_weight_1),
+                ("model.layers.0.self_attn.q_proj.weight", other_weight),
+                ("model.visual.patch_embed.proj.weight", patch_weight),
+            ]
+        )
+    )
+
+    assert mapped[0][0] == "model.layers.0.self_attn.q_proj.weight"
+    assert torch.equal(mapped[0][1], other_weight)
+    assert mapped[1][0] == "model.visual.patch_embed.proj.weight"
+    assert mapped[1][1].shape == (4, 3, 2, 16, 16)
+    assert torch.equal(mapped[1][1][:, :, 0], patch_weight)
+    assert torch.equal(mapped[1][1][:, :, 1], patch_weight_1)
+
+
 def test_qwen3_5_mtp_gguf_mappings():
     config = PretrainedConfig(
         model_type="qwen3_5_moe",
