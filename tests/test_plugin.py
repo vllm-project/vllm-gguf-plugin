@@ -16,6 +16,7 @@ from vllm.model_executor.layers.linear import (
     WEIGHT_LOADER_V2_SUPPORTED,
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    RowParallelLinear,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model_loader
@@ -25,6 +26,7 @@ import vllm_gguf_plugin.config_parser as gguf_config_parser_module
 import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
+import vllm_gguf_plugin.quantization.params as gguf_params_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
 from vllm_gguf_plugin.gguf_utils import (
@@ -257,6 +259,34 @@ def test_gguf_tuple_shard_loader_splits_fused_qweight(monkeypatch):
         2: WeightType.Q4_0,
         3: WeightType.Q4_1,
     }
+
+
+def test_gguf_row_parallel_weight_loader_v2_omits_empty_shard_id(monkeypatch):
+    register()
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(
+        gguf_params_module, "get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        gguf_params_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    layer = RowParallelLinear(
+        input_size=4,
+        output_size=8,
+        bias=False,
+        quant_config=OOTGGUFConfig.from_config({}),
+        disable_tp=True,
+    )
+
+    layer.qweight.weight_loader(
+        layer.qweight, torch.ones((8, 4), dtype=torch.uint8)
+    )
+
+    assert torch.equal(layer.qweight.data, torch.ones((8, 4), dtype=torch.uint8))
 
 
 def test_gemma4_adapter_transforms_quantized_moe_names():
