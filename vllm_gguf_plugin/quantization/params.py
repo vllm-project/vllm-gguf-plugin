@@ -7,7 +7,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parameter import BasevLLMParameter
 
@@ -148,7 +148,7 @@ def _gguf_embedding_weight_type_loader(
 
 
 def _materialize_gguf_moe_param(
-    layer: FusedMoE,
+    layer: RoutedExperts,
     param: Parameter | UninitializedParameter,
     loaded_weight: torch.Tensor,
     shard_id: str,
@@ -167,12 +167,14 @@ def _materialize_gguf_moe_param(
     final_shape = list(loaded_weight.shape)
     if shard_id in {"w1", "w3"}:
         final_shape[1] *= 2
-    final_shape[shard_dim] = final_shape[shard_dim] // layer.tp_size
+    final_shape[shard_dim] = (
+        final_shape[shard_dim] // layer.moe_config.moe_parallel_config.tp_size
+    )
     param.materialize(tuple(final_shape), dtype=loaded_weight.dtype)
 
 
 def _gguf_moe_weight_loader(
-    layer: FusedMoE,
+    layer: RoutedExperts,
     base_weight_loader,
     param: Parameter | UninitializedParameter,
     loaded_weight: torch.Tensor,

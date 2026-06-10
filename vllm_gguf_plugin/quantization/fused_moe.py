@@ -4,6 +4,9 @@
 from functools import partial
 
 import torch
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+)
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -12,8 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.utils import set_weight_attrs
@@ -248,13 +250,14 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        del shared_experts_input
+        del shared_experts, shared_experts_input
         if layer.apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for"
