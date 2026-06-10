@@ -78,21 +78,17 @@ def _fused_moe_gguf(
             num_tokens,
         )
         out = act(out)
-        out = ops.ggml_moe_a8(
+        out_hidden_states = ops.ggml_moe_a8_weighted_sum(
             out,
             w2,
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
+            topk_weights,
             qweight_type2,
             w2.shape[1],
-            1,
-            num_tokens * top_k,
+            top_k,
         )
-        out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
-            topk_weights.view(num_tokens, top_k, 1)
-        )
-        ops.moe_sum(out, out_hidden_states)
     elif qweight_type2 in MMVQ_QUANT_TYPES and qweight_type in MMVQ_QUANT_TYPES:
         num_tokens, _ = x.shape
         E, N, _ = w1.shape

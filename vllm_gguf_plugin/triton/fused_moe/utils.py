@@ -129,6 +129,41 @@ def load_moe_x_chunk(
     )
 
 
+@triton.jit
+def store_moe_output(
+    y_ptr,
+    topk_weights_ptr,
+    acc,
+    offs_output,
+    token_mask,
+    offs_n,
+    n_mask,
+    stride_ym,
+    stride_yn,
+    routed_top_k,
+    FUSED_WEIGHTED_SUM: tl.constexpr,
+):
+    y_mask = token_mask[:, None] & n_mask[None, :]
+    if FUSED_WEIGHTED_SUM:
+        token_id = offs_output // routed_top_k
+        route_id = offs_output - token_id * routed_top_k
+        weights = tl.load(
+            topk_weights_ptr + token_id * routed_top_k + route_id,
+            mask=token_mask,
+            other=0.0,
+        )
+        y_ptrs = y_ptr + token_id[:, None] * stride_ym + offs_n[None, :] * stride_yn
+        tl.atomic_add(
+            y_ptrs,
+            (acc * weights[:, None]).to(weights.dtype),
+            sem="relaxed",
+            mask=y_mask,
+        )
+    else:
+        y_ptrs = y_ptr + offs_output[:, None] * stride_ym + offs_n[None, :] * stride_yn
+        tl.store(y_ptrs, acc, mask=y_mask)
+
+
 def _validate_args(
     W: torch.Tensor,
     X: torch.Tensor,
@@ -139,6 +174,7 @@ def _validate_args(
     top_k: int,
     tokens: int,
     quant_type: int,
+    block_m: int = TRITON_FUSED_MOE_BLOCK_M,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int
 ]:
@@ -190,12 +226,11 @@ def _validate_args(
     # Use tensor shapes (CPU-known) instead of .item() to avoid GPU→CPU sync.
     # This is required for CUDA graph capture compatibility.
     max_num_blocks = expert_ids.numel()
-    if max_num_blocks != sorted_token_ids.numel() // TRITON_FUSED_MOE_BLOCK_M:
+    if max_num_blocks != sorted_token_ids.numel() // block_m:
         raise ValueError(
             "expert_ids and sorted_token_ids have inconsistent shapes: "
             f"expert_ids.numel()={max_num_blocks}, "
-            f"sorted_token_ids.numel()//BLOCK_M="
-            f"{sorted_token_ids.numel() // TRITON_FUSED_MOE_BLOCK_M}"
+            f"sorted_token_ids.numel()//BLOCK_M={sorted_token_ids.numel() // block_m}"
         )
 
     return (
@@ -221,6 +256,14 @@ def run_triton_fused_moe_kernel(
     tokens: int,
     quant_type: int,
     extra_args: tuple = (),
+    topk_weights: torch.Tensor | None = None,
+    routed_top_k: int = 1,
+    fused_weighted_sum: bool = False,
+    block_m: int = TRITON_FUSED_MOE_BLOCK_M,
+    block_n: int = TRITON_FUSED_MOE_BLOCK_N,
+    block_k_blocks: int = TRITON_FUSED_MOE_BLOCK_K_BLOCKS,
+    num_warps: int = TRITON_NUM_WARPS,
+    num_stages: int = TRITON_NUM_STAGES,
 ) -> torch.Tensor:
     (
         W,
@@ -240,9 +283,34 @@ def run_triton_fused_moe_kernel(
         top_k,
         tokens,
         quant_type,
+        block_m,
     )
 
-    out = torch.zeros((num_valid_tokens, row), device=X.device, dtype=X.dtype)
+    if fused_weighted_sum:
+        if topk_weights is None:
+            raise ValueError("topk_weights is required for fused weighted-sum MoE")
+        if not topk_weights.is_cuda:
+            raise ValueError("topk_weights must be a CUDA tensor")
+        if topk_weights.dim() != 2:
+            raise ValueError(f"topk_weights must be 2D, got {topk_weights.dim()}D")
+        if topk_weights.shape[1] != routed_top_k:
+            raise ValueError(
+                "routed_top_k must match topk_weights.shape[1], got "
+                f"{routed_top_k} vs {topk_weights.shape[1]}"
+            )
+        if num_valid_tokens != topk_weights.shape[0] * routed_top_k:
+            raise ValueError(
+                "fused weighted-sum MoE expects one routed row per top-k slot, got "
+                f"num_valid_tokens={num_valid_tokens}, "
+                f"topk_weights.shape={tuple(topk_weights.shape)}"
+            )
+        topk_weights = topk_weights.contiguous()
+        out = torch.zeros((topk_weights.shape[0], row), device=X.device, dtype=X.dtype)
+    else:
+        topk_weights = None
+        out = torch.zeros((num_valid_tokens, row), device=X.device, dtype=X.dtype)
+
+    topk_weights_arg = topk_weights if topk_weights is not None else out
 
     # Use expert_ids.shape[0] (CPU-known) for grid sizing instead of
     # num_tokens_post_padded.item() to avoid GPU→CPU sync during CUDA graph
@@ -250,7 +318,7 @@ def run_triton_fused_moe_kernel(
     # and token_mask.
     grid = (
         expert_ids.shape[0],
-        triton.cdiv(row, TRITON_FUSED_MOE_BLOCK_N),
+        triton.cdiv(row, block_n),
     )
     kernel[grid](
         X,
@@ -270,11 +338,14 @@ def run_triton_fused_moe_kernel(
         W.stride(2),
         out.stride(0),
         out.stride(1),
+        topk_weights_arg,
+        routed_top_k,
+        fused_weighted_sum,
         *extra_args,
-        BLOCK_M=TRITON_FUSED_MOE_BLOCK_M,
-        BLOCK_N=TRITON_FUSED_MOE_BLOCK_N,
-        BLOCK_K_BLOCKS=TRITON_FUSED_MOE_BLOCK_K_BLOCKS,
-        num_warps=TRITON_NUM_WARPS,
-        num_stages=TRITON_NUM_STAGES,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K_BLOCKS=block_k_blocks,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return out

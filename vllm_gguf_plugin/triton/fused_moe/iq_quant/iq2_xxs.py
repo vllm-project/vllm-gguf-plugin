@@ -16,6 +16,7 @@ from ..utils import (
     load_moe_token_info,
     load_moe_x_chunk,
     run_triton_fused_moe_kernel,
+    store_moe_output,
 )
 
 
@@ -38,6 +39,9 @@ def iq2_xxs_moe_kernel(
     stride_wk,
     stride_ym,
     stride_yn,
+    topk_weights_ptr,
+    routed_top_k,
+    FUSED_WEIGHTED_SUM: tl.constexpr,
     grid_ptr,
     sign_ptr,
     BLOCK_M: tl.constexpr,
@@ -95,9 +99,19 @@ def iq2_xxs_moe_kernel(
                 q_tile = (grid * sign * dscale.to(x_dtype)[:, None]).to(x_dtype)
                 acc += tl.sum(x_tile[:, None, :] * q_tile[None, :, :], axis=2)
 
-    y_ptrs = y_ptr + offs_output[:, None] * stride_ym + offs_n[None, :] * stride_yn
-    y_mask = token_mask[:, None] & n_mask[None, :]
-    tl.store(y_ptrs, acc, mask=y_mask)
+    store_moe_output(
+        y_ptr,
+        topk_weights_ptr,
+        acc,
+        offs_output,
+        token_mask,
+        offs_n,
+        n_mask,
+        stride_ym,
+        stride_yn,
+        routed_top_k,
+        FUSED_WEIGHTED_SUM=FUSED_WEIGHTED_SUM,
+    )
 
 
 def ggml_moe_iq2_xxs_triton(
@@ -109,6 +123,9 @@ def ggml_moe_iq2_xxs_triton(
     row: int,
     top_k: int,
     tokens: int,
+    topk_weights: torch.Tensor | None = None,
+    routed_top_k: int = 1,
+    fused_weighted_sum: bool = False,
 ) -> torch.Tensor:
     tables = get_iq_table_tensors(W.device)
     return run_triton_fused_moe_kernel(
@@ -123,4 +140,7 @@ def ggml_moe_iq2_xxs_triton(
         tokens,
         GGML_TYPE_IQ2_XXS,
         extra_args=(tables["iq2xxs_grid"], tables["ksigns_iq2xs"]),
+        topk_weights=topk_weights,
+        routed_top_k=routed_top_k,
+        fused_weighted_sum=fused_weighted_sum,
     )

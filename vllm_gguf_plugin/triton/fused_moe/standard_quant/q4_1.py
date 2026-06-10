@@ -14,6 +14,7 @@ from ..utils import (
     load_moe_token_info,
     load_moe_x_tile,
     run_triton_fused_moe_kernel,
+    store_moe_output,
 )
 
 
@@ -36,6 +37,9 @@ def q4_1_moe_kernel(
     stride_wk,
     stride_ym,
     stride_yn,
+    topk_weights_ptr,
+    routed_top_k,
+    FUSED_WEIGHTED_SUM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K_BLOCKS: tl.constexpr,
@@ -50,6 +54,7 @@ def q4_1_moe_kernel(
         return
 
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_mask = offs_n < n
     offs_kb = tl.arange(0, BLOCK_K_BLOCKS)
     offs_nibble = tl.arange(0, 16)
 
@@ -72,12 +77,12 @@ def q4_1_moe_kernel(
         )
         x_dtype = x_tile.dtype
         block_ptrs = w_row_ptrs + cur_kb[None, :] * 20
-        scale_mask = (offs_n[:, None] < n) & kb_mask[None, :]
+        scale_mask = n_mask[:, None] & kb_mask[None, :]
         d = load_f16_from_u8(block_ptrs + 0, scale_mask).to(x_dtype)
         m0 = load_f16_from_u8(block_ptrs + 2, scale_mask).to(x_dtype)
         packed = tl.load(
             block_ptrs[:, :, None] + 4 + offs_nibble[None, None, :],
-            mask=(offs_n[:, None, None] < n) & kb_mask[None, :, None],
+            mask=n_mask[:, None, None] & kb_mask[None, :, None],
             other=0,
         )
         low = (packed & 0x0F).to(x_dtype) * d[:, :, None] + m0[:, :, None]
@@ -85,9 +90,19 @@ def q4_1_moe_kernel(
         q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
-    y_ptrs = y_ptr + offs_output[:, None] * stride_ym + offs_n[None, :] * stride_yn
-    y_mask = token_mask[:, None] & (offs_n[None, :] < n)
-    tl.store(y_ptrs, acc, mask=y_mask)
+    store_moe_output(
+        y_ptr,
+        topk_weights_ptr,
+        acc,
+        offs_output,
+        token_mask,
+        offs_n,
+        n_mask,
+        stride_ym,
+        stride_yn,
+        routed_top_k,
+        FUSED_WEIGHTED_SUM=FUSED_WEIGHTED_SUM,
+    )
 
 
 def ggml_moe_q4_1_triton(
@@ -99,6 +114,9 @@ def ggml_moe_q4_1_triton(
     row: int,
     top_k: int,
     tokens: int,
+    topk_weights: torch.Tensor | None = None,
+    routed_top_k: int = 1,
+    fused_weighted_sum: bool = False,
 ) -> torch.Tensor:
     return run_triton_fused_moe_kernel(
         q4_1_moe_kernel,
@@ -111,4 +129,7 @@ def ggml_moe_q4_1_triton(
         top_k,
         tokens,
         GGML_TYPE_Q4_1,
+        topk_weights=topk_weights,
+        routed_top_k=routed_top_k,
+        fused_weighted_sum=fused_weighted_sum,
     )

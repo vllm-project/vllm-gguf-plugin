@@ -4,7 +4,10 @@ import os
 
 import torch
 
-from .triton.fused_moe.interface import ggml_moe_a8_triton
+from .triton.fused_moe.interface import (
+    ggml_moe_a8_triton,
+    ggml_moe_a8_weighted_sum_triton,
+)
 from .triton.fused_moe.utils import TRITON_FUSED_MOE_BLOCK_M
 from .triton.gemm.interface import ggml_mul_mat_a8_triton
 
@@ -165,6 +168,49 @@ def ggml_moe_a8(
         row,
         top_k,
         tokens,
+    )
+
+
+def ggml_moe_a8_weighted_sum(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    topk_weights: torch.Tensor,
+    quant_type: int,
+    row: int,
+    routed_top_k: int,
+) -> torch.Tensor:
+    if _CUDA_ENABLED:
+        routed = torch.ops._C_gguf.ggml_moe_a8(
+            X,
+            W,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            quant_type,
+            row,
+            1,
+            X.shape[0],
+        )
+        weighted = routed.reshape(topk_weights.shape[0], routed_top_k, row).mul(
+            topk_weights.reshape(topk_weights.shape[0], routed_top_k, 1)
+        )
+        out = torch.empty((topk_weights.shape[0], row), device=X.device, dtype=X.dtype)
+        moe_sum(weighted, out)
+        return out
+
+    return ggml_moe_a8_weighted_sum_triton(
+        X,
+        W,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        topk_weights,
+        quant_type,
+        row,
+        routed_top_k,
     )
 
 

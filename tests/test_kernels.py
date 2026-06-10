@@ -10,7 +10,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
 import vllm_gguf_plugin.ops as ops
 from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
-from vllm_gguf_plugin.triton.fused_moe import ggml_moe_a8_triton
+from vllm_gguf_plugin.triton.fused_moe import (
+    ggml_moe_a8_triton,
+    ggml_moe_a8_weighted_sum_triton,
+)
 from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton
 
 from .utils import get_gguf_moe_tensors, get_gguf_sample_tensors, seed_everything
@@ -380,9 +383,9 @@ def test_moe_triton(
         top_k,
         num_tokens,
     )
-    out = _silu_and_mul(out)
+    activated = _silu_and_mul(out)
     out = ggml_moe_a8_triton(
-        out,
+        activated,
         w2_q,
         sorted_token_ids,
         expert_ids,
@@ -395,10 +398,23 @@ def test_moe_triton(
     out = out.reshape(num_tokens, top_k, w2_q.shape[1]).mul_(
         topk_weights.view(num_tokens, top_k, 1)
     )
-    output = torch.empty_like(x)
-    ops.moe_sum(out, output)
+    old_output = torch.empty_like(x)
+    ops.moe_sum(out, old_output)
+
+    fused_output = ggml_moe_a8_weighted_sum_triton(
+        activated,
+        w2_q,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        topk_weights,
+        quant_type,
+        w2_q.shape[1],
+        top_k,
+    )
+    torch.testing.assert_close(fused_output, old_output, atol=1, rtol=1e-1)
 
     ref_output = fused_experts(
         x, w13_dequant, w2_dequant, topk_weights, topk_ids
-    ).reshape(output.shape)
-    torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
+    ).reshape(old_output.shape)
+    torch.testing.assert_close(fused_output, ref_output, atol=1, rtol=1e-1)
