@@ -4,9 +4,13 @@
 from .base import BaseGGUFWeightsAdapter
 from .default import GGUFWeightsAdapter
 from .gemma3 import Gemma3GGUFAdapter
+from .gemma4 import Gemma4GGUFAdapter
+from .qwen3_5 import Qwen3_5GGUFAdapter
 
 _ADAPTER_REGISTRY: list[type[GGUFWeightsAdapter]] = [
     Gemma3GGUFAdapter,
+    Gemma4GGUFAdapter,
+    Qwen3_5GGUFAdapter,
 ]
 
 
@@ -22,5 +26,7 @@ __all__ = [
     "BaseGGUFWeightsAdapter",
     "GGUFWeightsAdapter",
     "Gemma3GGUFAdapter",
+    "Gemma4GGUFAdapter",
+    "Qwen3_5GGUFAdapter",
     "get_weights_adapter",
 ]

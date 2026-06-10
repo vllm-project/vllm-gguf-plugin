@@ -29,6 +29,8 @@ from vllm_gguf_plugin.quantization import (
     GGUFWeightParameter,
     GGUFWeightTypeParameter,
 )
+from vllm_gguf_plugin.weights_adapter.gemma4 import Gemma4GGUFAdapter
+from vllm_gguf_plugin.weights_adapter.qwen3_5 import Qwen3_5GGUFAdapter
 
 
 def test_register_overrides_gguf_config():
@@ -176,6 +178,139 @@ def test_gguf_linear_same_type_shards_skip_concat(monkeypatch):
 
     assert calls == [((8, 4), 3)]
     assert out.shape == (2, 8)
+
+
+def test_gguf_tuple_shard_loader_splits_fused_qweight(monkeypatch):
+    register()
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    layer = MergedColumnParallelLinear(
+        input_size=4,
+        output_sizes=[4, 2, 6, 8],
+        bias=False,
+        quant_config=OOTGGUFConfig.from_config({}),
+        disable_tp=True,
+    )
+
+    fused_qkv = torch.cat(
+        [
+            torch.full((4, 4), 1, dtype=torch.uint8),
+            torch.full((2, 4), 2, dtype=torch.uint8),
+            torch.full((6, 4), 3, dtype=torch.uint8),
+        ],
+        dim=0,
+    )
+    layer.qweight.weight_loader(layer.qweight, fused_qkv, (0, 1, 2))
+    layer.qweight.weight_loader(
+        layer.qweight, torch.full((8, 4), 4, dtype=torch.uint8), 3
+    )
+    layer.qweight_type.weight_loader(
+        layer.qweight_type,
+        torch.tensor(WeightType.Q4_0, dtype=torch.uint8),
+        (0, 1, 2),
+    )
+    layer.qweight_type.weight_loader(
+        layer.qweight_type, torch.tensor(WeightType.Q4_1, dtype=torch.uint8), 3
+    )
+
+    layer.quant_method.process_weights_after_loading(layer)
+
+    assert layer.qweight.shard_id == [0, 1, 2, 3]
+    assert layer.qweight.shard_offset_map == {
+        0: (0, 4, 4),
+        1: (4, 6, 4),
+        2: (6, 12, 4),
+        3: (12, 20, 4),
+    }
+    assert torch.equal(layer.qweight[:4], torch.full((4, 4), 1, dtype=torch.uint8))
+    assert torch.equal(layer.qweight[4:6], torch.full((2, 4), 2, dtype=torch.uint8))
+    assert torch.equal(layer.qweight[6:12], torch.full((6, 4), 3, dtype=torch.uint8))
+    assert torch.equal(layer.qweight[12:], torch.full((8, 4), 4, dtype=torch.uint8))
+    assert layer.qweight_type.shard_weight_type == {
+        0: WeightType.Q4_0,
+        1: WeightType.Q4_0,
+        2: WeightType.Q4_0,
+        3: WeightType.Q4_1,
+    }
+
+
+def test_gemma4_adapter_transforms_quantized_moe_names():
+    adapter = Gemma4GGUFAdapter(PretrainedConfig(model_type="gemma4"))
+    weight = torch.empty((2, 3), dtype=torch.uint8)
+
+    transformed = dict(
+        adapter.map_weights(
+            [
+                (
+                    "model.language_model.layers.0.mlp.experts.gate_up_proj.qweight",
+                    weight,
+                ),
+                (
+                    "model.language_model.layers.0.mlp.experts."
+                    "gate_up_proj.qweight_type",
+                    torch.tensor(1, dtype=torch.uint8),
+                ),
+                (
+                    "model.language_model.layers.0.mlp.experts.down_proj.qweight",
+                    weight,
+                ),
+                (
+                    "model.language_model.layers.0.mlp.experts.down_proj.qweight_type",
+                    torch.tensor(1, dtype=torch.uint8),
+                ),
+            ]
+        )
+    )
+
+    assert (
+        "model.language_model.layers.0.mlp.moe.experts.routed_experts.w13_qweight"
+        in transformed
+    )
+    assert (
+        "model.language_model.layers.0.mlp.moe.experts."
+        "routed_experts.w13_qweight_type" in transformed
+    )
+    assert (
+        "model.language_model.layers.0.mlp.moe.experts.routed_experts.w2_qweight"
+        in transformed
+    )
+    assert (
+        "model.language_model.layers.0.mlp.moe.experts."
+        "routed_experts.w2_qweight_type" in transformed
+    )
+
+
+def test_gemma4_adapter_flattens_patch_embed_weight():
+    adapter = Gemma4GGUFAdapter(PretrainedConfig(model_type="gemma4"))
+    weight = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+
+    transformed = adapter.transform_weight(
+        "model.vision_tower.patch_embedder.input_proj.weight",
+        weight,
+    )
+
+    assert transformed.shape == (2, 60)
+    assert torch.equal(transformed, weight.flatten(1))
+
+
+def test_qwen3_5_adapter_reshapes_gguf_weights():
+    adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5_moe"))
+    shared_gate = torch.arange(4)
+    conv1d = torch.arange(6).reshape(2, 3)
+
+    assert adapter.transform_weight(
+        "model.layers.0.mlp.shared_expert_gate",
+        shared_gate,
+    ).shape == (1, 4)
+    transformed_conv = adapter.transform_weight(
+        "model.layers.0.linear_attn.conv1d.weight",
+        conv1d,
+    )
+    assert transformed_conv.shape == (2, 1, 3)
+    assert torch.equal(transformed_conv[:, 0, :], conv1d)
 
 
 def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch):

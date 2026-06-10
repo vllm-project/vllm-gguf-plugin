@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import gguf
 import regex
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from vllm.logger import init_logger
 
 from ..gguf_utils import maybe_patch_hf_config_from_gguf
@@ -27,6 +27,132 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
+
+_GGUF_MODEL_TYPE_ALIASES = {
+    "gemma4": "gemma3",
+}
+
+
+def _gguf_arch_model_type(model_type: str) -> str:
+    return _GGUF_MODEL_TYPE_ALIASES.get(model_type, model_type)
+
+
+def _gguf_name_with_suffix(base_name: str, suffix: str) -> str:
+    return f"{base_name}.{suffix}" if suffix else base_name
+
+
+def _get_vision_num_layers(config: PretrainedConfig) -> int:
+    vision_num_layers = getattr(config.vision_config, "num_hidden_layers", None)
+    if vision_num_layers is None:
+        vision_num_layers = config.vision_config.depth
+    return vision_num_layers
+
+
+def _add_gemma4_gguf_mappings(
+    config: PretrainedConfig,
+    gguf_to_hf_name_map: dict[str, str],
+    sideload_params: list[re.Pattern],
+) -> None:
+    text_config = config.get_text_config()
+    for idx in range(text_config.num_hidden_layers):
+        layer_prefix = f"model.language_model.layers.{idx}"
+        gguf_to_hf_name_map[f"blk.{idx}.layer_output_scale.weight"] = (
+            f"{layer_prefix}.layer_scalar"
+        )
+        gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_inp.scale"] = (
+            f"{layer_prefix}.mlp.router.scale"
+        )
+        gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_inp.weight"] = (
+            f"{layer_prefix}.mlp.router.proj.weight"
+        )
+        gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.scale"] = (
+            f"{layer_prefix}.mlp.router.per_expert_scale"
+        )
+        gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_up_exps.weight"] = (
+            f"{layer_prefix}.mlp.experts.gate_up_proj.weight"
+        )
+        gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
+            f"{layer_prefix}.mlp.experts.down_proj.weight"
+        )
+        gguf_to_hf_name_map[f"blk.{idx}.post_ffw_norm_1.weight"] = (
+            f"{layer_prefix}.post_feedforward_layernorm_1.weight"
+        )
+        gguf_to_hf_name_map[f"blk.{idx}.post_ffw_norm_2.weight"] = (
+            f"{layer_prefix}.post_feedforward_layernorm_2.weight"
+        )
+        gguf_to_hf_name_map[f"blk.{idx}.pre_ffw_norm_2.weight"] = (
+            f"{layer_prefix}.pre_feedforward_layernorm_2.weight"
+        )
+        sideload_params.extend(
+            [
+                regex.compile(
+                    f"model\\.language_model\\.layers\\.{idx}"
+                    r"\.mlp\.experts\.(gate_up_proj|down_proj)"
+                ),
+                regex.compile(
+                    f"model\\.layers\\.{idx}"
+                    r"\.mlp\.experts\.(gate_up_proj|down_proj)"
+                ),
+            ]
+        )
+
+    gguf_to_hf_name_map.update(
+        {
+            "v.std_bias": "model.vision_tower.std_bias",
+            "v.std_scale": "model.vision_tower.std_scale",
+            "v.patch_embd.weight": (
+                "model.vision_tower.patch_embedder.input_proj.weight"
+            ),
+            "v.position_embd.weight": (
+                "model.vision_tower.patch_embedder.position_embedding_table"
+            ),
+            "mm.input_projection.weight": (
+                "model.embed_vision.embedding_projection.weight"
+            ),
+        }
+    )
+
+    for idx in range(_get_vision_num_layers(config)):
+        vision_prefix = f"model.vision_tower.encoder.layers.{idx}"
+        gguf_to_hf_name_map.update(
+            {
+                f"v.blk.{idx}.attn_q.weight": (
+                    f"{vision_prefix}.self_attn.q_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.attn_k.weight": (
+                    f"{vision_prefix}.self_attn.k_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.attn_v.weight": (
+                    f"{vision_prefix}.self_attn.v_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.attn_out.weight": (
+                    f"{vision_prefix}.self_attn.o_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.attn_q_norm.weight": (
+                    f"{vision_prefix}.self_attn.q_norm.weight"
+                ),
+                f"v.blk.{idx}.attn_k_norm.weight": (
+                    f"{vision_prefix}.self_attn.k_norm.weight"
+                ),
+                f"v.blk.{idx}.ffn_gate.weight": (
+                    f"{vision_prefix}.mlp.gate_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.ffn_up.weight": (
+                    f"{vision_prefix}.mlp.up_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.ffn_down.weight": (
+                    f"{vision_prefix}.mlp.down_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.ln1.weight": f"{vision_prefix}.layer_norm1.weight",
+                f"v.blk.{idx}.attn_post_norm.weight": (
+                    f"{vision_prefix}.post_attention_layernorm.weight"
+                ),
+                f"v.blk.{idx}.ln2.weight": f"{vision_prefix}.layer_norm2.weight",
+                f"v.blk.{idx}.ffn_post_norm.weight": (
+                    f"{vision_prefix}.post_feedforward_layernorm.weight"
+                ),
+            }
+        )
 
 
 class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
@@ -49,6 +175,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         is_multimodal = (
             hasattr(config, "vision_config") and config.vision_config is not None
         )
+        orig_model_type = model_type
 
         gguf_to_hf_name_map: dict[str, str] = {}
         sideload_params: list[re.Pattern] = []
@@ -57,6 +184,8 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_type = "command-r"
         if model_type == "gemma3_text":
             model_type = "gemma3"
+        if model_type == "gemma4":
+            _add_gemma4_gguf_mappings(config, gguf_to_hf_name_map, sideload_params)
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             for idx in range(config.num_hidden_layers):
@@ -78,24 +207,55 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
                 )
-        if model_type in ("qwen2_moe", "qwen3_moe"):
+        if model_type == "qwen3_5":
+            model_type = "qwen35"
+        if model_type in ("qwen2_moe", "qwen3_moe", "qwen3_5_moe"):
             model_type = model_type.replace("_", "")
-            for idx in range(config.num_hidden_layers):
+            if is_multimodal and model_type == "qwen35moe":
+                layer_prefix = "model.language_model.layers"
+            else:
+                layer_prefix = "model.layers"
+            for idx in range(text_config.num_hidden_layers):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
+                    f"{layer_prefix}.{idx}.mlp.experts.0.down_proj.weight"
                 )
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
+                    f"{layer_prefix}.{idx}.mlp.experts.0.gate_proj.weight"
                 )
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+                    f"{layer_prefix}.{idx}.mlp.experts.0.up_proj.weight"
                 )
                 sideload_params.append(
                     regex.compile(
-                        f"model\\.layers\\.{idx}"
+                        f"{re.escape(layer_prefix)}\\.{idx}"
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
                 )
+        if orig_model_type in ("qwen3_5", "qwen3_5_moe"):
+            layer_prefix = (
+                "model.language_model.layers" if is_multimodal else "model.layers"
+            )
+            layer_types = getattr(text_config, "layer_types", [])
+            for idx, layer_type in enumerate(layer_types):
+                if layer_type == "linear_attention":
+                    gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                        f"{layer_prefix}.{idx}.linear_attn.dt_bias"
+                    )
+        if orig_model_type == "qwen3_5_moe" and is_multimodal:
+            gguf_to_hf_name_map.update(
+                {
+                    "mm.0.weight": "model.visual.merger.linear_fc1.weight",
+                    "mm.0.bias": "model.visual.merger.linear_fc1.bias",
+                    "mm.2.weight": "model.visual.merger.linear_fc2.weight",
+                    "mm.2.bias": "model.visual.merger.linear_fc2.bias",
+                }
+            )
+            sideload_params.extend(
+                [
+                    regex.compile(r"model\.visual\.merger\.norm\.weight"),
+                    regex.compile(r"model\.visual\.merger\.norm\.bias"),
+                ]
+            )
         if model_type == "olmoe":
             for idx in range(config.num_hidden_layers):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
@@ -143,7 +303,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
-            if value == model_type:
+            if value == _gguf_arch_model_type(model_type):
                 arch = key
                 break
         if arch is None:
@@ -154,13 +314,16 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         if is_multimodal:
             mm_proj_arch = gguf.MODEL_ARCH.MMPROJ
             vision_name_map = gguf.get_tensor_name_map(
-                mm_proj_arch, config.vision_config.num_hidden_layers
+                mm_proj_arch, _get_vision_num_layers(config)
             )
         else:
             vision_name_map = None
 
         with torch.device("meta"):
-            dummy_model = AutoModelForCausalLM.from_config(
+            auto_cls = (
+                AutoModelForImageTextToText if is_multimodal else AutoModelForCausalLM
+            )
+            dummy_model = auto_cls.from_config(
                 config, trust_remote_code=model_config.trust_remote_code
             )
 
@@ -206,7 +369,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 gguf_name = text_name_map.get_name(base_name)
             if gguf_name is None:
                 return None
-            return gguf_name + "." + suffix
+            return _gguf_name_with_suffix(gguf_name, suffix)
 
         unmapped_params = []
         for hf_name in state_dict:
