@@ -35,6 +35,7 @@ from .gguf_utils import (
     resolve_gguf_config_source,
     split_remote_gguf,
 )
+from .gguf_tokenizer_builder import build_tokenizer_from_gguf
 from .loader import GGUFModelLoader
 from .quantization import GGUFConfig
 
@@ -111,6 +112,9 @@ def _patch_engine_args() -> None:
 
         if _is_gguf_reference(self.model):
             gguf_model = self.model
+            if self.tokenizer is None and check_gguf_file(gguf_model):
+                if tokenizer_path := build_tokenizer_from_gguf(gguf_model):
+                    self.tokenizer = tokenizer_path
             if self.quantization is None:
                 self.quantization = "gguf"
             if self.load_format == "auto":
