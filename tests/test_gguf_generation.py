@@ -216,7 +216,7 @@ def check_model_outputs(
     MODELS,
 )
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("num_logprobs", [8])
 def test_models(
     example_prompts: list[str],
     model: GGUFTestConfig,
