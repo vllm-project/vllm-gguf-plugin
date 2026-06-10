@@ -48,6 +48,153 @@ def _get_vision_num_layers(config: PretrainedConfig) -> int:
     return vision_num_layers
 
 
+def _is_gemma4_mtp_config(config: PretrainedConfig) -> bool:
+    return config.model_type in ("gemma4_assistant", "gemma4_mtp")
+
+
+def _get_mtp_num_layers(text_config: PretrainedConfig) -> int:
+    return int(
+        getattr(
+            text_config,
+            "mtp_num_hidden_layers",
+            getattr(text_config, "num_nextn_predict_layers", 0),
+        )
+        or 0
+    )
+
+
+def _add_gemma4_mtp_gguf_mappings(
+    config: PretrainedConfig,
+    gguf_to_hf_name_map: dict[str, str],
+) -> None:
+    text_config = config.get_text_config()
+    num_layers = int(getattr(text_config, "num_hidden_layers", 0) or 0)
+
+    gguf_to_hf_name_map.update(
+        {
+            "token_embd.weight": "model.embed_tokens.weight",
+            "output_norm.weight": "model.norm.weight",
+            "nextn.pre_projection.weight": "model.pre_projection.weight",
+            "nextn.post_projection.weight": "model.post_projection.weight",
+        }
+    )
+
+    for idx in range(num_layers):
+        layer_prefix = f"model.layers.{idx}"
+        gguf_to_hf_name_map.update(
+            {
+                f"blk.{idx}.attn_norm.weight": (
+                    f"{layer_prefix}.input_layernorm.weight"
+                ),
+                f"blk.{idx}.attn_q.weight": (f"{layer_prefix}.self_attn.q_proj.weight"),
+                f"blk.{idx}.attn_output.weight": (
+                    f"{layer_prefix}.self_attn.o_proj.weight"
+                ),
+                f"blk.{idx}.attn_q_norm.weight": (
+                    f"{layer_prefix}.self_attn.q_norm.weight"
+                ),
+                f"blk.{idx}.post_attention_norm.weight": (
+                    f"{layer_prefix}.post_attention_layernorm.weight"
+                ),
+                f"blk.{idx}.ffn_norm.weight": (
+                    f"{layer_prefix}.pre_feedforward_layernorm.weight"
+                ),
+                f"blk.{idx}.post_ffw_norm.weight": (
+                    f"{layer_prefix}.post_feedforward_layernorm.weight"
+                ),
+                f"blk.{idx}.ffn_gate.weight": (f"{layer_prefix}.mlp.gate_proj.weight"),
+                f"blk.{idx}.ffn_up.weight": f"{layer_prefix}.mlp.up_proj.weight",
+                f"blk.{idx}.ffn_down.weight": (f"{layer_prefix}.mlp.down_proj.weight"),
+                f"blk.{idx}.layer_output_scale.weight": (
+                    f"{layer_prefix}.layer_scalar"
+                ),
+            }
+        )
+
+
+def _add_qwen3_5_mtp_gguf_mappings(
+    config: PretrainedConfig,
+    gguf_to_hf_name_map: dict[str, str],
+    sideload_params: list[re.Pattern],
+) -> None:
+    text_config = config.get_text_config()
+    num_mtp_layers = _get_mtp_num_layers(text_config)
+    if num_mtp_layers <= 0:
+        return
+
+    base_layer = int(getattr(text_config, "num_hidden_layers", 0) or 0)
+    for mtp_idx in range(num_mtp_layers):
+        gguf_idx = base_layer + mtp_idx
+        layer_prefix = f"mtp.layers.{mtp_idx}"
+        gguf_to_hf_name_map.update(
+            {
+                f"blk.{gguf_idx}.attn_norm.weight": (
+                    f"{layer_prefix}.input_layernorm.weight"
+                ),
+                f"blk.{gguf_idx}.post_attention_norm.weight": (
+                    f"{layer_prefix}.post_attention_layernorm.weight"
+                ),
+                f"blk.{gguf_idx}.attn_q.weight": (
+                    f"{layer_prefix}.self_attn.q_proj.weight"
+                ),
+                f"blk.{gguf_idx}.attn_k.weight": (
+                    f"{layer_prefix}.self_attn.k_proj.weight"
+                ),
+                f"blk.{gguf_idx}.attn_v.weight": (
+                    f"{layer_prefix}.self_attn.v_proj.weight"
+                ),
+                f"blk.{gguf_idx}.attn_output.weight": (
+                    f"{layer_prefix}.self_attn.o_proj.weight"
+                ),
+                f"blk.{gguf_idx}.attn_q_norm.weight": (
+                    f"{layer_prefix}.self_attn.q_norm.weight"
+                ),
+                f"blk.{gguf_idx}.attn_k_norm.weight": (
+                    f"{layer_prefix}.self_attn.k_norm.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_gate_inp.weight": (
+                    f"{layer_prefix}.mlp.gate.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_gate_inp_shexp.weight": (
+                    f"{layer_prefix}.mlp.shared_expert_gate.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_gate_shexp.weight": (
+                    f"{layer_prefix}.mlp.shared_expert.gate_proj.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_up_shexp.weight": (
+                    f"{layer_prefix}.mlp.shared_expert.up_proj.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_down_shexp.weight": (
+                    f"{layer_prefix}.mlp.shared_expert.down_proj.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_gate_exps.weight": (
+                    f"{layer_prefix}.mlp.experts.0.gate_proj.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_up_exps.weight": (
+                    f"{layer_prefix}.mlp.experts.0.up_proj.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_down_exps.weight": (
+                    f"{layer_prefix}.mlp.experts.0.down_proj.weight"
+                ),
+                f"blk.{gguf_idx}.nextn.eh_proj.weight": "mtp.fc.weight",
+                f"blk.{gguf_idx}.nextn.enorm.weight": (
+                    "mtp.pre_fc_norm_embedding.weight"
+                ),
+                f"blk.{gguf_idx}.nextn.hnorm.weight": ("mtp.pre_fc_norm_hidden.weight"),
+                f"blk.{gguf_idx}.nextn.shared_head_norm.weight": ("mtp.norm.weight"),
+                f"blk.{gguf_idx}.nextn.embed_tokens.weight": (
+                    "mtp.embed_tokens.weight"
+                ),
+            }
+        )
+        sideload_params.append(
+            regex.compile(
+                f"mtp\\.layers\\.{mtp_idx}"
+                r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+            )
+        )
+
+
 def _add_gemma4_gguf_mappings(
     config: PretrainedConfig,
     gguf_to_hf_name_map: dict[str, str],
@@ -180,6 +327,10 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         gguf_to_hf_name_map: dict[str, str] = {}
         sideload_params: list[re.Pattern] = []
 
+        if _is_gemma4_mtp_config(config):
+            _add_gemma4_mtp_gguf_mappings(config, gguf_to_hf_name_map)
+            return gguf_to_hf_name_map
+
         if model_type == "cohere":
             model_type = "command-r"
         if model_type == "gemma3_text":
@@ -241,6 +392,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                     gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
                         f"{layer_prefix}.{idx}.linear_attn.dt_bias"
                     )
+            _add_qwen3_5_mtp_gguf_mappings(config, gguf_to_hf_name_map, sideload_params)
         if orig_model_type == "qwen3_5_moe" and is_multimodal:
             gguf_to_hf_name_map.update(
                 {

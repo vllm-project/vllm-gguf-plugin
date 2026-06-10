@@ -24,7 +24,7 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
 
     @classmethod
     def matches(cls, config) -> bool:
-        return config.model_type in ("qwen3_5", "qwen3_5_moe")
+        return config.model_type in ("qwen3_5", "qwen3_5_moe", "qwen3_5_mtp")
 
     def transform_weight(
         self,

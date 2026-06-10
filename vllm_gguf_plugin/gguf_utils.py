@@ -205,6 +205,19 @@ def _gguf_field_value(field: Any) -> Any:
         return None
 
 
+def _gguf_reader_value(reader: gguf.GGUFReader, key: str) -> Any:
+    field = reader.get_field(key)
+    if field is None:
+        return None
+    return _gguf_field_value(field)
+
+
+def _update_config(config: PretrainedConfig, values: dict[str, Any]) -> None:
+    values = {key: value for key, value in values.items() if value is not None}
+    if values:
+        config.update(values)
+
+
 @cache
 def _get_local_gguf_base_model_ids(model: str | Path) -> tuple[str, ...]:
     try:
@@ -231,11 +244,19 @@ def _source_has_any_file(
     return any(file_or_path_exists(model, filename, revision) for filename in filenames)
 
 
+def _local_gguf_source_candidates(source: Path) -> tuple[Path, ...]:
+    parent = source.parent
+    if parent == source:
+        return (source,)
+    return (source, parent)
+
+
 def _resolve_gguf_hf_source(
     model: str | Path,
     filenames: tuple[str, ...],
     revision: str | None = None,
 ) -> str | Path:
+    local_sources: tuple[Path, ...] = ()
     if is_remote_gguf(model):
         source: str | Path
         source, _ = split_remote_gguf(model)
@@ -244,11 +265,15 @@ def _resolve_gguf_hf_source(
         )
     elif check_gguf_file(model):
         source = Path(model).parent
+        local_sources = _local_gguf_source_candidates(source)
         base_model_ids = list(_get_local_gguf_base_model_ids(model))
     else:
         return model
 
-    if _source_has_any_file(source, filenames, revision=revision):
+    for local_source in local_sources:
+        if _source_has_any_file(local_source, filenames, revision=revision):
+            return local_source
+    if not local_sources and _source_has_any_file(source, filenames, revision=revision):
         return source
 
     for base_model in base_model_ids:
@@ -481,6 +506,117 @@ def maybe_patch_hf_config_from_gguf(
     if has_lm_head is not None:
         text_config = hf_config.get_text_config()
         text_config.update({"tie_word_embeddings": not has_lm_head})
+
+    if check_gguf_file(model):
+        try:
+            reader = gguf.GGUFReader(str(model))
+        except Exception as e:
+            logger.debug("Failed to inspect GGUF metadata for %s: %s", model, e)
+        else:
+            architecture = _gguf_reader_value(reader, "general.architecture")
+            if architecture == "qwen35moe":
+                nextn_layers = _gguf_reader_value(
+                    reader, "qwen35moe.nextn_predict_layers"
+                )
+                block_count = _gguf_reader_value(reader, "qwen35moe.block_count")
+                if nextn_layers:
+                    text_config = hf_config.get_text_config()
+                    updates: dict[str, Any] = {
+                        "mtp_num_hidden_layers": int(nextn_layers),
+                        "num_nextn_predict_layers": int(nextn_layers),
+                    }
+                    if block_count is not None:
+                        updates["num_hidden_layers"] = max(
+                            int(block_count) - int(nextn_layers),
+                            0,
+                        )
+                    _update_config(text_config, updates)
+            elif architecture == "gemma4-assistant":
+                prefix = "gemma4-assistant"
+                text_config = hf_config.get_text_config()
+                nextn_layers = _gguf_reader_value(
+                    reader, f"{prefix}.nextn_predict_layers"
+                )
+                block_count = _gguf_reader_value(reader, f"{prefix}.block_count")
+                head_count_kv = _gguf_reader_value(
+                    reader, f"{prefix}.attention.head_count_kv"
+                )
+                layer_types = None
+                sliding_pattern = _gguf_reader_value(
+                    reader, f"{prefix}.attention.sliding_window_pattern"
+                )
+                if sliding_pattern:
+                    layer_types = [
+                        "sliding_attention" if is_sliding else "full_attention"
+                        for is_sliding in sliding_pattern
+                    ]
+                rope_theta = _gguf_reader_value(reader, f"{prefix}.rope.freq_base")
+                rope_theta_swa = _gguf_reader_value(
+                    reader, f"{prefix}.rope.freq_base_swa"
+                )
+
+                _update_config(
+                    hf_config,
+                    {
+                        "model_type": "gemma4_assistant",
+                        "architectures": ["Gemma4MTPModel"],
+                        "backbone_hidden_size": _gguf_reader_value(
+                            reader, f"{prefix}.embedding_length_out"
+                        ),
+                        "n_predict": 1,
+                    },
+                )
+                _update_config(
+                    text_config,
+                    {
+                        "model_type": "gemma4_assistant",
+                        "hidden_size": _gguf_reader_value(
+                            reader, f"{prefix}.embedding_length"
+                        ),
+                        "backbone_hidden_size": _gguf_reader_value(
+                            reader, f"{prefix}.embedding_length_out"
+                        ),
+                        "num_hidden_layers": block_count,
+                        "num_nextn_predict_layers": nextn_layers,
+                        "mtp_num_hidden_layers": nextn_layers,
+                        "intermediate_size": _gguf_reader_value(
+                            reader, f"{prefix}.feed_forward_length"
+                        ),
+                        "num_attention_heads": _gguf_reader_value(
+                            reader, f"{prefix}.attention.head_count"
+                        ),
+                        "num_key_value_heads": head_count_kv[0]
+                        if head_count_kv
+                        else None,
+                        "num_global_key_value_heads": head_count_kv[-1]
+                        if head_count_kv
+                        else None,
+                        "head_dim": _gguf_reader_value(
+                            reader, f"{prefix}.attention.key_length_swa"
+                        ),
+                        "global_head_dim": _gguf_reader_value(
+                            reader, f"{prefix}.attention.key_length"
+                        ),
+                        "sliding_window": _gguf_reader_value(
+                            reader, f"{prefix}.attention.sliding_window"
+                        ),
+                        "layer_types": layer_types,
+                        "attention_k_eq_v": True,
+                        "attention_bias": False,
+                        "num_kv_shared_layers": 0,
+                        "rope_local_base_freq": rope_theta_swa,
+                        "rope_parameters": {
+                            "sliding_attention": {
+                                "rope_type": "default",
+                                "rope_theta": rope_theta_swa,
+                            },
+                            "full_attention": {
+                                "rope_type": "default",
+                                "rope_theta": rope_theta,
+                            },
+                        },
+                    },
+                )
 
     # Patch multimodal config if mmproj.gguf exists
     mmproj_path = detect_gguf_multimodal(model)

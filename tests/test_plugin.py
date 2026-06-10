@@ -24,10 +24,15 @@ import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
+from vllm_gguf_plugin.gguf_utils import resolve_gguf_config_source
 from vllm_gguf_plugin.quantization import (
     GGUFUninitializedParameter,
     GGUFWeightParameter,
     GGUFWeightTypeParameter,
+)
+from vllm_gguf_plugin.weights_adapter.default import (
+    _add_gemma4_mtp_gguf_mappings,
+    _add_qwen3_5_mtp_gguf_mappings,
 )
 from vllm_gguf_plugin.weights_adapter.gemma4 import Gemma4GGUFAdapter
 from vllm_gguf_plugin.weights_adapter.qwen3_5 import Qwen3_5GGUFAdapter
@@ -296,6 +301,20 @@ def test_gemma4_adapter_flattens_patch_embed_weight():
     assert torch.equal(transformed, weight.flatten(1))
 
 
+def test_gemma4_mtp_gguf_mappings():
+    config = PretrainedConfig(model_type="gemma4_assistant", num_hidden_layers=2)
+    mapping: dict[str, str] = {}
+
+    _add_gemma4_mtp_gguf_mappings(config, mapping)
+
+    assert mapping["token_embd.weight"] == "model.embed_tokens.weight"
+    assert mapping["nextn.pre_projection.weight"] == "model.pre_projection.weight"
+    assert mapping["nextn.post_projection.weight"] == "model.post_projection.weight"
+    assert mapping["blk.1.attn_q.weight"] == ("model.layers.1.self_attn.q_proj.weight")
+    assert mapping["blk.1.ffn_gate.weight"] == ("model.layers.1.mlp.gate_proj.weight")
+    assert mapping["blk.1.layer_output_scale.weight"] == "model.layers.1.layer_scalar"
+
+
 def test_qwen3_5_adapter_reshapes_gguf_weights():
     adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5_moe"))
     shared_gate = torch.arange(4)
@@ -311,6 +330,31 @@ def test_qwen3_5_adapter_reshapes_gguf_weights():
     )
     assert transformed_conv.shape == (2, 1, 3)
     assert torch.equal(transformed_conv[:, 0, :], conv1d)
+
+
+def test_qwen3_5_mtp_gguf_mappings():
+    config = PretrainedConfig(
+        model_type="qwen3_5_moe",
+        num_hidden_layers=40,
+        mtp_num_hidden_layers=1,
+    )
+    mapping: dict[str, str] = {}
+    sideload_params = []
+
+    _add_qwen3_5_mtp_gguf_mappings(config, mapping, sideload_params)
+
+    assert mapping["blk.40.attn_q.weight"] == ("mtp.layers.0.self_attn.q_proj.weight")
+    assert mapping["blk.40.attn_k.weight"] == ("mtp.layers.0.self_attn.k_proj.weight")
+    assert mapping["blk.40.ffn_gate_inp.weight"] == "mtp.layers.0.mlp.gate.weight"
+    assert mapping["blk.40.ffn_gate_inp_shexp.weight"] == (
+        "mtp.layers.0.mlp.shared_expert_gate.weight"
+    )
+    assert mapping["blk.40.ffn_gate_exps.weight"] == (
+        "mtp.layers.0.mlp.experts.0.gate_proj.weight"
+    )
+    assert mapping["blk.40.nextn.eh_proj.weight"] == "mtp.fc.weight"
+    assert mapping["blk.40.nextn.shared_head_norm.weight"] == "mtp.norm.weight"
+    assert sideload_params[0].fullmatch("mtp.layers.0.mlp.experts.15.gate_proj.weight")
 
 
 def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch):
@@ -387,6 +431,17 @@ def test_gguf_config_parser_uses_gguf_file_when_parent_has_no_config(
     assert calls["model"] == gguf_path.parent
     assert calls["trust_remote_code"] is False
     assert calls["gguf_file"] == gguf_path.name
+
+
+def test_gguf_config_source_uses_nearest_parent_config(tmp_path):
+    model_dir = tmp_path / "model"
+    mtp_dir = model_dir / "MTP"
+    mtp_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    gguf_path = mtp_dir / "draft.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    assert resolve_gguf_config_source(gguf_path) == model_dir
 
 
 def test_gguf_config_parser_disables_trust_for_base_model_redirect(
@@ -482,6 +537,11 @@ def test_register_disables_trust_for_gguf_speculator_redirect(tmp_path, monkeypa
         gguf_plugin_module,
         "resolve_gguf_config_source",
         lambda model, revision=None: "base/repo",
+    )
+    monkeypatch.setattr(
+        gguf_plugin_module.PretrainedConfig,
+        "get_config_dict",
+        lambda *args, **kwargs: ({}, {}),
     )
 
     model, tokenizer, speculative_config, trust_remote_code = (

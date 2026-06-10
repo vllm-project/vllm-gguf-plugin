@@ -40,7 +40,7 @@ class Gemma4GGUFAdapter(GGUFWeightsAdapter):
 
     @classmethod
     def matches(cls, config) -> bool:
-        return config.model_type == "gemma4"
+        return config.model_type in ("gemma4", "gemma4_assistant", "gemma4_mtp")
 
     def map_weights(
         self,
