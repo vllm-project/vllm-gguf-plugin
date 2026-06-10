@@ -24,7 +24,10 @@ import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
-from vllm_gguf_plugin.gguf_utils import resolve_gguf_config_source
+from vllm_gguf_plugin.gguf_utils import (
+    _gguf_sequence_edge,
+    resolve_gguf_config_source,
+)
 from vllm_gguf_plugin.quantization import (
     GGUFUninitializedParameter,
     GGUFWeightParameter,
@@ -313,6 +316,14 @@ def test_gemma4_mtp_gguf_mappings():
     assert mapping["blk.1.attn_q.weight"] == ("model.layers.1.self_attn.q_proj.weight")
     assert mapping["blk.1.ffn_gate.weight"] == ("model.layers.1.mlp.gate_proj.weight")
     assert mapping["blk.1.layer_output_scale.weight"] == "model.layers.1.layer_scalar"
+
+
+def test_gguf_sequence_edge_accepts_scalar_and_sequence_values():
+    assert _gguf_sequence_edge(None, first=True) is None
+    assert _gguf_sequence_edge(8, first=True) == 8
+    assert _gguf_sequence_edge(8, first=False) == 8
+    assert _gguf_sequence_edge([8, 8, 8, 2], first=True) == 8
+    assert _gguf_sequence_edge([8, 8, 8, 2], first=False) == 2
 
 
 def test_qwen3_5_adapter_reshapes_gguf_weights():

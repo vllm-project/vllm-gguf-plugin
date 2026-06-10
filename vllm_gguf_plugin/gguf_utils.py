@@ -218,6 +218,17 @@ def _update_config(config: PretrainedConfig, values: dict[str, Any]) -> None:
         config.update(values)
 
 
+def _gguf_sequence_edge(value: Any, *, first: bool) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return value
+    try:
+        return value[0] if first else value[-1]
+    except (TypeError, KeyError, IndexError):
+        return value
+
+
 @cache
 def _get_local_gguf_base_model_ids(model: str | Path) -> tuple[str, ...]:
     try:
@@ -585,12 +596,14 @@ def maybe_patch_hf_config_from_gguf(
                         "num_attention_heads": _gguf_reader_value(
                             reader, f"{prefix}.attention.head_count"
                         ),
-                        "num_key_value_heads": head_count_kv[0]
-                        if head_count_kv
-                        else None,
-                        "num_global_key_value_heads": head_count_kv[-1]
-                        if head_count_kv
-                        else None,
+                        "num_key_value_heads": _gguf_sequence_edge(
+                            head_count_kv,
+                            first=True,
+                        ),
+                        "num_global_key_value_heads": _gguf_sequence_edge(
+                            head_count_kv,
+                            first=False,
+                        ),
                         "head_dim": _gguf_reader_value(
                             reader, f"{prefix}.attention.key_length_swa"
                         ),

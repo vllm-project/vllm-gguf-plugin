@@ -99,7 +99,6 @@ class GGUFModelLoader(BaseModelLoader):
             with target_device:
                 model = initialize_model(
                     vllm_config=vllm_config,
-                    model_config=model_config,
                     prefix=prefix,
                 )
             model.load_weights(
