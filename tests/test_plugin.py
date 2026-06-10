@@ -43,6 +43,7 @@ from vllm_gguf_plugin.quantization import (
 )
 from vllm_gguf_plugin.weights_adapter.default import (
     GGUFWeightsAdapter,
+    _add_gemma4_gguf_mappings,
     _add_gemma4_mtp_gguf_mappings,
     _add_qwen3_5_mtp_gguf_mappings,
 )
@@ -299,20 +300,19 @@ def test_gemma4_adapter_transforms_quantized_moe_names():
         adapter.map_weights(
             [
                 (
-                    "model.language_model.layers.0.mlp.experts.gate_up_proj.qweight",
+                    "model.language_model.layers.0.experts.gate_up_proj.qweight",
                     weight,
                 ),
                 (
-                    "model.language_model.layers.0.mlp.experts."
-                    "gate_up_proj.qweight_type",
+                    "model.language_model.layers.0.experts.gate_up_proj.qweight_type",
                     torch.tensor(1, dtype=torch.uint8),
                 ),
                 (
-                    "model.language_model.layers.0.mlp.experts.down_proj.qweight",
+                    "model.language_model.layers.0.experts.down_proj.qweight",
                     weight,
                 ),
                 (
-                    "model.language_model.layers.0.mlp.experts.down_proj.qweight_type",
+                    "model.language_model.layers.0.experts.down_proj.qweight_type",
                     torch.tensor(1, dtype=torch.uint8),
                 ),
             ]
@@ -320,20 +320,51 @@ def test_gemma4_adapter_transforms_quantized_moe_names():
     )
 
     assert (
-        "model.language_model.layers.0.mlp.moe.experts.routed_experts.w13_qweight"
+        "model.language_model.layers.0.moe.experts.routed_experts.w13_qweight"
         in transformed
     )
     assert (
-        "model.language_model.layers.0.mlp.moe.experts."
-        "routed_experts.w13_qweight_type" in transformed
-    )
-    assert (
-        "model.language_model.layers.0.mlp.moe.experts.routed_experts.w2_qweight"
+        "model.language_model.layers.0.moe.experts.routed_experts.w13_qweight_type"
         in transformed
     )
     assert (
-        "model.language_model.layers.0.mlp.moe.experts."
-        "routed_experts.w2_qweight_type" in transformed
+        "model.language_model.layers.0.moe.experts.routed_experts.w2_qweight"
+        in transformed
+    )
+    assert (
+        "model.language_model.layers.0.moe.experts.routed_experts.w2_qweight_type"
+        in transformed
+    )
+
+
+def test_gemma4_gguf_mappings_match_current_hf_names():
+    config = PretrainedConfig(model_type="gemma4", num_hidden_layers=2)
+    config.vision_config = PretrainedConfig(num_hidden_layers=2)
+    mapping: dict[str, str] = {}
+    sideload_params = []
+
+    _add_gemma4_gguf_mappings(config, mapping, sideload_params)
+
+    assert mapping["blk.1.ffn_gate_inp.scale"] == (
+        "model.language_model.layers.1.router.scale"
+    )
+    assert mapping["blk.1.ffn_gate_inp.weight"] == (
+        "model.language_model.layers.1.router.proj.weight"
+    )
+    assert mapping["blk.1.ffn_down_exps.scale"] == (
+        "model.language_model.layers.1.router.per_expert_scale"
+    )
+    assert mapping["blk.1.ffn_gate_up_exps.weight"] == (
+        "model.language_model.layers.1.experts.gate_up_proj.weight"
+    )
+    assert mapping["blk.1.ffn_down_exps.weight"] == (
+        "model.language_model.layers.1.experts.down_proj.weight"
+    )
+    assert mapping["v.blk.1.ln1.weight"] == (
+        "model.vision_tower.encoder.layers.1.input_layernorm.weight"
+    )
+    assert mapping["v.blk.1.ln2.weight"] == (
+        "model.vision_tower.encoder.layers.1.pre_feedforward_layernorm.weight"
     )
 
 

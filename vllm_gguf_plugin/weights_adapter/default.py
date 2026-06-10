@@ -211,19 +211,19 @@ def _add_gemma4_gguf_mappings(
             f"{layer_prefix}.layer_scalar"
         )
         gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_inp.scale"] = (
-            f"{layer_prefix}.mlp.router.scale"
+            f"{layer_prefix}.router.scale"
         )
         gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_inp.weight"] = (
-            f"{layer_prefix}.mlp.router.proj.weight"
+            f"{layer_prefix}.router.proj.weight"
         )
         gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.scale"] = (
-            f"{layer_prefix}.mlp.router.per_expert_scale"
+            f"{layer_prefix}.router.per_expert_scale"
         )
         gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_up_exps.weight"] = (
-            f"{layer_prefix}.mlp.experts.gate_up_proj.weight"
+            f"{layer_prefix}.experts.gate_up_proj.weight"
         )
         gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
-            f"{layer_prefix}.mlp.experts.down_proj.weight"
+            f"{layer_prefix}.experts.down_proj.weight"
         )
         gguf_to_hf_name_map[f"blk.{idx}.post_ffw_norm_1.weight"] = (
             f"{layer_prefix}.post_feedforward_layernorm_1.weight"
@@ -238,11 +238,11 @@ def _add_gemma4_gguf_mappings(
             [
                 regex.compile(
                     f"model\\.language_model\\.layers\\.{idx}"
-                    r"\.mlp\.experts\.(gate_up_proj|down_proj)"
+                    r"\.experts\.(gate_up_proj|down_proj)(\.weight)?"
                 ),
                 regex.compile(
                     f"model\\.layers\\.{idx}"
-                    r"\.mlp\.experts\.(gate_up_proj|down_proj)"
+                    r"\.experts\.(gate_up_proj|down_proj)(\.weight)?"
                 ),
             ]
         )
@@ -294,11 +294,15 @@ def _add_gemma4_gguf_mappings(
                 f"v.blk.{idx}.ffn_down.weight": (
                     f"{vision_prefix}.mlp.down_proj.linear.weight"
                 ),
-                f"v.blk.{idx}.ln1.weight": f"{vision_prefix}.layer_norm1.weight",
+                f"v.blk.{idx}.ln1.weight": (
+                    f"{vision_prefix}.input_layernorm.weight"
+                ),
                 f"v.blk.{idx}.attn_post_norm.weight": (
                     f"{vision_prefix}.post_attention_layernorm.weight"
                 ),
-                f"v.blk.{idx}.ln2.weight": f"{vision_prefix}.layer_norm2.weight",
+                f"v.blk.{idx}.ln2.weight": (
+                    f"{vision_prefix}.pre_feedforward_layernorm.weight"
+                ),
                 f"v.blk.{idx}.ffn_post_norm.weight": (
                     f"{vision_prefix}.post_feedforward_layernorm.weight"
                 ),

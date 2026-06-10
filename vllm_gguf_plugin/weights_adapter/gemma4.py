@@ -16,17 +16,17 @@ def _flatten_gemma4_patch_embed_weight(weight: torch.Tensor) -> torch.Tensor:
 
 def _transform_gemma4_weight_name(name: str) -> str:
     replacements = {
-        ".mlp.experts.gate_up_proj.qweight_type": (
-            ".mlp.moe.experts.routed_experts.w13_qweight_type"
+        ".experts.gate_up_proj.qweight_type": (
+            ".moe.experts.routed_experts.w13_qweight_type"
         ),
-        ".mlp.experts.gate_up_proj.qweight": (
-            ".mlp.moe.experts.routed_experts.w13_qweight"
+        ".experts.gate_up_proj.qweight": (
+            ".moe.experts.routed_experts.w13_qweight"
         ),
-        ".mlp.experts.down_proj.qweight_type": (
-            ".mlp.moe.experts.routed_experts.w2_qweight_type"
+        ".experts.down_proj.qweight_type": (
+            ".moe.experts.routed_experts.w2_qweight_type"
         ),
-        ".mlp.experts.down_proj.qweight": (
-            ".mlp.moe.experts.routed_experts.w2_qweight"
+        ".experts.down_proj.qweight": (
+            ".moe.experts.routed_experts.w2_qweight"
         ),
     }
     for old, new in replacements.items():

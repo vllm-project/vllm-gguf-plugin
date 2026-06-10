@@ -248,11 +248,15 @@ def _gguf_moe_weight_loader(
     base_weight_loader,
     param: Parameter | UninitializedParameter,
     loaded_weight: torch.Tensor,
-    weight_name: str,
-    shard_id: str,
-    expert_id: int,
+    weight_name: str | None = None,
+    shard_id: str | None = None,
+    expert_id: int | None = None,
     return_success: bool = False,
 ) -> bool | None:
+    if shard_id is None:
+        _store_gguf_loaded_weight(param, loaded_weight)
+        return True if return_success else None
+
     _materialize_gguf_moe_param(layer, param, loaded_weight, shard_id)
     return base_weight_loader(
         param,
@@ -267,9 +271,9 @@ def _gguf_moe_weight_loader(
 def _gguf_moe_weight_type_loader(
     param: Parameter | UninitializedParameter,
     loaded_weight: torch.Tensor,
-    weight_name: str,
-    shard_id: str,
-    expert_id: int,
+    weight_name: str | None = None,
+    shard_id: str | None = None,
+    expert_id: int | None = None,
     return_success: bool = False,
 ) -> bool | None:
     del weight_name, expert_id
