@@ -2,6 +2,7 @@
 
 import torch
 import vllm.engine.arg_utils as arg_utils_module
+import vllm.model_executor.layers.quantization as quantization_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.transformers_utils.config as config_module
@@ -14,12 +15,12 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
 )
-from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
+import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
@@ -33,7 +34,7 @@ from vllm_gguf_plugin.quantization import (
 def test_register_overrides_gguf_config():
     register()
 
-    quant_config = get_quantization_config("gguf")
+    quant_config = quantization_module.get_quantization_config("gguf")
 
     assert quant_config is OOTGGUFConfig
 
@@ -50,7 +51,7 @@ def test_register_is_idempotent():
     register()
     register()
 
-    assert get_quantization_config("gguf") is OOTGGUFConfig
+    assert quantization_module.get_quantization_config("gguf") is OOTGGUFConfig
     assert isinstance(
         get_model_loader(LoadConfig(load_format="gguf")), OOTGGUFModelLoader
     )
@@ -187,12 +188,18 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     ):
         calls["model"] = model
         calls["trust_remote_code"] = trust_remote_code
+        calls["gguf_file"] = kwargs.get("gguf_file")
         return {}, PretrainedConfig(model_type="qwen3_moe")
 
     monkeypatch.setattr(
         gguf_config_parser_module.HFConfigParser,
         "parse",
         fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "file_or_path_exists",
+        lambda *args, **kwargs: True,
     )
     monkeypatch.setattr(
         gguf_config_parser_module,
@@ -204,8 +211,91 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
 
     assert calls["model"] == gguf_path.parent
     assert calls["trust_remote_code"] is False
+    assert calls["gguf_file"] is None
     assert config_dict["norm_topk_prob"] is True
     assert config.architectures == ["Qwen3MoeForCausalLM"]
+
+
+def test_gguf_config_parser_uses_gguf_file_when_parent_has_no_config(
+    tmp_path, monkeypatch
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    calls = {}
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["trust_remote_code"] = trust_remote_code
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {}, PretrainedConfig(model_type="qwen3_moe")
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "file_or_path_exists",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+
+    GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
+
+    assert calls["model"] == gguf_path.parent
+    assert calls["trust_remote_code"] is False
+    assert calls["gguf_file"] == gguf_path.name
+
+
+def test_gguf_config_parser_disables_trust_for_base_model_redirect(
+    tmp_path, monkeypatch
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    calls = {}
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["trust_remote_code"] = trust_remote_code
+        calls["revision"] = revision
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {}, PretrainedConfig(model_type="qwen3_moe")
+
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "base/repo",
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+
+    GGUFConfigParser().parse(
+        gguf_path,
+        trust_remote_code=True,
+        revision="gguf-revision",
+    )
+
+    assert calls["model"] == "base/repo"
+    assert calls["trust_remote_code"] is False
+    assert calls["revision"] is None
+    assert calls["gguf_file"] is None
 
 
 def test_register_sets_engine_args_for_gguf_model(monkeypatch):
@@ -222,7 +312,7 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     engine_args.create_model_config()
 
     assert captured["config_format"] == "gguf"
-    assert captured["model"] == "/tmp/tokenizer"
+    assert captured["model"] == "/tmp/model.gguf"
     assert captured["model_weights"] == "/tmp/model.gguf"
     assert captured["quantization"] == "gguf"
     assert engine_args.load_format == "gguf"
@@ -231,7 +321,7 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
 def test_register_skips_speculator_probe_for_gguf():
     register()
 
-    model, tokenizer, speculative_config = (
+    model, tokenizer, speculative_config, trust_remote_code = (
         config_module.maybe_override_with_speculators(
             model="/tmp/model.gguf",
             tokenizer="/tmp/tokenizer",
@@ -245,6 +335,36 @@ def test_register_skips_speculator_probe_for_gguf():
     assert model == "/tmp/model.gguf"
     assert tokenizer == "/tmp/tokenizer"
     assert speculative_config == {"foo": "bar"}
+    assert trust_remote_code is False
+
+
+def test_register_disables_trust_for_gguf_speculator_redirect(tmp_path, monkeypatch):
+    register()
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "base/repo",
+    )
+
+    model, tokenizer, speculative_config, trust_remote_code = (
+        config_module.maybe_override_with_speculators(
+            model=str(gguf_path),
+            tokenizer="/tmp/tokenizer",
+            trust_remote_code=True,
+            revision="gguf-revision",
+            hf_config_path=None,
+            vllm_speculative_config=None,
+            hf_token=None,
+        )
+    )
+
+    assert model == str(gguf_path)
+    assert tokenizer == "/tmp/tokenizer"
+    assert speculative_config is None
+    assert trust_remote_code is False
 
 
 def test_gguf_qkv_shards_are_padded_in_qkv_order(monkeypatch):

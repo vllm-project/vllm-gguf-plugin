@@ -4,14 +4,18 @@ from pathlib import Path
 
 from transformers import PretrainedConfig
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from vllm.transformers_utils.config import HFConfigParser
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
+from vllm.transformers_utils.repo_utils import file_or_path_exists
 
 from .gguf_utils import (
     check_gguf_file,
+    get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
     maybe_patch_hf_config_from_gguf,
+    resolve_gguf_config_source,
     split_remote_gguf,
 )
 
@@ -26,7 +30,28 @@ class GGUFConfigParser(ConfigParserBase):
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         original_model = model
-        resolved_model = self._resolve_config_source(model)
+        resolved_model = self._resolve_config_source(model, revision=revision)
+
+        if check_gguf_file(model):
+            gguf_path = Path(model)
+            gguf_repo = gguf_path.parent
+            if resolved_model != gguf_repo:
+                trust_remote_code = False
+                revision = None
+            elif not file_or_path_exists(gguf_repo, HF_CONFIG_NAME, revision=revision):
+                kwargs["gguf_file"] = gguf_path.name
+        elif is_remote_gguf(model):
+            repo_id, quant_type = split_remote_gguf(model)
+            if resolved_model != repo_id:
+                trust_remote_code = False
+                revision = None
+            elif not file_or_path_exists(repo_id, HF_CONFIG_NAME, revision=revision):
+                kwargs["gguf_file"] = get_gguf_file_path_from_hf(
+                    repo_id,
+                    quant_type,
+                    revision=revision,
+                )
+
         config_dict, config = HFConfigParser().parse(
             resolved_model,
             trust_remote_code=trust_remote_code,
@@ -52,10 +77,8 @@ class GGUFConfigParser(ConfigParserBase):
         return config_dict, config
 
     @staticmethod
-    def _resolve_config_source(model: str | Path) -> str | Path:
-        if check_gguf_file(model):
-            return Path(model).parent
-        if is_remote_gguf(model):
-            repo_id, _ = split_remote_gguf(model)
-            return repo_id
-        return model
+    def _resolve_config_source(
+        model: str | Path,
+        revision: str | None = None,
+    ) -> str | Path:
+        return resolve_gguf_config_source(model, revision=revision)

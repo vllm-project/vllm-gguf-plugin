@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 from functools import wraps
 from pathlib import Path
 
 import vllm.engine.arg_utils as arg_utils_module
+import vllm.model_executor.layers.quantization as quantization_module
 import vllm.transformers_utils.config as config_module
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.quantization import (
-    QUANTIZATION_METHODS,
-    get_quantization_config,
     register_quantization_config,
 )
 from vllm.model_executor.model_loader import (
@@ -20,7 +20,13 @@ from vllm.model_executor.model_loader import (
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
 
 from .config_parser import GGUFConfigParser
-from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
+from .gguf_utils import (
+    check_gguf_file,
+    is_gguf,
+    is_remote_gguf,
+    resolve_gguf_config_source,
+    split_remote_gguf,
+)
 from .loader import GGUFModelLoader
 from .quantization import GGUFConfig
 
@@ -34,21 +40,21 @@ def _is_gguf_reference(model: str | None) -> bool:
     return model.endswith(".gguf") or is_remote_gguf(model) or is_gguf(model)
 
 
-def _get_gguf_config_source(
+def _gguf_config_redirects_to_base_model(
     model: str,
-    tokenizer: str | None,
     hf_config_path: str | None,
-) -> str:
+    revision: str | None,
+) -> bool:
     if hf_config_path is not None:
-        return hf_config_path
-    if tokenizer is not None and not _is_gguf_reference(tokenizer):
-        return tokenizer
+        return False
+    if check_gguf_file(model):
+        return (
+            resolve_gguf_config_source(model, revision=revision) != Path(model).parent
+        )
     if is_remote_gguf(model):
         repo_id, _ = split_remote_gguf(model)
-        return repo_id
-    if check_gguf_file(model):
-        return str(Path(model).parent)
-    return model
+        return resolve_gguf_config_source(model, revision=revision) != repo_id
+    return False
 
 
 def _patch_engine_args() -> None:
@@ -71,11 +77,6 @@ def _patch_engine_args() -> None:
                 self.model_weights = gguf_model
             if self.served_model_name is None:
                 self.served_model_name = [gguf_model]
-            self.model = _get_gguf_config_source(
-                gguf_model,
-                self.tokenizer if isinstance(self.tokenizer, str) else None,
-                self.hf_config_path,
-            )
         return original_create_model_config(self, *args, **kwargs)
 
     EngineArgs.create_model_config = create_model_config
@@ -91,7 +92,25 @@ def _patch_speculator_probe() -> None:
     @wraps(original_maybe_override)
     def maybe_override_with_speculators(model, tokenizer, *args, **kwargs):
         if _is_gguf_reference(model):
-            return model, tokenizer, kwargs.get("vllm_speculative_config")
+            trust_remote_code = kwargs.get("trust_remote_code", False)
+            revision = kwargs.get("revision")
+            hf_config_path = kwargs.get("hf_config_path")
+            if (
+                trust_remote_code
+                and isinstance(model, str)
+                and _gguf_config_redirects_to_base_model(
+                    model,
+                    hf_config_path,
+                    revision,
+                )
+            ):
+                trust_remote_code = False
+            return (
+                model,
+                tokenizer,
+                kwargs.get("vllm_speculative_config"),
+                trust_remote_code,
+            )
         return original_maybe_override(model, tokenizer, *args, **kwargs)
 
     arg_utils_module.maybe_override_with_speculators = maybe_override_with_speculators
@@ -100,13 +119,36 @@ def _patch_speculator_probe() -> None:
     config_module._gguf_speculator_probe_patched = True
 
 
+def _patch_quantization_config_lookup() -> None:
+    if getattr(quantization_module, "_gguf_config_lookup_patched", False):
+        return
+
+    original_get_quantization_config = quantization_module.get_quantization_config
+
+    @wraps(original_get_quantization_config)
+    def get_quantization_config(quantization: str):
+        if quantization == "gguf":
+            return GGUFConfig
+        return original_get_quantization_config(quantization)
+
+    quantization_module.get_quantization_config = get_quantization_config
+
+    for module_name in ("vllm.model_executor.model_loader.weight_utils",):
+        module = sys.modules.get(module_name)
+        if (
+            module is not None
+            and getattr(module, "get_quantization_config", None)
+            is original_get_quantization_config
+        ):
+            module.get_quantization_config = get_quantization_config
+
+    quantization_module._gguf_config_lookup_patched = True
+
+
 def register() -> None:
     """Register the out-of-tree GGUF integration."""
-    if (
-        "gguf" not in QUANTIZATION_METHODS
-        or get_quantization_config("gguf") is not GGUFConfig
-    ):
-        register_quantization_config("gguf")(GGUFConfig)
+    register_quantization_config("gguf")(GGUFConfig)
+    _patch_quantization_config_lookup()
 
     if "gguf" not in _LOAD_FORMAT_TO_MODEL_LOADER or not isinstance(
         get_model_loader(LoadConfig(load_format="gguf")), GGUFModelLoader
