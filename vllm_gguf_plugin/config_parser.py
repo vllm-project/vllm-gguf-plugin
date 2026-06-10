@@ -4,14 +4,13 @@ from pathlib import Path
 
 from transformers import PretrainedConfig
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
-
 from vllm.transformers_utils.config import HFConfigParser
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 
 from .gguf_utils import (
     check_gguf_file,
-    is_remote_gguf,
     is_gguf,
+    is_remote_gguf,
     maybe_patch_hf_config_from_gguf,
     split_remote_gguf,
 )

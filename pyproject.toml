@@ -1,15 +1,18 @@
 [build-system]
-requires = ["setuptools>=77.0.3,<81.0.0", "wheel", "torch"]
+requires = ["setuptools>=77.0.3,<81.0.0", "wheel", "torch>=2.9"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "vllm-gguf-plugin"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Out-of-tree GGUF quantization plugin for vLLM"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
-dependencies = ["gguf>=0.17.0", "vllm"]
+dependencies = ["gguf>=0.17.0", "vllm", "torch>=2.9"]
+
+[project.optional-dependencies]
+dev = ["pre-commit"]
 
 [project.entry-points."vllm.general_plugins"]
 gguf = "vllm_gguf_plugin:register"
@@ -17,6 +20,60 @@ gguf = "vllm_gguf_plugin:register"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vllm_gguf_plugin*"]
+
+[tool.vllm_gguf_plugin]
+base_version = "0.0.1"
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-implicit-str-concat
+    "ISC",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+    # flake8-logging-format
+    "G",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # zip without `strict=`
+    "B905",
+    # loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.typos.files]
+extend-exclude = [
+    "build/*",
+    "dist/*",
+    ".git/*",
+    "vllm_gguf_plugin/csrc/gguf/ggml-common.h",
+    "vllm_gguf_plugin/csrc/gguf/dequantize.cuh",
+    "vllm_gguf_plugin/csrc/gguf/vecdotq.cuh",
+    "vllm_gguf_plugin/csrc/gguf/mmq.cuh",
+    "vllm_gguf_plugin/csrc/gguf/mmvq.cuh",
+]
+ignore-hidden = false
+
+[tool.typos.default.extend-identifiers]
+iy = "iy"
 
 [tool.pytest.ini_options]
 markers = [

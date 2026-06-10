@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,

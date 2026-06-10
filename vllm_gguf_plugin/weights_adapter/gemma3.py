@@ -3,16 +3,18 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.model_executor.models.utils import WeightsMapper
 
-from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
 from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
-from ..weight_utils import gguf_quant_weights_iterator_multi, get_gguf_unquantized_params
-
+from ..weight_utils import (
+    get_gguf_unquantized_params,
+    gguf_quant_weights_iterator_multi,
+)
+from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -29,7 +31,9 @@ def build_gemma3_mapper(is_multimodal: bool) -> WeightsMapper:
         "v.position_embd.": "vision_tower.vision_model.embeddings.position_embedding.",
         "v.post_ln.": "vision_tower.vision_model.post_layernorm.",
         # mm projector
-        "mm.input_projection.weight": "multi_modal_projector.mm_input_projection_weight",
+        "mm.input_projection.weight": (
+            "multi_modal_projector.mm_input_projection_weight"
+        ),
         "mm.soft_emb_norm.": "multi_modal_projector.mm_soft_emb_norm.",
         # text backbone (without language model prefix)
         "token_embd.": backbone_prefix + "embed_tokens.",
@@ -74,22 +78,24 @@ class Gemma3GGUFAdapter(BaseGGUFWeightsAdapter):
     def matches(cls, config) -> bool:
         return config.model_type in ("gemma3", "gemma3_text")
 
-    def patch_hf_config(self, model_path: str, hf_config: "PretrainedConfig"):
+    def patch_hf_config(self, model_path: str, hf_config: PretrainedConfig):
         return maybe_patch_hf_config_from_gguf(model_path, hf_config)
 
-    def prepare_weights(self, model_config: "ModelConfig") -> Iterable[tuple[str, torch.Tensor]]:
+    def prepare_weights(
+        self, model_config: ModelConfig
+    ) -> Iterable[tuple[str, torch.Tensor]]:
         """Return HF-style weights."""
-        orig_weights = gguf_quant_weights_iterator_multi(
-            self.load_spec.weights_source
-        )
+        orig_weights = gguf_quant_weights_iterator_multi(self.load_spec.weights_source)
         yield from self.transform_weight(self.mapper.apply(orig_weights))
-    
+
     def prepare_loading(
         self,
         model_path: str,
-        model_config: "ModelConfig",
+        model_config: ModelConfig,
     ) -> GGUFLoadSpec:
-        model_config.hf_config = self.patch_hf_config(model_path, model_config.hf_config)
+        model_config.hf_config = self.patch_hf_config(
+            model_path, model_config.hf_config
+        )
         gguf_files = [model_path]
         mm_proj_path = detect_gguf_multimodal(model_path)
         if mm_proj_path:

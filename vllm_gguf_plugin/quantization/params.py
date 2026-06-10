@@ -3,7 +3,6 @@
 
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
-
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -75,7 +74,9 @@ def _store_gguf_loaded_weight(
 ) -> None:
     loaded_weight = _clone_loaded_weight(loaded_weight).to(device=param.device)
     if shard_id is None:
-        _materialize_parameter_data(param, tuple(loaded_weight.shape), loaded_weight.dtype)
+        _materialize_parameter_data(
+            param, tuple(loaded_weight.shape), loaded_weight.dtype
+        )
         param.data.copy_(loaded_weight)
         return
 
@@ -213,7 +214,9 @@ class _GGUFParamLoadMixin:
         if tp_size > 1 and loaded_weight.ndim >= 1:
             shard_size = loaded_weight.shape[0] // tp_size
             if shard_size > 0:
-                loaded_weight = loaded_weight.narrow(0, tp_rank * shard_size, shard_size)
+                loaded_weight = loaded_weight.narrow(
+                    0, tp_rank * shard_size, shard_size
+                )
         self._store(loaded_weight)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
@@ -222,16 +225,22 @@ class _GGUFParamLoadMixin:
         if tp_size > 1 and loaded_weight.ndim >= 2:
             shard_size = loaded_weight.shape[1] // tp_size
             if shard_size > 0:
-                loaded_weight = loaded_weight.narrow(1, tp_rank * shard_size, shard_size)
+                loaded_weight = loaded_weight.narrow(
+                    1, tp_rank * shard_size, shard_size
+                )
         self._store(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_id = kwargs.get("shard_id")
         tp_rank = kwargs.get("tp_rank", 0)
         shard_size = kwargs.get("shard_size")
-        if shard_size is not None and loaded_weight.ndim >= 1 and shard_size > 0:
-            if shard_size < loaded_weight.shape[0]:
-                loaded_weight = loaded_weight.narrow(0, tp_rank * shard_size, shard_size)
+        if (
+            shard_size is not None
+            and loaded_weight.ndim >= 1
+            and shard_size > 0
+            and shard_size < loaded_weight.shape[0]
+        ):
+            loaded_weight = loaded_weight.narrow(0, tp_rank * shard_size, shard_size)
         self._store(loaded_weight, shard_id=shard_id)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
@@ -239,14 +248,18 @@ class _GGUFParamLoadMixin:
         tp_rank = kwargs.get("tp_rank", 0)
         shard_size = kwargs.get("shard_size")
         num_kv_head_replicas = kwargs.get("num_heads", 1)
-        if shard_size is not None and loaded_weight.ndim >= 1 and shard_size > 0:
-            if shard_size < loaded_weight.shape[0]:
-                effective_tp_rank = (
-                    tp_rank // num_kv_head_replicas if shard_id in ("k", "v") else tp_rank
-                )
-                loaded_weight = loaded_weight.narrow(
-                    0, effective_tp_rank * shard_size, shard_size
-                )
+        if (
+            shard_size is not None
+            and loaded_weight.ndim >= 1
+            and shard_size > 0
+            and shard_size < loaded_weight.shape[0]
+        ):
+            effective_tp_rank = (
+                tp_rank // num_kv_head_replicas if shard_id in ("k", "v") else tp_rank
+            )
+            loaded_weight = loaded_weight.narrow(
+                0, effective_tp_rank * shard_size, shard_size
+            )
         self._store(loaded_weight, shard_id=shard_id)
 
 

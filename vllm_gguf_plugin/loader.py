@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
-
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
@@ -15,11 +14,11 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
 )
-from .quantization import GGUFConfig
-from .weights_adapter import get_weights_adapter
-from .weight_utils import download_gguf, resolve_local_gguf
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from .quantization import GGUFConfig
+from .weight_utils import download_gguf, resolve_local_gguf
+from .weights_adapter import get_weights_adapter
 
 logger = init_logger(__name__)
 
@@ -86,9 +85,13 @@ class GGUFModelLoader(BaseModelLoader):
         device_config = vllm_config.device_config
         adapter = self._prepare_adapter(model_config)
         vllm_config.model_config.hf_config = model_config.hf_config
-        logger.debug("GGUF unquantized modules: %s", adapter.load_spec.unquantized_modules)
+        logger.debug(
+            "GGUF unquantized modules: %s", adapter.load_spec.unquantized_modules
+        )
         vllm_config.quant_config = cast(GGUFConfig, vllm_config.quant_config)
-        vllm_config.quant_config.unquantized_modules.extend(adapter.load_spec.unquantized_modules)
+        vllm_config.quant_config.unquantized_modules.extend(
+            adapter.load_spec.unquantized_modules
+        )
 
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):

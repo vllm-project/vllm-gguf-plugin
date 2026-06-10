@@ -102,12 +102,14 @@ def _patch_speculator_probe() -> None:
 
 def register() -> None:
     """Register the out-of-tree GGUF integration."""
-    if "gguf" not in QUANTIZATION_METHODS or get_quantization_config("gguf") is not GGUFConfig:
+    if (
+        "gguf" not in QUANTIZATION_METHODS
+        or get_quantization_config("gguf") is not GGUFConfig
+    ):
         register_quantization_config("gguf")(GGUFConfig)
 
-    if (
-        "gguf" not in _LOAD_FORMAT_TO_MODEL_LOADER
-        or not isinstance(get_model_loader(LoadConfig(load_format="gguf")), GGUFModelLoader)
+    if "gguf" not in _LOAD_FORMAT_TO_MODEL_LOADER or not isinstance(
+        get_model_loader(LoadConfig(load_format="gguf")), GGUFModelLoader
     ):
         register_model_loader("gguf")(GGUFModelLoader)
 

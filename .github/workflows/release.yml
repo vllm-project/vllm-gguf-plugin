@@ -1,0 +1,278 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+jobs:
+  build-sdist:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate release tag references package version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import tomllib
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          version = project["tool"]["vllm_gguf_plugin"]["base_version"]
+          release_tag = os.environ["RELEASE_TAG"]
+          version_tokens = {
+              token
+              for token in re.split(r"[-+_/]", release_tag)
+              if token
+          }
+
+          if version not in version_tokens and f"v{version}" not in version_tokens:
+              raise SystemExit(
+                  f"Release tag {release_tag!r} does not reference pyproject version {version!r}."
+              )
+
+          print(f"Building sdist for version {version}")
+          PY
+
+      - name: Show package version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tomllib
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          version = project["tool"]["vllm_gguf_plugin"]["base_version"]
+          print(f"Building TestPyPI sdist for version {version}")
+          PY
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade "setuptools>=77.0.3,<81.0.0" build twine
+
+      - name: Build source distribution
+        run: python -m build --sdist --no-isolation --skip-dependency-check
+
+      - name: Check package metadata
+        run: python -m twine check dist/*
+
+      - name: Upload source distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-sdist
+          path: dist/*.tar.gz
+
+  build-wheel-cu129:
+    name: Build wheel (cu129)
+    runs-on: ubuntu-latest
+
+    # PyTorch's manylinux2_28 builder image: AlmaLinux 8 (glibc 2.28 floor)
+    # with CUDA 12.9 + Python at /opt/python/cpXY-cpXY/ preinstalled.
+    container:
+      image: pytorch/manylinux2_28-builder:cuda12.9
+
+    permissions:
+      contents: read
+
+    env:
+      VLLM_GGUF_PLUGIN_LOCAL_VERSION_SUFFIX: +cu129
+      PYTHON_VERSION: "3.11"
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh \
+            | env UV_INSTALL_DIR=/usr/local/bin sh
+
+      - name: Create build venv
+        run: |
+          PYV_NODOT=${PYTHON_VERSION//./}
+          uv venv /opt/build-venv \
+            --python "/opt/python/cp${PYV_NODOT}-cp${PYV_NODOT}/bin/python${PYTHON_VERSION}"
+          echo "/opt/build-venv/bin" >> "$GITHUB_PATH"
+          echo "UV_PYTHON=/opt/build-venv/bin/python" >> "$GITHUB_ENV"
+          echo "UV_PYTHON_DOWNLOADS=never" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          uv pip install "setuptools>=77.0.3,<81.0.0" wheel twine
+          uv pip install --torch-backend cu129 "torch>=2.9"
+
+      - name: Build wheel
+        run: ./scripts/build_release_wheel.sh
+
+      - name: Retag wheel as manylinux_2_28_x86_64
+        run: |
+          cd dist
+          wheel tags --remove --platform-tag manylinux_2_28_x86_64 ./*.whl
+
+      - name: Check wheel metadata
+        run: python -m twine check dist/*.whl
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel-cu129
+          path: dist/*.whl
+
+  build-wheel-cu130:
+    name: Build wheel (cu130)
+    runs-on: ubuntu-latest
+
+    # PyTorch's manylinux2_28 builder image: AlmaLinux 8 (glibc 2.28 floor)
+    # with CUDA 13.0 + Python at /opt/python/cpXY-cpXY/ preinstalled. Same
+    # base image vLLM publishes its x86_64 wheels from.
+    container:
+      image: pytorch/manylinux2_28-builder:cuda13.0
+
+    permissions:
+      contents: read
+
+    env:
+      PYTHON_VERSION: "3.11"
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh \
+            | env UV_INSTALL_DIR=/usr/local/bin sh
+
+      - name: Create build venv
+        run: |
+          PYV_NODOT=${PYTHON_VERSION//./}
+          uv venv /opt/build-venv \
+            --python "/opt/python/cp${PYV_NODOT}-cp${PYV_NODOT}/bin/python${PYTHON_VERSION}"
+          echo "/opt/build-venv/bin" >> "$GITHUB_PATH"
+          echo "UV_PYTHON=/opt/build-venv/bin/python" >> "$GITHUB_ENV"
+          echo "UV_PYTHON_DOWNLOADS=never" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          uv pip install "setuptools>=77.0.3,<81.0.0" wheel twine
+          uv pip install --torch-backend cu130 "torch>=2.9"
+
+      - name: Build wheel
+        run: ./scripts/build_release_wheel.sh
+
+      - name: Retag wheel as manylinux_2_28_x86_64
+        run: |
+          cd dist
+          wheel tags --remove --platform-tag manylinux_2_28_x86_64 ./*.whl
+
+      - name: Check wheel metadata
+        run: python -m twine check dist/*.whl
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel-cu130
+          path: dist/*.whl
+
+  upload-github-release:
+    needs: [build-sdist, build-wheel-cu129, build-wheel-cu130]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download source distribution for GitHub Release
+        uses: actions/download-artifact@v4
+        with:
+          name: python-sdist
+          path: release-dist
+
+      - name: Download wheel artifacts for GitHub Release
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-wheel-*
+          path: release-dist
+          merge-multiple: true
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-dist/*
+
+  publish-pypi:
+    needs: [build-sdist, build-wheel-cu129, build-wheel-cu130]
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+
+    environment:
+      name: pypi
+
+    steps:
+      - name: Download source distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: python-sdist
+          path: dist
+
+      # Keep the CUDA 12.9 local-version wheel on GitHub Releases only; PyPI
+      # and TestPyPI accept upstream public versions, not local version labels.
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: python-wheel-cu130
+          path: dist
+
+      - name: Publish package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-testpypi:
+    needs: [build-sdist, build-wheel-cu129, build-wheel-cu130]
+    if: github.event_name == 'release' && github.event.release.prerelease
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+
+    environment:
+      name: testpypi
+
+    steps:
+      - name: Download source distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: python-sdist
+          path: dist
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: python-wheel-cu130
+          path: dist
+
+      - name: Publish package to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          repository-url: https://test.pypi.org/legacy/

@@ -4,7 +4,6 @@
 from functools import partial
 
 import torch
-
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -184,7 +183,9 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(
             w13_qweight,
             {
-                "weight_loader": partial(_gguf_moe_weight_loader, layer, base_weight_loader),
+                "weight_loader": partial(
+                    _gguf_moe_weight_loader, layer, base_weight_loader
+                ),
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
@@ -213,7 +214,9 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(
             w2_qweight,
             {
-                "weight_loader": partial(_gguf_moe_weight_loader, layer, base_weight_loader),
+                "weight_loader": partial(
+                    _gguf_moe_weight_loader, layer, base_weight_loader
+                ),
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,

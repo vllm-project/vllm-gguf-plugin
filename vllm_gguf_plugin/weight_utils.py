@@ -10,7 +10,6 @@ import gguf
 import numpy as np
 import torch
 from huggingface_hub import snapshot_download
-
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -55,6 +54,7 @@ def download_gguf(
 def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     """Find a GGUF file matching *quant_type* in a local directory."""
     import glob as glob_mod
+
     patterns = [
         f"*-{quant_type}.gguf",
         f"*-{quant_type}-*.gguf",
@@ -64,8 +64,7 @@ def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
         matches.extend(glob_mod.glob(os.path.join(local_dir, pat)))
     if not matches:
         raise ValueError(
-            f"No GGUF file matching quant_type '{quant_type}' "
-            f"found in {local_dir}"
+            f"No GGUF file matching quant_type '{quant_type}' found in {local_dir}"
         )
     matches.sort(key=lambda x: (x.count("-"), x))
     return matches[0]

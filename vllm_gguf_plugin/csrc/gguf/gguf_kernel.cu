@@ -1,8 +1,10 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <torch/csrc/inductor/aoti_torch/c/shim.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/tensor.h>
 
 #include "../cuda_compat.h"
 #include "../dispatch_utils.h"
@@ -14,6 +16,17 @@
 #include "mmq.cuh"
 #include "moe.cuh"
 #include "moe_vec.cuh"
+
+using torch::headeronly::ScalarType;
+using torch::stable::Tensor;
+using torch::stable::accelerator::DeviceGuard;
+
+static inline cudaStream_t get_current_cuda_stream(int32_t device_index) {
+  void* raw_stream = nullptr;
+  TORCH_ERROR_CODE_CHECK(
+      aoti_torch_get_current_cuda_stream(device_index, &raw_stream));
+  return static_cast<cudaStream_t>(raw_stream);
+}
 
 // Q8 gemv
 template <typename scalar_t>
@@ -71,14 +84,14 @@ static void quantize_row_q8_1_cuda(const scalar_t* x, void* vy, const int kx,
   }
 }
 
-torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
-                              int64_t type, int64_t m, int64_t n,
-                              std::optional<at::ScalarType> const& dtype) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(W));
-  auto dtype_ = dtype.value_or(torch::kFloat16);
-  auto options = torch::TensorOptions().dtype(dtype_).device(W.device());
-  at::Tensor DW = torch::empty({m, n}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+Tensor ggml_dequantize(Tensor W,  // quant weight
+                       int64_t type, int64_t m, int64_t n,
+                       std::optional<ScalarType> dtype) {
+  const int32_t device_idx = W.get_device_index();
+  const DeviceGuard device_guard(device_idx);
+  const auto dtype_ = dtype.value_or(ScalarType::Half);
+  Tensor DW = torch::stable::new_empty(W, {m, n}, dtype_);
+  cudaStream_t stream = get_current_cuda_stream(device_idx);
 
   VLLM_DISPATCH_FLOATING_TYPES(DW.scalar_type(), "ggml_dequantize", [&] {
     auto to_cuda = ggml_get_to_cuda<scalar_t>(type);
@@ -88,18 +101,18 @@ torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
   return DW;
 }
 
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
-                                  torch::Tensor X,  // input
-                                  int64_t type, int64_t row) {
+Tensor ggml_mul_mat_vec_a8(Tensor W,  // quant weight
+                           Tensor X,  // input
+                           int64_t type, int64_t row) {
   int col = X.sizes()[1];
   int vecs = X.sizes()[0];
   const int padded = (col + 512 - 1) / 512 * 512;
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
-  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  at::Tensor Y = torch::empty({vecs, row}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
-  at::Tensor quant_X = torch::empty({vecs, padded / 32 * 9}, options);
+  const int32_t device_idx = X.get_device_index();
+  const DeviceGuard device_guard(device_idx);
+  Tensor Y = torch::stable::new_empty(W, {vecs, row}, X.scalar_type());
+  cudaStream_t stream = get_current_cuda_stream(device_idx);
+  Tensor quant_X =
+      torch::stable::new_empty(W, {vecs, padded / 32 * 9}, ScalarType::Int);
   VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_mul_mat_vec_a8", [&] {
     quantize_row_q8_1_cuda<scalar_t>(
         (scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(), col, vecs, stream);
@@ -204,18 +217,18 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
   return Y;
 }
 
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
-                              torch::Tensor X,  // input
-                              int64_t type, int64_t row) {
+Tensor ggml_mul_mat_a8(Tensor W,  // quant weight
+                       Tensor X,  // input
+                       int64_t type, int64_t row) {
   int col = X.sizes()[1];
   int padded = (col + 512 - 1) / 512 * 512;
   int batch = X.sizes()[0];
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
-  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  at::Tensor Y = torch::empty({batch, row}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
-  at::Tensor quant_X = torch::empty({batch, padded / 32 * 9}, options);
+  const int32_t device_idx = X.get_device_index();
+  const DeviceGuard device_guard(device_idx);
+  Tensor Y = torch::stable::new_empty(W, {batch, row}, X.scalar_type());
+  cudaStream_t stream = get_current_cuda_stream(device_idx);
+  Tensor quant_X =
+      torch::stable::new_empty(W, {batch, padded / 32 * 9}, ScalarType::Int);
   VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_mul_mat_a8", [&] {
     quantize_row_q8_1_cuda((scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(),
                            col, batch, stream);
@@ -276,20 +289,20 @@ torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
   return Y;
 }
 
-torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
-                          torch::Tensor W,  // expert weights
-                          torch::Tensor sorted_token_ids,
-                          torch::Tensor expert_ids,
-                          torch::Tensor num_tokens_post_padded, int64_t type,
-                          int64_t row, int64_t top_k, int64_t tokens) {
+Tensor ggml_moe_a8(Tensor X,  // input
+                   Tensor W,  // expert weights
+                   Tensor sorted_token_ids, Tensor expert_ids,
+                   Tensor num_tokens_post_padded, int64_t type, int64_t row,
+                   int64_t top_k, int64_t tokens) {
   int col = X.sizes()[1];
   int padded = (col + 512 - 1) / 512 * 512;
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
-  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  at::Tensor Y = torch::empty({tokens * top_k, row}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
-  at::Tensor quant_X = torch::empty({tokens, padded / 32 * 9}, options);
+  const int32_t device_idx = X.get_device_index();
+  const DeviceGuard device_guard(device_idx);
+  Tensor Y =
+      torch::stable::new_empty(W, {tokens * top_k, row}, X.scalar_type());
+  cudaStream_t stream = get_current_cuda_stream(device_idx);
+  Tensor quant_X =
+      torch::stable::new_empty(W, {tokens, padded / 32 * 9}, ScalarType::Int);
   VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_moe_a8", [&] {
     quantize_row_q8_1_cuda((scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(),
                            col, tokens, stream);
@@ -379,18 +392,19 @@ torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
   return Y;
 }
 
-torch::Tensor ggml_moe_a8_vec(torch::Tensor X,  // input
-                              torch::Tensor W,  // expert weights
-                              torch::Tensor topk_ids, int64_t top_k,
-                              int64_t type, int64_t row, int64_t tokens) {
+Tensor ggml_moe_a8_vec(Tensor X,  // input
+                       Tensor W,  // expert weights
+                       Tensor topk_ids, int64_t top_k, int64_t type,
+                       int64_t row, int64_t tokens) {
   int col = X.sizes()[1];
   const int padded = (col + 512 - 1) / 512 * 512;
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
-  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  at::Tensor Y = torch::zeros({tokens * top_k, row}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
-  at::Tensor quant_X = torch::empty({tokens, padded / 32 * 9}, options);
+  const int32_t device_idx = X.get_device_index();
+  const DeviceGuard device_guard(device_idx);
+  Tensor Y =
+      torch::stable::new_zeros(W, {tokens * top_k, row}, X.scalar_type());
+  cudaStream_t stream = get_current_cuda_stream(device_idx);
+  Tensor quant_X =
+      torch::stable::new_empty(W, {tokens, padded / 32 * 9}, ScalarType::Int);
   VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_moe_vec_a8", [&] {
     quantize_row_q8_1_cuda<scalar_t>((scalar_t*)X.data_ptr(),
                                      (void*)quant_X.data_ptr(), col, tokens,

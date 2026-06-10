@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from gguf import GGMLQuantizationType as WeightType
-
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

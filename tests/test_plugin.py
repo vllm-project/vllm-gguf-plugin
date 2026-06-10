@@ -2,22 +2,23 @@
 
 import torch
 import vllm.engine.arg_utils as arg_utils_module
+import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
+import vllm.model_executor.parameter as parameter_module
 import vllm.transformers_utils.config as config_module
-import vllm_gguf_plugin.config_parser as gguf_config_parser_module
 from transformers import PretrainedConfig
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.linear import (
+    WEIGHT_LOADER_V2_SUPPORTED,
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    WEIGHT_LOADER_V2_SUPPORTED,
 )
-import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
-import vllm.model_executor.parameter as parameter_module
 from vllm.model_executor.layers.quantization import get_quantization_config
-from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
+
+import vllm_gguf_plugin.config_parser as gguf_config_parser_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
@@ -49,8 +50,11 @@ def test_register_is_idempotent():
     register()
 
     assert get_quantization_config("gguf") is OOTGGUFConfig
-    assert isinstance(get_model_loader(LoadConfig(load_format="gguf")), OOTGGUFModelLoader)
+    assert isinstance(
+        get_model_loader(LoadConfig(load_format="gguf")), OOTGGUFModelLoader
+    )
     assert isinstance(get_config_parser("gguf"), GGUFConfigParser)
+
 
 def test_oot_config_reuses_in_tree_behavior():
     quant_config = OOTGGUFConfig.from_config({})
@@ -63,7 +67,9 @@ def test_oot_config_reuses_in_tree_behavior():
 def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
     quant_config = OOTGGUFConfig.from_config({})
     layer = MergedColumnParallelLinear(
         input_size=4,
@@ -96,10 +102,16 @@ def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
 
 
 def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
-    monkeypatch.setattr(vocab_embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(vocab_embedding_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        vocab_embedding_module, "get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        vocab_embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
 
     layer = VocabParallelEmbedding(
         num_embeddings=10,
@@ -111,7 +123,9 @@ def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
 
     loaded_qweight = torch.arange(60, dtype=torch.uint8).reshape(10, 6)
     layer.qweight.weight_loader(layer.qweight, loaded_qweight)
-    layer.qweight_type.weight_loader(layer.qweight_type, torch.tensor(7, dtype=torch.uint8))
+    layer.qweight_type.weight_loader(
+        layer.qweight_type, torch.tensor(7, dtype=torch.uint8)
+    )
     layer.quant_method.process_weights_after_loading(layer)
 
     assert isinstance(layer.qweight, GGUFWeightParameter)
@@ -126,7 +140,9 @@ def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
 def test_gguf_linear_same_type_shards_skip_concat(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
 
     quant_config = OOTGGUFConfig.from_config({})
     layer = MergedColumnParallelLinear(
@@ -147,9 +163,13 @@ def test_gguf_linear_same_type_shards_skip_concat(monkeypatch):
 
     def fake_fused_mul_mat_gguf(x, qweight, qweight_type):
         calls.append((tuple(qweight.shape), qweight_type))
-        return torch.zeros((x.shape[0], qweight.shape[0]), dtype=x.dtype, device=x.device)
+        return torch.zeros(
+            (x.shape[0], qweight.shape[0]), dtype=x.dtype, device=x.device
+        )
 
-    monkeypatch.setattr(gguf_quantization, "fused_mul_mat_gguf", fake_fused_mul_mat_gguf)
+    monkeypatch.setattr(
+        gguf_quantization, "fused_mul_mat_gguf", fake_fused_mul_mat_gguf
+    )
     out = layer.quant_method.apply(layer, torch.ones((2, 4), dtype=torch.float32))
 
     assert calls == [((8, 4), 3)]
@@ -161,7 +181,9 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     gguf_path.write_bytes(b"GGUF")
     calls = {}
 
-    def fake_parse(self, model, trust_remote_code, revision=None, code_revision=None, **kwargs):
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
         calls["model"] = model
         calls["trust_remote_code"] = trust_remote_code
         return {}, PretrainedConfig(model_type="qwen3_moe")
@@ -208,13 +230,15 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
 def test_register_skips_speculator_probe_for_gguf():
     register()
 
-    model, tokenizer, speculative_config = config_module.maybe_override_with_speculators(
-        model="/tmp/model.gguf",
-        tokenizer="/tmp/tokenizer",
-        trust_remote_code=False,
-        revision=None,
-        vllm_speculative_config={"foo": "bar"},
-        hf_token=None,
+    model, tokenizer, speculative_config = (
+        config_module.maybe_override_with_speculators(
+            model="/tmp/model.gguf",
+            tokenizer="/tmp/tokenizer",
+            trust_remote_code=False,
+            revision=None,
+            vllm_speculative_config={"foo": "bar"},
+            hf_token=None,
+        )
     )
 
     assert model == "/tmp/model.gguf"
@@ -225,7 +249,9 @@ def test_register_skips_speculator_probe_for_gguf():
 def test_gguf_qkv_shards_are_padded_in_qkv_order(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
 
     layer = QKVParallelLinear(
         hidden_size=4,
@@ -267,7 +293,9 @@ def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
 
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
 
     with torch.device("cuda"):
         layer = MergedColumnParallelLinear(
