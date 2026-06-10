@@ -221,6 +221,10 @@ def run_triton_fused_moe_kernel(
     tokens: int,
     quant_type: int,
     extra_args: tuple = (),
+    block_n: int = TRITON_FUSED_MOE_BLOCK_N,
+    block_k_blocks: int = TRITON_FUSED_MOE_BLOCK_K_BLOCKS,
+    num_warps: int = TRITON_NUM_WARPS,
+    num_stages: int = TRITON_NUM_STAGES,
 ) -> torch.Tensor:
     (
         W,
@@ -250,7 +254,7 @@ def run_triton_fused_moe_kernel(
     # and token_mask.
     grid = (
         expert_ids.shape[0],
-        triton.cdiv(row, TRITON_FUSED_MOE_BLOCK_N),
+        triton.cdiv(row, block_n),
     )
     kernel[grid](
         X,
@@ -272,9 +276,9 @@ def run_triton_fused_moe_kernel(
         out.stride(1),
         *extra_args,
         BLOCK_M=TRITON_FUSED_MOE_BLOCK_M,
-        BLOCK_N=TRITON_FUSED_MOE_BLOCK_N,
-        BLOCK_K_BLOCKS=TRITON_FUSED_MOE_BLOCK_K_BLOCKS,
-        num_warps=TRITON_NUM_WARPS,
-        num_stages=TRITON_NUM_STAGES,
+        BLOCK_N=block_n,
+        BLOCK_K_BLOCKS=block_k_blocks,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return out
