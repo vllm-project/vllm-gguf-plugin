@@ -167,7 +167,7 @@ def _materialize_gguf_moe_param(
     final_shape = list(loaded_weight.shape)
     if shard_id in {"w1", "w3"}:
         final_shape[1] *= 2
-    final_shape[shard_dim] = final_shape[shard_dim] // layer.tp_size
+    final_shape[shard_dim] = final_shape[shard_dim] // layer.moe_config.moe_parallel_config.tp_size
     param.materialize(tuple(final_shape), dtype=loaded_weight.dtype)
 
 

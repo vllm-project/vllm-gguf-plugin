@@ -254,9 +254,10 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        del shared_experts_input
+        del shared_experts, shared_experts_input
         if layer.apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for"
