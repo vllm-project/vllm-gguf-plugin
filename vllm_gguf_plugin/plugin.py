@@ -5,6 +5,7 @@ from functools import wraps
 from pathlib import Path
 
 import huggingface_hub
+import vllm.config.model as model_config_module
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.model_executor.layers.quantization as quantization_module
 import vllm.transformers_utils.config as config_module
@@ -30,6 +31,7 @@ from .gguf_utils import (
     get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
+    maybe_patch_hf_config_from_gguf,
     resolve_gguf_config_source,
     split_remote_gguf,
 )
@@ -123,6 +125,17 @@ def _patch_engine_args() -> None:
 
     EngineArgs.create_model_config = create_model_config
     EngineArgs._gguf_create_model_config_patched = True
+
+
+def _patch_gguf_config_helpers() -> None:
+    if getattr(model_config_module, "_gguf_config_helpers_patched", False):
+        return
+
+    # ModelConfig imports this helper by value, so update that binding too.
+    model_config_module.maybe_patch_hf_config_from_gguf = (
+        maybe_patch_hf_config_from_gguf
+    )
+    model_config_module._gguf_config_helpers_patched = True
 
 
 def _patch_speculator_probe() -> None:
@@ -257,5 +270,6 @@ def register() -> None:
         parser = None
     if not isinstance(parser, GGUFConfigParser):
         register_config_parser("gguf")(GGUFConfigParser)
+    _patch_gguf_config_helpers()
     _patch_engine_args()
     _patch_speculator_probe()

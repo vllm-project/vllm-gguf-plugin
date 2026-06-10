@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GGUF utility functions."""
 
+from contextlib import suppress
 from functools import cache
 from os import PathLike
 from pathlib import Path
@@ -212,6 +213,24 @@ def _gguf_reader_value(reader: gguf.GGUFReader, key: str) -> Any:
     return _gguf_field_value(field)
 
 
+def _gguf_scalar_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return value
+    try:
+        return value.item()
+    except (AttributeError, ValueError, TypeError):
+        pass
+    with suppress(AttributeError):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            return None
+        return _gguf_scalar_value(value[0])
+    return value
+
+
 def _update_config(config: PretrainedConfig, values: dict[str, Any]) -> None:
     values = {key: value for key, value in values.items() if value is not None}
     if values:
@@ -403,11 +422,16 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
 
     # Detect projector type to apply model-specific parameters
     projector_type = None
-    projector_type_field = reader.get_field(Keys.Clip.PROJECTOR_TYPE)
-    if projector_type_field:
+    projector_type_value = _gguf_scalar_value(
+        _gguf_reader_value(reader, Keys.Clip.PROJECTOR_TYPE)
+    )
+    if projector_type_value is not None:
         try:
-            projector_type = bytes(projector_type_field.parts[-1]).decode("utf-8")
-        except (AttributeError, UnicodeDecodeError) as e:
+            if isinstance(projector_type_value, bytes):
+                projector_type = projector_type_value.decode("utf-8")
+            else:
+                projector_type = str(projector_type_value)
+        except UnicodeDecodeError as e:
             logger.warning("Failed to decode projector type from GGUF: %s", e)
 
     # Map GGUF field constants to SiglipVisionConfig parameters.
@@ -426,15 +450,23 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
     # Extract and validate all required fields
     config_params = {}
     for gguf_key, (param_name, dtype) in VISION_CONFIG_FIELDS.items():
-        field = reader.get_field(gguf_key)
-        if field is None:
+        value = _gguf_scalar_value(_gguf_reader_value(reader, gguf_key))
+        if value is None:
             logger.warning(
                 "Missing required vision config field '%s' in mmproj.gguf",
                 gguf_key,
             )
             return None
         # Extract scalar value from GGUF field and convert to target type
-        config_params[param_name] = dtype(field.parts[-1])
+        try:
+            config_params[param_name] = dtype(value)
+        except (TypeError, ValueError) as e:
+            logger.warning(
+                "Invalid vision config field '%s' in mmproj.gguf: %s",
+                gguf_key,
+                e,
+            )
+            return None
 
     # Apply model-specific parameters based on projector type
     if projector_type == VisionProjectorType.GEMMA3:
@@ -526,12 +558,34 @@ def maybe_patch_hf_config_from_gguf(
         else:
             architecture = _gguf_reader_value(reader, "general.architecture")
             if architecture == "qwen35moe":
+                text_config = hf_config.get_text_config()
+                is_multimodal = (
+                    detect_gguf_multimodal(model) is not None
+                    or getattr(hf_config, "vision_config", None) is not None
+                )
+                _update_config(
+                    hf_config,
+                    {
+                        "model_type": "qwen3_5_moe",
+                        "architectures": [
+                            "Qwen3_5MoeForConditionalGeneration"
+                            if is_multimodal
+                            else "Qwen3_5MoeForCausalLM"
+                        ],
+                    },
+                )
+                if text_config is not hf_config:
+                    _update_config(
+                        text_config,
+                        {
+                            "model_type": "qwen3_5_moe_text",
+                        },
+                    )
                 nextn_layers = _gguf_reader_value(
                     reader, "qwen35moe.nextn_predict_layers"
                 )
                 block_count = _gguf_reader_value(reader, "qwen35moe.block_count")
                 if nextn_layers:
-                    text_config = hf_config.get_text_config()
                     updates: dict[str, Any] = {
                         "mtp_num_hidden_layers": int(nextn_layers),
                         "num_nextn_predict_layers": int(nextn_layers),

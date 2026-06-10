@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
+import vllm.config.model as model_config_module
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.model_executor.layers.quantization as quantization_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.transformers_utils.config as config_module
 from gguf import GGMLQuantizationType as WeightType
+from gguf.constants import Keys, VisionProjectorType
 from transformers import PretrainedConfig
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -20,12 +22,15 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
+import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
 from vllm_gguf_plugin.gguf_utils import (
     _gguf_sequence_edge,
+    extract_vision_config_from_gguf,
+    maybe_patch_hf_config_from_gguf,
     resolve_gguf_config_source,
 )
 from vllm_gguf_plugin.quantization import (
@@ -66,6 +71,15 @@ def test_register_is_idempotent():
         get_model_loader(LoadConfig(load_format="gguf")), OOTGGUFModelLoader
     )
     assert isinstance(get_config_parser("gguf"), GGUFConfigParser)
+
+
+def test_register_patches_model_config_gguf_helper():
+    register()
+
+    assert (
+        model_config_module.maybe_patch_hf_config_from_gguf
+        is gguf_utils_module.maybe_patch_hf_config_from_gguf
+    )
 
 
 def test_oot_config_reuses_in_tree_behavior():
@@ -326,6 +340,94 @@ def test_gguf_sequence_edge_accepts_scalar_and_sequence_values():
     assert _gguf_sequence_edge([8, 8, 8, 2], first=False) == 2
 
 
+class _FakeGGUFField:
+    def __init__(self, value):
+        self.value = value
+        self.parts = [value]
+
+    def contents(self):
+        return self.value
+
+
+class _FakeGGUFReader:
+    def __init__(self, fields):
+        self.fields = {key: _FakeGGUFField(value) for key, value in fields.items()}
+        self.tensors = []
+
+    def get_field(self, key):
+        return self.fields.get(key)
+
+
+def test_extract_vision_config_accepts_single_value_metadata(monkeypatch):
+    fake_reader = _FakeGGUFReader(
+        {
+            Keys.Clip.PROJECTOR_TYPE: VisionProjectorType.GEMMA3,
+            Keys.ClipVision.EMBEDDING_LENGTH: [1152],
+            Keys.ClipVision.FEED_FORWARD_LENGTH: [4304],
+            Keys.ClipVision.BLOCK_COUNT: [27],
+            Keys.ClipVision.Attention.HEAD_COUNT: [16],
+            Keys.ClipVision.IMAGE_SIZE: [896],
+            Keys.ClipVision.PATCH_SIZE: [14],
+            Keys.ClipVision.Attention.LAYERNORM_EPS: [1e-6],
+        }
+    )
+    monkeypatch.setattr(
+        gguf_utils_module.gguf,
+        "GGUFReader",
+        lambda path: fake_reader,
+    )
+
+    config = extract_vision_config_from_gguf("mmproj.gguf")
+
+    assert config is not None
+    assert config.hidden_size == 1152
+    assert config.intermediate_size == 4304
+    assert config.num_hidden_layers == 27
+    assert config.vision_use_head is False
+
+
+def test_qwen35moe_gguf_config_is_normalized_for_mm(monkeypatch):
+    fake_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "qwen35moe",
+            "qwen35moe.nextn_predict_layers": 1,
+            "qwen35moe.block_count": 41,
+        }
+    )
+    monkeypatch.setattr(gguf_utils_module, "check_gguf_file", lambda model: True)
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "extract_vocab_size_from_gguf",
+        lambda model: None,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "extract_lm_head_from_gguf",
+        lambda model: None,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "detect_gguf_multimodal",
+        lambda model: "mmproj.gguf",
+    )
+    monkeypatch.setattr(
+        gguf_utils_module.gguf,
+        "GGUFReader",
+        lambda path: fake_reader,
+    )
+
+    config = maybe_patch_hf_config_from_gguf(
+        "model.gguf",
+        PretrainedConfig(model_type="qwen35moe"),
+    )
+
+    assert config.model_type == "qwen3_5_moe"
+    assert config.architectures == ["Qwen3_5MoeForConditionalGeneration"]
+    assert config.mtp_num_hidden_layers == 1
+    assert config.num_nextn_predict_layers == 1
+    assert config.num_hidden_layers == 40
+
+
 def test_qwen3_5_adapter_reshapes_gguf_weights():
     adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5_moe"))
     shared_gate = torch.arange(4)
@@ -442,6 +544,93 @@ def test_gguf_config_parser_uses_gguf_file_when_parent_has_no_config(
     assert calls["model"] == gguf_path.parent
     assert calls["trust_remote_code"] is False
     assert calls["gguf_file"] == gguf_path.name
+
+
+def test_gguf_config_parser_resolves_presplit_local_gguf(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    calls = {}
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["trust_remote_code"] = trust_remote_code
+        calls["revision"] = revision
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {}, PretrainedConfig(model_type="qwen3_moe")
+
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "base/repo",
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+
+    GGUFConfigParser().parse(
+        gguf_path.parent,
+        trust_remote_code=True,
+        revision="gguf-revision",
+        gguf_file=gguf_path.name,
+    )
+
+    assert calls["model"] == "base/repo"
+    assert calls["trust_remote_code"] is False
+    assert calls["revision"] is None
+    assert calls["gguf_file"] is None
+
+
+def test_gguf_config_parser_preserves_patched_architecture(tmp_path, monkeypatch):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        return {}, PretrainedConfig(model_type="qwen35moe")
+
+    def fake_patch(model, config):
+        config.update(
+            {
+                "model_type": "qwen3_5_moe",
+                "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            }
+        )
+        return config
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "file_or_path_exists",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        fake_patch,
+    )
+
+    config_dict, config = GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
+
+    assert config.model_type == "qwen3_5_moe"
+    assert config.architectures == ["Qwen3_5MoeForConditionalGeneration"]
+    assert config_dict["architectures"] == ["Qwen3_5MoeForConditionalGeneration"]
 
 
 def test_gguf_config_source_uses_nearest_parent_config(tmp_path):
