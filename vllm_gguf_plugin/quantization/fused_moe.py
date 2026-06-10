@@ -4,6 +4,7 @@
 from functools import partial
 
 import torch
+from gguf import GGMLQuantizationType as WeightType
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
 )
@@ -30,6 +31,8 @@ from .params import (
 )
 from .utils import MMQ_QUANT_TYPES, MMVQ_QUANT_TYPES, logger
 
+IQ4_XS_MOE_MMQ_V2_BLOCK_SIZE = 8
+
 
 def _fused_moe_gguf(
     x: torch.Tensor,
@@ -53,7 +56,108 @@ def _fused_moe_gguf(
     from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
     out_hidden_states = torch.empty_like(x)
+
+    def _slow_moe_fallback() -> None:
+        from . import fused_mul_mat_gguf as fused_mul_mat_gguf_op
+
+        logger.warning_once(
+            "There is no support for fast MoE kernel "
+            "for current quantization method. "
+            "Falling back to slow implementation. "
+        )
+        for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
+            inp = x[tok].reshape((1,) + x.shape[1:])
+            current_hidden_state = None
+            for ww, ii in zip(w, idx):
+                out = fused_mul_mat_gguf_op(inp, w1[ii], qweight_type)
+                out = act(out)
+                current_state = fused_mul_mat_gguf_op(out, w2[ii], qweight_type2).mul_(
+                    ww
+                )
+                if current_hidden_state is None:
+                    current_hidden_state = current_state
+                else:
+                    current_hidden_state.add_(current_state)
+            out_hidden_states[tok] = current_hidden_state
+
+    def _fused_moe_gguf_batched_leg(
+        leg_x: torch.Tensor,
+        leg_weight: torch.Tensor,
+        leg_type: int,
+        leg_row: int,
+        leg_top_k: int,
+        leg_tokens: int,
+        num_experts: int,
+    ) -> torch.Tensor | None:
+        if leg_type == WeightType.IQ4_XS:
+            sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+                topk_ids, IQ4_XS_MOE_MMQ_V2_BLOCK_SIZE, num_experts
+            )
+            return ops.ggml_moe_a8_iq4_xs_mmq_v2(
+                leg_x,
+                leg_weight,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                leg_row,
+                leg_top_k,
+                leg_tokens,
+            )
+        if leg_type in MMQ_QUANT_TYPES:
+            block_size = ops.ggml_moe_get_block_size(leg_type)
+            sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+                topk_ids, block_size, num_experts
+            )
+            return ops.ggml_moe_a8(
+                leg_x,
+                leg_weight,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                leg_type,
+                leg_row,
+                leg_top_k,
+                leg_tokens,
+            )
+        if leg_type in MMVQ_QUANT_TYPES:
+            return ops.ggml_moe_a8_vec(
+                leg_x, leg_weight, topk_ids, leg_top_k, leg_type, leg_row, leg_tokens
+            )
+        return None
+
+    has_iq4_xs_leg = (
+        qweight_type == WeightType.IQ4_XS or qweight_type2 == WeightType.IQ4_XS
+    )
     if (
+        has_iq4_xs_leg
+        and qweight_type in MMVQ_QUANT_TYPES
+        and qweight_type2 in MMVQ_QUANT_TYPES
+        and x.shape[0] > 64
+    ):
+        num_tokens, _ = x.shape
+        E, N, _ = w1.shape
+        top_k = topk_ids.shape[1]
+
+        out = _fused_moe_gguf_batched_leg(x, w1, qweight_type, N, top_k, num_tokens, E)
+        if out is not None:
+            out = act(out)
+            out = _fused_moe_gguf_batched_leg(
+                out,
+                w2,
+                qweight_type2,
+                w2.shape[1],
+                1,
+                num_tokens * top_k,
+                E,
+            )
+        if out is not None:
+            out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
+                topk_weights.view(num_tokens, top_k, 1)
+            )
+            ops.moe_sum(out, out_hidden_states)
+        else:
+            _slow_moe_fallback()
+    elif (
         qweight_type2 in MMQ_QUANT_TYPES
         and qweight_type in MMQ_QUANT_TYPES
         and x.shape[0] > 64
@@ -109,27 +213,7 @@ def _fused_moe_gguf(
         )
         ops.moe_sum(out, out_hidden_states)
     else:
-        from . import fused_mul_mat_gguf as fused_mul_mat_gguf_op
-
-        logger.warning_once(
-            "There is no support for fast MoE kernel "
-            "for current quantization method. "
-            "Falling back to slow implementation. "
-        )
-        for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
-            inp = x[tok].reshape((1,) + x.shape[1:])
-            current_hidden_state = None
-            for ww, ii in zip(w, idx):
-                out = fused_mul_mat_gguf_op(inp, w1[ii], qweight_type)
-                out = act(out)
-                current_state = fused_mul_mat_gguf_op(out, w2[ii], qweight_type2).mul_(
-                    ww
-                )
-                if current_hidden_state is None:
-                    current_hidden_state = current_state
-                else:
-                    current_hidden_state.add_(current_state)
-            out_hidden_states[tok] = current_hidden_state
+        _slow_moe_fallback()
     return out_hidden_states
 
 

@@ -44,6 +44,8 @@ def _fused_mul_mat_gguf(
         return x @ qweight.T
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
+    elif qweight_type == WeightType.IQ4_XS:
+        y = ops.ggml_mul_mat_a8_iq4_xs_mmq_v2(qweight, x, qweight.shape[0])
     elif qweight_type in MMQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
     elif qweight_type in DEQUANT_TYPES:

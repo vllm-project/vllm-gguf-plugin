@@ -5,6 +5,7 @@ import vllm.engine.arg_utils as arg_utils_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.transformers_utils.config as config_module
+from gguf import GGMLQuantizationType as WeightType
 from transformers import PretrainedConfig
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -314,3 +315,125 @@ def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
 
     assert layer.qweight.device.type == "cuda"
     assert layer.qweight_type.device.type == "cuda"
+
+
+def test_gguf_iq4_xs_batched_linear_uses_mmq_v2(monkeypatch):
+    import vllm_gguf_plugin.quantization.linear as gguf_linear_module
+    from vllm_gguf_plugin.quantization.linear import _fused_mul_mat_gguf
+
+    qweight = torch.empty((32, 136), dtype=torch.uint8)
+    x = torch.empty((17, 256), dtype=torch.bfloat16)
+    expected = torch.empty((17, 32), dtype=torch.bfloat16)
+    calls = []
+
+    def fake_mmq_v2(qweight_arg, x_arg, row_arg):
+        calls.append((qweight_arg, x_arg, row_arg))
+        return expected
+
+    monkeypatch.setattr(
+        gguf_linear_module.ops, "ggml_mul_mat_a8_iq4_xs_mmq_v2", fake_mmq_v2
+    )
+
+    output = _fused_mul_mat_gguf(x, qweight, WeightType.IQ4_XS)
+
+    assert output is expected
+    assert calls == [(qweight, x, qweight.shape[0])]
+
+
+def test_gguf_iq4_xs_single_token_linear_keeps_mmvq(monkeypatch):
+    import vllm_gguf_plugin.quantization.linear as gguf_linear_module
+    from vllm_gguf_plugin.quantization.linear import _fused_mul_mat_gguf
+
+    qweight = torch.empty((32, 136), dtype=torch.uint8)
+    x = torch.empty((1, 256), dtype=torch.bfloat16)
+    expected = torch.empty((1, 32), dtype=torch.bfloat16)
+    calls = []
+
+    def fake_mmvq(qweight_arg, x_arg, qweight_type_arg, row_arg):
+        calls.append((qweight_arg, x_arg, qweight_type_arg, row_arg))
+        return expected
+
+    def fail_mmq_v2(*args, **kwargs):
+        raise AssertionError("IQ4_XS batch-size-1 path must keep MMVQ")
+
+    monkeypatch.setattr(gguf_linear_module.ops, "ggml_mul_mat_vec_a8", fake_mmvq)
+    monkeypatch.setattr(
+        gguf_linear_module.ops, "ggml_mul_mat_a8_iq4_xs_mmq_v2", fail_mmq_v2
+    )
+
+    output = _fused_mul_mat_gguf(x, qweight, WeightType.IQ4_XS)
+
+    assert output is expected
+    assert calls == [(qweight, x, WeightType.IQ4_XS, qweight.shape[0])]
+
+
+def test_gguf_iq4_xs_batched_moe_uses_mmq_v2(monkeypatch):
+    import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
+
+    import vllm_gguf_plugin.quantization.fused_moe as gguf_moe_module
+    from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
+
+    def fake_align(topk_ids, block_size, num_experts):
+        del num_experts
+        num_ids = topk_ids.numel()
+        padded = ((num_ids + block_size - 1) // block_size) * block_size
+        sorted_token_ids = torch.arange(padded, dtype=torch.int32)
+        sorted_token_ids[num_ids:] = -1
+        expert_ids = torch.zeros(padded // block_size, dtype=torch.int32)
+        num_tokens_post_padded = torch.tensor([padded], dtype=torch.int32)
+        return sorted_token_ids, expert_ids, num_tokens_post_padded
+
+    def fake_apply_moe_activation(activation, output, input_):
+        del activation
+        output.copy_(input_[..., : output.shape[-1]])
+
+    calls = []
+
+    def fake_moe_v2(
+        x,
+        weight,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        row,
+        top_k,
+        tokens,
+    ):
+        calls.append((x.shape, weight.shape, row, top_k, tokens))
+        assert sorted_token_ids.dtype == torch.int32
+        assert expert_ids.dtype == torch.int32
+        assert num_tokens_post_padded.dtype == torch.int32
+        return torch.ones((tokens * top_k, row), dtype=x.dtype)
+
+    def fake_moe_sum(input_, output):
+        output.copy_(input_.sum(dim=1))
+
+    monkeypatch.setattr(fused_moe_module, "moe_align_block_size", fake_align)
+    monkeypatch.setattr(
+        gguf_moe_module, "apply_moe_activation", fake_apply_moe_activation
+    )
+    monkeypatch.setattr(gguf_moe_module.ops, "ggml_moe_a8_iq4_xs_mmq_v2", fake_moe_v2)
+    monkeypatch.setattr(gguf_moe_module.ops, "moe_sum", fake_moe_sum)
+
+    x = torch.ones((65, 4), dtype=torch.float32)
+    w1 = torch.empty((4, 8, 4), dtype=torch.uint8)
+    w2 = torch.empty((4, 4, 4), dtype=torch.uint8)
+    topk_weights = torch.ones((65, 2), dtype=torch.float32)
+    topk_ids = torch.zeros((65, 2), dtype=torch.int32)
+
+    output = _fused_moe_gguf(
+        x,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        WeightType.IQ4_XS,
+        WeightType.IQ4_XS,
+        "silu",
+    )
+
+    assert output.shape == x.shape
+    assert calls == [
+        (torch.Size([65, 4]), torch.Size([4, 8, 4]), 8, 2, 65),
+        (torch.Size([130, 4]), torch.Size([4, 4, 4]), 4, 1, 130),
+    ]

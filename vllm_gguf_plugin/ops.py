@@ -43,6 +43,26 @@ if hasattr(torch.ops, "_C_gguf") and hasattr(torch.ops._C_gguf, "ggml_dequantize
     ) -> torch.Tensor:
         return torch.empty((X.size(0), row), dtype=X.dtype, device=W.device)
 
+    if hasattr(torch.ops._C_gguf, "ggml_mul_mat_a8_q4_0_mmq_v2"):
+
+        @register_fake("_C_gguf::ggml_mul_mat_a8_q4_0_mmq_v2")
+        def _ggml_mul_mat_a8_q4_0_mmq_v2_fake(
+            W: torch.Tensor,
+            X: torch.Tensor,
+            row: torch.SymInt,
+        ) -> torch.Tensor:
+            return torch.empty((X.size(0), row), dtype=X.dtype, device=W.device)
+
+    if hasattr(torch.ops._C_gguf, "ggml_mul_mat_a8_iq4_xs_mmq_v2"):
+
+        @register_fake("_C_gguf::ggml_mul_mat_a8_iq4_xs_mmq_v2")
+        def _ggml_mul_mat_a8_iq4_xs_mmq_v2_fake(
+            W: torch.Tensor,
+            X: torch.Tensor,
+            row: torch.SymInt,
+        ) -> torch.Tensor:
+            return torch.empty((X.size(0), row), dtype=X.dtype, device=W.device)
+
     @register_fake("_C_gguf::ggml_moe_a8")
     def _ggml_moe_a8_fake(
         X: torch.Tensor,
@@ -58,6 +78,21 @@ if hasattr(torch.ops, "_C_gguf") and hasattr(torch.ops._C_gguf, "ggml_dequantize
         return torch.empty(
             (X.size(0) * top_k, row), dtype=torch.float16, device=W.device
         )
+
+    if hasattr(torch.ops._C_gguf, "ggml_moe_a8_iq4_xs_mmq_v2"):
+
+        @register_fake("_C_gguf::ggml_moe_a8_iq4_xs_mmq_v2")
+        def _ggml_moe_a8_iq4_xs_mmq_v2_fake(
+            X: torch.Tensor,
+            W: torch.Tensor,
+            sorted_token_ids: torch.Tensor,
+            expert_ids: torch.Tensor,
+            num_tokens_post_padded: torch.Tensor,
+            row: torch.SymInt,
+            top_k: torch.SymInt,
+            tokens: torch.SymInt,
+        ) -> torch.Tensor:
+            return torch.empty((tokens * top_k, row), dtype=X.dtype, device=W.device)
 
 
 if hasattr(torch.ops, "_C_gguf") and hasattr(torch.ops._C_gguf, "ggml_moe_a8_vec"):
@@ -97,6 +132,22 @@ def ggml_mul_mat_a8(
     row: int,
 ) -> torch.Tensor:
     return torch.ops._C_gguf.ggml_mul_mat_a8(W, X, quant_type, row)
+
+
+def ggml_mul_mat_a8_q4_0_mmq_v2(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    row: int,
+) -> torch.Tensor:
+    return torch.ops._C_gguf.ggml_mul_mat_a8_q4_0_mmq_v2(W, X, row)
+
+
+def ggml_mul_mat_a8_iq4_xs_mmq_v2(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    row: int,
+) -> torch.Tensor:
+    return torch.ops._C_gguf.ggml_mul_mat_a8_iq4_xs_mmq_v2(W, X, row)
 
 
 def ggml_moe_a8(
@@ -139,6 +190,28 @@ def ggml_moe_a8_vec(
 
 def ggml_moe_get_block_size(quant_type: int) -> int:
     return torch.ops._C_gguf.ggml_moe_get_block_size(quant_type)
+
+
+def ggml_moe_a8_iq4_xs_mmq_v2(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    row: int,
+    top_k: int,
+    tokens: int,
+) -> torch.Tensor:
+    return torch.ops._C_gguf.ggml_moe_a8_iq4_xs_mmq_v2(
+        X,
+        W,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        row,
+        top_k,
+        tokens,
+    )
 
 
 def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
