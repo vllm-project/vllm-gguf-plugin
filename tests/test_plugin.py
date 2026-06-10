@@ -23,6 +23,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
+import vllm_gguf_plugin.gguf_config_builder as gguf_config_builder_module
 import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
@@ -30,6 +31,7 @@ import vllm_gguf_plugin.quantization.params as gguf_params_module
 import vllm_gguf_plugin.weights_adapter.default as default_adapter_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
+from vllm_gguf_plugin.gguf_config_builder import build_config_from_gguf
 from vllm_gguf_plugin.gguf_utils import (
     _gguf_sequence_edge,
     extract_vision_config_from_gguf,
@@ -421,6 +423,110 @@ class _FakeGGUFReader:
         return self.fields.get(key)
 
 
+def test_build_qwen35moe_config_from_gguf_metadata(tmp_path, monkeypatch):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    fake_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "qwen35moe",
+            "tokenizer.ggml.tokens": ["a", "b", "c"],
+            "tokenizer.ggml.bos_token_id": 1,
+            "tokenizer.ggml.eos_token_id": 2,
+            "tokenizer.ggml.padding_token_id": 0,
+            "qwen35moe.attention.head_count": 16,
+            "qwen35moe.attention.head_count_kv": 2,
+            "qwen35moe.attention.key_length": 256,
+            "qwen35moe.attention.layer_norm_rms_epsilon": 1e-6,
+            "qwen35moe.block_count": 40,
+            "qwen35moe.context_length": 262144,
+            "qwen35moe.embedding_length": 2048,
+            "qwen35moe.expert_count": 256,
+            "qwen35moe.expert_feed_forward_length": 512,
+            "qwen35moe.expert_shared_feed_forward_length": 512,
+            "qwen35moe.expert_used_count": 8,
+            "qwen35moe.full_attention_interval": 4,
+            "qwen35moe.rope.dimension_count": 64,
+            "qwen35moe.rope.freq_base": 10000000.0,
+        }
+    )
+    monkeypatch.setattr(
+        gguf_config_builder_module.gguf,
+        "GGUFReader",
+        lambda path: fake_reader,
+    )
+    monkeypatch.setattr(
+        gguf_config_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: tmp_path / "mmproj.gguf",
+    )
+
+    config = build_config_from_gguf(gguf_path)
+
+    assert config is not None
+    assert config.model_type == "qwen3_5_moe"
+    assert config.architectures == ["Qwen3_5MoeForConditionalGeneration"]
+    text_config = config.get_text_config()
+    assert text_config.model_type == "qwen3_5_moe_text"
+    assert text_config.hidden_size == 2048
+    assert text_config.num_hidden_layers == 40
+    assert text_config.num_key_value_heads == 2
+    assert text_config.layer_types[3] == "full_attention"
+    assert text_config.layer_types[0] == "linear_attention"
+
+
+def test_build_gemma4_assistant_config_from_gguf_metadata(tmp_path, monkeypatch):
+    gguf_path = tmp_path / "draft.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    fake_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "gemma4-assistant",
+            "tokenizer.ggml.tokens": ["a", "b", "c"],
+            "gemma4-assistant.attention.head_count": 16,
+            "gemma4-assistant.attention.head_count_kv": [8, 8, 8, 2],
+            "gemma4-assistant.attention.key_length": 512,
+            "gemma4-assistant.attention.key_length_swa": 256,
+            "gemma4-assistant.attention.layer_norm_rms_epsilon": 1e-6,
+            "gemma4-assistant.attention.shared_kv_layers": 4,
+            "gemma4-assistant.attention.sliding_window": 1024,
+            "gemma4-assistant.attention.sliding_window_pattern": [
+                True,
+                True,
+                True,
+                False,
+            ],
+            "gemma4-assistant.block_count": 4,
+            "gemma4-assistant.context_length": 262144,
+            "gemma4-assistant.embedding_length": 1024,
+            "gemma4-assistant.embedding_length_out": 2816,
+            "gemma4-assistant.feed_forward_length": 8192,
+            "gemma4-assistant.nextn_predict_layers": 4,
+            "gemma4-assistant.rope.freq_base": 1000000.0,
+            "gemma4-assistant.rope.freq_base_swa": 10000.0,
+        }
+    )
+    monkeypatch.setattr(
+        gguf_config_builder_module.gguf,
+        "GGUFReader",
+        lambda path: fake_reader,
+    )
+
+    config = build_config_from_gguf(gguf_path)
+
+    assert config is not None
+    assert config.model_type == "gemma4_assistant"
+    assert config.architectures == ["Gemma4MTPModel"]
+    assert config.hidden_size == 1024
+    assert config.backbone_hidden_size == 2816
+    assert config.num_key_value_heads == 8
+    assert config.num_global_key_value_heads == 2
+    assert config.layer_types == [
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "full_attention",
+    ]
+
+
 def test_extract_vision_config_accepts_single_value_metadata(monkeypatch):
     fake_reader = _FakeGGUFReader(
         {
@@ -626,6 +732,40 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     assert calls["gguf_file"] is None
     assert config_dict["norm_topk_prob"] is True
     assert config.architectures == ["Qwen3MoeForCausalLM"]
+
+
+def test_gguf_config_parser_prefers_native_gguf_config(tmp_path, monkeypatch):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    native_config = PretrainedConfig(
+        model_type="qwen3_5_moe",
+        architectures=["Qwen3_5MoeForCausalLM"],
+    )
+
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "build_config_from_gguf",
+        lambda model: native_config,
+    )
+
+    def fail_parse(*args, **kwargs):
+        raise AssertionError("native GGUF config should skip HF parser fallback")
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fail_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+
+    config_dict, config = GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
+
+    assert config is native_config
+    assert config_dict["architectures"] == ["Qwen3_5MoeForCausalLM"]
 
 
 def test_gguf_config_parser_uses_gguf_file_when_parent_has_no_config(
