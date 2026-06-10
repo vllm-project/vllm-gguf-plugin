@@ -4,6 +4,9 @@
 from functools import partial
 
 import torch
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+)
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -11,9 +14,6 @@ from vllm.model_executor.layers.fused_moe.activation import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-)
-from vllm.model_executor.layers.fused_moe import (
-    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
