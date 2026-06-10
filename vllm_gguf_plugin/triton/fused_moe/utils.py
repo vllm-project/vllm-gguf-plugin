@@ -187,22 +187,15 @@ def _validate_args(
             f"quantized expert width {hidden_size}"
         )
 
-    padded_count = int(num_tokens_post_padded.item())
-    if padded_count % TRITON_FUSED_MOE_BLOCK_M != 0:
+    # Use tensor shapes (CPU-known) instead of .item() to avoid GPU→CPU sync.
+    # This is required for CUDA graph capture compatibility.
+    max_num_blocks = expert_ids.numel()
+    if max_num_blocks != sorted_token_ids.numel() // TRITON_FUSED_MOE_BLOCK_M:
         raise ValueError(
-            "num_tokens_post_padded must be divisible by Triton fused MoE block size "
-            f"{TRITON_FUSED_MOE_BLOCK_M}, got {padded_count}"
-        )
-    num_blocks = padded_count // TRITON_FUSED_MOE_BLOCK_M
-    if expert_ids.numel() < num_blocks:
-        raise ValueError(
-            "expert_ids is shorter than the routed block count, "
-            f"got {expert_ids.numel()} < {num_blocks}"
-        )
-    if sorted_token_ids.numel() < padded_count:
-        raise ValueError(
-            "sorted_token_ids is shorter than num_tokens_post_padded, "
-            f"got {sorted_token_ids.numel()} < {padded_count}"
+            "expert_ids and sorted_token_ids have inconsistent shapes: "
+            f"expert_ids.numel()={max_num_blocks}, "
+            f"sorted_token_ids.numel()//BLOCK_M="
+            f"{sorted_token_ids.numel() // TRITON_FUSED_MOE_BLOCK_M}"
         )
 
     return (
@@ -250,12 +243,13 @@ def run_triton_fused_moe_kernel(
     )
 
     out = torch.zeros((num_valid_tokens, row), device=X.device, dtype=X.dtype)
-    padded_count = int(num_tokens_post_padded.item())
-    if padded_count == 0:
-        return out
 
+    # Use expert_ids.shape[0] (CPU-known) for grid sizing instead of
+    # num_tokens_post_padded.item() to avoid GPU→CPU sync during CUDA graph
+    # capture. The kernel safely handles extra blocks via expert < 0 checks
+    # and token_mask.
     grid = (
-        triton.cdiv(padded_count, TRITON_FUSED_MOE_BLOCK_M),
+        expert_ids.shape[0],
         triton.cdiv(row, TRITON_FUSED_MOE_BLOCK_N),
     )
     kernel[grid](
