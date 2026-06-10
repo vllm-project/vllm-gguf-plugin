@@ -522,7 +522,7 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
 def test_register_skips_speculator_probe_for_gguf():
     register()
 
-    model, tokenizer, speculative_config, trust_remote_code = (
+    model, tokenizer, speculative_config = (
         config_module.maybe_override_with_speculators(
             model="/tmp/model.gguf",
             tokenizer="/tmp/tokenizer",
@@ -536,41 +536,107 @@ def test_register_skips_speculator_probe_for_gguf():
     assert model == "/tmp/model.gguf"
     assert tokenizer == "/tmp/tokenizer"
     assert speculative_config == {"foo": "bar"}
-    assert trust_remote_code is False
 
 
-def test_register_disables_trust_for_gguf_speculator_redirect(tmp_path, monkeypatch):
+def test_register_disables_trust_for_gguf_config_redirect(tmp_path, monkeypatch):
     register()
     gguf_path = tmp_path / "model.gguf"
     gguf_path.write_bytes(b"GGUF")
+    captured = {}
 
     monkeypatch.setattr(
         gguf_plugin_module,
         "resolve_gguf_config_source",
         lambda model, revision=None: "base/repo",
     )
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
     monkeypatch.setattr(
-        gguf_plugin_module.PretrainedConfig,
-        "get_config_dict",
-        lambda *args, **kwargs: ({}, {}),
+        arg_utils_module,
+        "ModelConfig",
+        fake_model_config,
     )
 
-    model, tokenizer, speculative_config, trust_remote_code = (
-        config_module.maybe_override_with_speculators(
-            model=str(gguf_path),
-            tokenizer="/tmp/tokenizer",
-            trust_remote_code=True,
-            revision="gguf-revision",
-            hf_config_path=None,
-            vllm_speculative_config=None,
-            hf_token=None,
-        )
+    engine_args = EngineArgs(
+        model=str(gguf_path),
+        tokenizer="/tmp/tokenizer",
+        trust_remote_code=True,
+        revision="gguf-revision",
+    )
+    engine_args.create_model_config()
+
+    assert captured["trust_remote_code"] is False
+
+
+def test_register_keeps_trust_for_explicit_gguf_config_path(tmp_path, monkeypatch):
+    register()
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    config_path = tmp_path / "config-repo"
+    config_path.mkdir()
+    captured = {}
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "base/repo",
     )
 
-    assert model == str(gguf_path)
-    assert tokenizer == "/tmp/tokenizer"
-    assert speculative_config is None
-    assert trust_remote_code is False
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(
+        arg_utils_module,
+        "ModelConfig",
+        fake_model_config,
+    )
+
+    engine_args = EngineArgs(
+        model=str(gguf_path),
+        tokenizer="/tmp/tokenizer",
+        trust_remote_code=True,
+        hf_config_path=str(config_path),
+    )
+    engine_args.create_model_config()
+
+    assert captured["trust_remote_code"] is True
+
+
+def test_register_disables_trust_for_gguf_speculator_config(tmp_path, monkeypatch):
+    register()
+    gguf_path = tmp_path / "draft.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    captured = {}
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "base/repo",
+    )
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(
+        arg_utils_module,
+        "ModelConfig",
+        fake_model_config,
+    )
+
+    engine_args = EngineArgs(
+        model="verifier/repo",
+        tokenizer="verifier/repo",
+        trust_remote_code=True,
+        speculative_config={"model": str(gguf_path)},
+    )
+    engine_args.create_model_config()
+
+    assert captured["trust_remote_code"] is False
 
 
 def test_gguf_qkv_shards_are_padded_in_qkv_order(monkeypatch):

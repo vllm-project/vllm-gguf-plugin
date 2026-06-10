@@ -46,6 +46,43 @@ def _is_gguf_reference(model: str | None) -> bool:
     return model.endswith(".gguf") or is_remote_gguf(model) or is_gguf(model)
 
 
+def _uses_gguf_derived_config_source(
+    model: str | None,
+    revision: str | None = None,
+) -> bool:
+    if not _is_gguf_reference(model):
+        return False
+
+    if check_gguf_file(model):
+        gguf_repo = Path(model).parent
+        resolved_source = resolve_gguf_config_source(model, revision=revision)
+        if resolved_source != gguf_repo:
+            return True
+        return not file_or_path_exists(gguf_repo, HF_CONFIG_NAME, revision=revision)
+
+    if is_remote_gguf(model):
+        repo_id, _ = split_remote_gguf(model)
+        resolved_source = resolve_gguf_config_source(model, revision=revision)
+        if resolved_source != repo_id:
+            return True
+        return not file_or_path_exists(repo_id, HF_CONFIG_NAME, revision=revision)
+
+    return False
+
+
+def _get_gguf_config_probe_model(engine_args: EngineArgs) -> str | None:
+    if _is_gguf_reference(engine_args.model):
+        return engine_args.model
+
+    speculative_config = getattr(engine_args, "speculative_config", None)
+    if isinstance(speculative_config, dict):
+        speculative_model = speculative_config.get("model")
+        if isinstance(speculative_model, str) and _is_gguf_reference(speculative_model):
+            return speculative_model
+
+    return None
+
+
 def _patch_engine_args() -> None:
     if getattr(EngineArgs, "_gguf_create_model_config_patched", False):
         return
@@ -54,6 +91,22 @@ def _patch_engine_args() -> None:
 
     @wraps(original_create_model_config)
     def create_model_config(self, *args, **kwargs):
+        if (
+            self.trust_remote_code
+            and self.hf_config_path is None
+            and (gguf_config_model := _get_gguf_config_probe_model(self)) is not None
+            and _uses_gguf_derived_config_source(
+                gguf_config_model,
+                revision=self.revision,
+            )
+        ):
+            config_module.logger.warning_once(
+                "Disabling `trust_remote_code` because model config was "
+                "selected from a GGUF-derived config source. Pass an "
+                "explicit `--hf-config-path` to opt in for that repository.",
+            )
+            self.trust_remote_code = False
+
         if _is_gguf_reference(self.model):
             gguf_model = self.model
             if self.quantization is None:
@@ -101,18 +154,6 @@ def _patch_speculator_probe() -> None:
                 **kwargs,
             )
 
-        disable_verifier_trust_remote_code = False
-
-        def maybe_disable_trust_remote_code() -> bool:
-            if not disable_verifier_trust_remote_code or not trust_remote_code:
-                return trust_remote_code
-            config_module.logger.warning_once(
-                "Disabling `trust_remote_code` because model config was "
-                "selected from a GGUF-derived config source. Pass an "
-                "explicit `--hf-config-path` to opt in for that repository.",
-            )
-            return False
-
         if check_gguf_file(model):
             if hf_config_path is None:
                 gguf_repo = Path(model).parent
@@ -122,14 +163,12 @@ def _patch_speculator_probe() -> None:
                 )
                 if gguf_model_repo != gguf_repo:
                     revision = None
-                    disable_verifier_trust_remote_code = True
                 elif not file_or_path_exists(
                     gguf_repo,
                     HF_CONFIG_NAME,
                     revision=revision,
                 ):
                     kwargs["gguf_file"] = Path(model).name
-                    disable_verifier_trust_remote_code = True
             else:
                 gguf_model_repo = Path(model).parent
         elif is_remote_gguf(model):
@@ -137,21 +176,14 @@ def _patch_speculator_probe() -> None:
             gguf_model_repo = resolve_gguf_config_source(model, revision=revision)
             if gguf_model_repo != repo_id:
                 revision = None
-                disable_verifier_trust_remote_code = True
             elif not file_or_path_exists(repo_id, HF_CONFIG_NAME, revision=revision):
                 kwargs["gguf_file"] = get_gguf_file_path_from_hf(
                     repo_id,
                     quant_type,
                     revision=revision,
                 )
-                disable_verifier_trust_remote_code = True
         else:
-            return (
-                model,
-                tokenizer,
-                vllm_speculative_config,
-                maybe_disable_trust_remote_code(),
-            )
+            return model, tokenizer, vllm_speculative_config
 
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
         config_source = hf_config_path or gguf_model_repo
@@ -163,12 +195,7 @@ def _patch_speculator_probe() -> None:
         )
         speculators_config = config_dict.get("speculators_config")
         if speculators_config is None:
-            return (
-                model,
-                tokenizer,
-                vllm_speculative_config,
-                maybe_disable_trust_remote_code(),
-            )
+            return model, tokenizer, vllm_speculative_config
 
         from vllm.transformers_utils.configs.speculators.base import (
             SpeculatorsConfig,
@@ -180,12 +207,7 @@ def _patch_speculator_probe() -> None:
         speculative_config["model"] = model
 
         verifier_model = speculators_config["verifier"]["name_or_path"]
-        return (
-            verifier_model,
-            verifier_model,
-            speculative_config,
-            maybe_disable_trust_remote_code(),
-        )
+        return verifier_model, verifier_model, speculative_config
 
     arg_utils_module.maybe_override_with_speculators = maybe_override_with_speculators
     config_module.maybe_override_with_speculators = maybe_override_with_speculators
