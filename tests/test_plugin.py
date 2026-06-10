@@ -27,6 +27,7 @@ import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 import vllm_gguf_plugin.quantization.params as gguf_params_module
+import vllm_gguf_plugin.weights_adapter.default as default_adapter_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
 from vllm_gguf_plugin.gguf_utils import (
@@ -41,6 +42,7 @@ from vllm_gguf_plugin.quantization import (
     GGUFWeightTypeParameter,
 )
 from vllm_gguf_plugin.weights_adapter.default import (
+    GGUFWeightsAdapter,
     _add_gemma4_mtp_gguf_mappings,
     _add_qwen3_5_mtp_gguf_mappings,
 )
@@ -456,6 +458,39 @@ def test_qwen35moe_gguf_config_is_normalized_for_mm(monkeypatch):
     assert config.mtp_num_hidden_layers == 1
     assert config.num_nextn_predict_layers == 1
     assert config.num_hidden_layers == 40
+
+
+def test_default_adapter_adds_mmproj_for_multimodal_config(tmp_path, monkeypatch):
+    main_path = tmp_path / "model.gguf"
+    mmproj_path = tmp_path / "mmproj-BF16.gguf"
+    config = PretrainedConfig(model_type="qwen3_5_moe")
+    config.vision_config = PretrainedConfig()
+    adapter = GGUFWeightsAdapter(config)
+
+    monkeypatch.setattr(
+        default_adapter_module,
+        "detect_gguf_multimodal",
+        lambda model: mmproj_path,
+    )
+
+    assert adapter._get_weight_sources(str(main_path), config) == [
+        str(main_path),
+        str(mmproj_path),
+    ]
+
+
+def test_default_adapter_keeps_text_only_sources_without_mmproj(tmp_path, monkeypatch):
+    main_path = tmp_path / "model.gguf"
+    config = PretrainedConfig(model_type="qwen3_5_moe")
+    adapter = GGUFWeightsAdapter(config)
+
+    monkeypatch.setattr(
+        default_adapter_module,
+        "detect_gguf_multimodal",
+        lambda model: tmp_path / "mmproj-BF16.gguf",
+    )
+
+    assert adapter._get_weight_sources(str(main_path), config) == [str(main_path)]
 
 
 def test_qwen3_5_adapter_reshapes_gguf_weights():

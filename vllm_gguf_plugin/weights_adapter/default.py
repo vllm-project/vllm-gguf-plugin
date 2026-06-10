@@ -14,7 +14,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from vllm.logger import init_logger
 
-from ..gguf_utils import maybe_patch_hf_config_from_gguf
+from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
 from ..weight_utils import (
     get_gguf_extra_tensor_names,
     get_gguf_weight_type_map,
@@ -46,6 +46,10 @@ def _get_vision_num_layers(config: PretrainedConfig) -> int:
     if vision_num_layers is None:
         vision_num_layers = config.vision_config.depth
     return vision_num_layers
+
+
+def _is_multimodal_config(config: PretrainedConfig) -> bool:
+    return hasattr(config, "vision_config") and config.vision_config is not None
 
 
 def _is_gemma4_mtp_config(config: PretrainedConfig) -> bool:
@@ -319,9 +323,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         config = model_config.hf_config
         text_config = config.get_text_config()
         model_type = config.model_type
-        is_multimodal = (
-            hasattr(config, "vision_config") and config.vision_config is not None
-        )
+        is_multimodal = _is_multimodal_config(config)
         orig_model_type = model_type
 
         gguf_to_hf_name_map: dict[str, str] = {}
@@ -570,9 +572,23 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             logger.info("Discovered %d GGUF shard files", len(files))
         return files if files else [model_path]
 
-    def update_tie_word_embeddings(
+    def _get_weight_sources(
         self,
         model_path: str,
+        hf_config: PretrainedConfig,
+    ) -> list[str]:
+        gguf_files = self._get_all_gguf_files(model_path)
+        if _is_multimodal_config(hf_config):
+            mm_proj_path = detect_gguf_multimodal(model_path)
+            if mm_proj_path is not None:
+                mm_proj_file = os.fspath(mm_proj_path)
+                if mm_proj_file not in gguf_files:
+                    gguf_files.append(mm_proj_file)
+        return gguf_files
+
+    def update_tie_word_embeddings(
+        self,
+        gguf_files: list[str],
         hf_config: PretrainedConfig,
         gguf_to_hf_name_map: dict[str, str],
     ) -> None:
@@ -580,7 +596,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             return
 
         all_extra_names = []
-        for gguf_file in self._get_all_gguf_files(model_path):
+        for gguf_file in gguf_files:
             all_extra_names.extend(
                 get_gguf_extra_tensor_names(gguf_file, gguf_to_hf_name_map)
             )
@@ -588,11 +604,11 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
     def get_weight_type_map(
         self,
-        model_path: str,
+        gguf_files: list[str],
         gguf_to_hf_name_map: dict[str, str],
     ) -> dict[str, str]:
         weight_type_map = {}
-        for gguf_file in self._get_all_gguf_files(model_path):
+        for gguf_file in gguf_files:
             weight_type_map.update(
                 get_gguf_weight_type_map(gguf_file, gguf_to_hf_name_map)
             )
@@ -615,12 +631,13 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_path, model_config.hf_config
         )
         gguf_to_hf_name_map = self.build_name_map(model_config)
+        gguf_files = self._get_weight_sources(model_path, model_config.hf_config)
         self.update_tie_word_embeddings(
-            model_path, model_config.hf_config, gguf_to_hf_name_map
+            gguf_files, model_config.hf_config, gguf_to_hf_name_map
         )
-        weight_type_map = self.get_weight_type_map(model_path, gguf_to_hf_name_map)
+        weight_type_map = self.get_weight_type_map(gguf_files, gguf_to_hf_name_map)
         self.load_spec = GGUFLoadSpec(
-            weights_source=self._get_all_gguf_files(model_path),
+            weights_source=gguf_files,
             gguf_to_hf_name_map=gguf_to_hf_name_map,
             unquantized_modules=self.get_unquantized_modules(weight_type_map),
         )
