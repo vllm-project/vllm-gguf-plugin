@@ -426,10 +426,16 @@ def _build_qwen35_config(
     )
 
     mmproj_reader = _read_mmproj_reader(model_path)
+    is_multimodal = mmproj_reader is not None
+    architecture = (
+        "Qwen3_5ForConditionalGeneration"
+        if is_multimodal
+        else "Qwen3_5ForCausalLM"
+    )
     return Qwen3_5Config(
         text_config=text_config,
         vision_config=_build_qwen35_vision_config(mmproj_reader),
-        architectures=["Qwen3_5ForConditionalGeneration"],
+        architectures=[architecture],
         tie_word_embeddings=tie_word_embeddings,
         vocab_size=text_config.get("vocab_size"),
     )

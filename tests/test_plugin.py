@@ -656,6 +656,51 @@ def test_build_qwen35_config_from_gguf_metadata(tmp_path, monkeypatch):
     assert config.vision_config.out_hidden_size == 5120
 
 
+def test_build_qwen35_config_without_mmproj_uses_causal_lm_architecture(
+    tmp_path, monkeypatch
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    main_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "qwen35",
+            "tokenizer.ggml.tokens": ["a", "b", "c"],
+            "qwen35.attention.head_count": 24,
+            "qwen35.attention.head_count_kv": 4,
+            "qwen35.attention.key_length": 256,
+            "qwen35.attention.layer_norm_rms_epsilon": 1e-6,
+            "qwen35.block_count": 64,
+            "qwen35.context_length": 262144,
+            "qwen35.embedding_length": 5120,
+            "qwen35.feed_forward_length": 17408,
+            "qwen35.full_attention_interval": 4,
+            "qwen35.rope.dimension_count": 64,
+            "qwen35.rope.freq_base": 10000000.0,
+            "qwen35.ssm.conv_kernel": 4,
+            "qwen35.ssm.group_count": 16,
+            "qwen35.ssm.inner_size": 6144,
+            "qwen35.ssm.state_size": 128,
+        }
+    )
+
+    monkeypatch.setattr(
+        gguf_config_builder_module.gguf,
+        "GGUFReader",
+        lambda path: main_reader,
+    )
+    monkeypatch.setattr(
+        gguf_config_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: None,
+    )
+
+    config = build_config_from_gguf(gguf_path)
+
+    assert config is not None
+    assert config.architectures == ["Qwen3_5ForCausalLM"]
+    assert default_adapter_module._uses_multimodal_weight_layout(config) is False
+
+
 def test_build_gemma4_mm_config_from_gguf_metadata(tmp_path, monkeypatch):
     gguf_path = tmp_path / "model.gguf"
     mmproj_path = tmp_path / "mmproj-BF16.gguf"
@@ -1259,10 +1304,37 @@ def test_default_adapter_keeps_text_only_sources_without_mmproj(tmp_path, monkey
     assert adapter._get_weight_sources(str(main_path), config) == [str(main_path)]
 
 
-def _build_qwen3_5_test_name_map(monkeypatch, config, state_names):
+def test_default_adapter_ignores_mmproj_for_causal_lm_architecture(
+    tmp_path, monkeypatch
+):
+    main_path = tmp_path / "model.gguf"
+    config = PretrainedConfig(
+        model_type="qwen3_5",
+        architectures=["Qwen3_5ForCausalLM"],
+    )
+    config.vision_config = PretrainedConfig()
+    adapter = GGUFWeightsAdapter(config)
+
+    monkeypatch.setattr(
+        default_adapter_module,
+        "detect_gguf_multimodal",
+        lambda model: tmp_path / "mmproj-BF16.gguf",
+    )
+
+    assert adapter._get_weight_sources(str(main_path), config) == [str(main_path)]
+
+
+def _build_qwen3_5_test_name_map(
+    monkeypatch,
+    config,
+    state_names,
+    tensor_name_map=None,
+):
+    tensor_name_map = tensor_name_map or {}
+
     class FakeNameMap:
         def get_name(self, name):
-            return None
+            return tensor_name_map.get(name)
 
     class FakeAutoModel:
         @staticmethod
@@ -1333,6 +1405,35 @@ def test_qwen3_5_text_only_does_not_add_visual_merger_mappings(monkeypatch):
 
     mapping = _build_qwen3_5_test_name_map(monkeypatch, config, [])
 
+    assert "v.patch_embd.weight.1" not in mapping
+    assert "mm.0.weight" not in mapping
+    assert "mm.2.weight" not in mapping
+
+
+def test_qwen3_5_causal_lm_uses_text_weight_layout(monkeypatch):
+    config = PretrainedConfig(
+        model_type="qwen3_5",
+        architectures=["Qwen3_5ForCausalLM"],
+        num_hidden_layers=1,
+        layer_types=["linear_attention"],
+    )
+    config.vision_config = PretrainedConfig(num_hidden_layers=1)
+
+    mapping = _build_qwen3_5_test_name_map(
+        monkeypatch,
+        config,
+        [
+            "model.embed_tokens.weight",
+            "model.layers.0.linear_attn.dt_bias",
+        ],
+        {
+            "model.embed_tokens": "token_embd",
+            "model.layers.0.linear_attn.dt_bias": "blk.0.ssm_dt",
+        },
+    )
+
+    assert mapping["token_embd.weight"] == "model.embed_tokens.weight"
+    assert mapping["blk.0.ssm_dt.bias"] == "model.layers.0.linear_attn.dt_bias"
     assert "v.patch_embd.weight.1" not in mapping
     assert "mm.0.weight" not in mapping
     assert "mm.2.weight" not in mapping

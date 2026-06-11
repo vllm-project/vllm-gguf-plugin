@@ -52,6 +52,21 @@ def _is_multimodal_config(config: PretrainedConfig) -> bool:
     return hasattr(config, "vision_config") and config.vision_config is not None
 
 
+def _uses_multimodal_weight_layout(
+    config: PretrainedConfig,
+    architectures: list[str] | None = None,
+) -> bool:
+    if not _is_multimodal_config(config):
+        return False
+
+    if architectures is None:
+        architectures = getattr(config, "architectures", None)
+    if not architectures:
+        return True
+
+    return any("ConditionalGeneration" in arch for arch in architectures)
+
+
 def _is_gemma4_mtp_config(config: PretrainedConfig) -> bool:
     return config.model_type in ("gemma4_assistant", "gemma4_mtp")
 
@@ -336,7 +351,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         config = model_config.hf_config
         text_config = config.get_text_config()
         model_type = config.model_type
-        is_multimodal = _is_multimodal_config(config)
+        is_multimodal = _uses_multimodal_weight_layout(config)
         orig_model_type = model_type
 
         gguf_to_hf_name_map: dict[str, str] = {}
@@ -491,8 +506,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             auto_cls = (
                 AutoModelForImageTextToText if is_multimodal else AutoModelForCausalLM
             )
+            auto_config = config if is_multimodal else text_config
             dummy_model = auto_cls.from_config(
-                config, trust_remote_code=model_config.trust_remote_code
+                auto_config, trust_remote_code=model_config.trust_remote_code
             )
 
         state_dict = dummy_model.state_dict()
@@ -590,9 +606,12 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         self,
         model_path: str,
         hf_config: PretrainedConfig,
+        use_multimodal_weight_layout: bool | None = None,
     ) -> list[str]:
         gguf_files = self._get_all_gguf_files(model_path)
-        if _is_multimodal_config(hf_config):
+        if use_multimodal_weight_layout is None:
+            use_multimodal_weight_layout = _uses_multimodal_weight_layout(hf_config)
+        if use_multimodal_weight_layout:
             mm_proj_path = detect_gguf_multimodal(model_path)
             if mm_proj_path is not None:
                 mm_proj_file = os.fspath(mm_proj_path)
@@ -645,7 +664,14 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_path, model_config.hf_config
         )
         gguf_to_hf_name_map = self.build_name_map(model_config)
-        gguf_files = self._get_weight_sources(model_path, model_config.hf_config)
+        use_multimodal_weight_layout = _uses_multimodal_weight_layout(
+            model_config.hf_config
+        )
+        gguf_files = self._get_weight_sources(
+            model_path,
+            model_config.hf_config,
+            use_multimodal_weight_layout,
+        )
         self.update_tie_word_embeddings(
             gguf_files, model_config.hf_config, gguf_to_hf_name_map
         )
