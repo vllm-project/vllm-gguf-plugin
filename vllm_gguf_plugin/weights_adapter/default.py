@@ -408,7 +408,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                         f"{layer_prefix}.{idx}.linear_attn.dt_bias"
                     )
             _add_qwen3_5_mtp_gguf_mappings(config, gguf_to_hf_name_map, sideload_params)
-        if orig_model_type == "qwen3_5_moe" and is_multimodal:
+        if orig_model_type in ("qwen3_5", "qwen3_5_moe") and is_multimodal:
             gguf_to_hf_name_map.update(
                 {
                     "v.patch_embd.weight.1": ("model.visual.patch_embed.proj.weight.1"),

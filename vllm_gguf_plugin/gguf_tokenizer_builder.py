@@ -43,6 +43,8 @@ _PROCESSOR_DEFAULT_SOURCE = (
 )
 
 _TOKENIZER_ARCH_ALIASES = {
+    "qwen35": "qwen3",
+    "qwen3_5": "qwen3",
     "qwen35moe": "qwen3_moe",
     "qwen3_5_moe": "qwen3_moe",
     "gemma4": "gemma3_text",
@@ -259,7 +261,7 @@ def _patch_tokenizer_config_from_gguf(
             }
             changed = True
 
-    if architecture in {"qwen35moe", "qwen3_5_moe"}:
+    if architecture in {"qwen35", "qwen3_5", "qwen35moe", "qwen3_5_moe"}:
         mm_tokens = _tokens_present(tokenizer_dict, _QWEN_MM_SPECIAL_TOKENS)
         changed |= _append_additional_special_tokens(tokenizer_config, mm_tokens)
         if "<|image_pad|>" in mm_tokens:
@@ -439,7 +441,7 @@ def _processor_sidecars_from_metadata(
     architecture: str,
     mmproj_reader: gguf.GGUFReader,
 ) -> dict[str, dict[str, Any]]:
-    if architecture in {"qwen35moe", "qwen3_5_moe"}:
+    if architecture in {"qwen35", "qwen3_5", "qwen35moe", "qwen3_5_moe"}:
         image_config = _qwen_image_processor_config(mmproj_reader)
         video_config = _qwen_video_processor_config(mmproj_reader)
         return {

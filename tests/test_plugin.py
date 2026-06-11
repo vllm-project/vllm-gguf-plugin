@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
+from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
 from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
@@ -168,6 +170,40 @@ def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     assert layer.qweight_type.shard_weight_type == {0: 3, 1: 4}
 
 
+def test_gguf_linear_keeps_multi_shards_separate(monkeypatch):
+    register()
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    layer = MergedColumnParallelLinear(
+        input_size=4,
+        output_sizes=[4, 4],
+        bias=False,
+        quant_config=OOTGGUFConfig.from_config({}),
+        disable_tp=True,
+    )
+    layer.weight_loader_v2(layer.qweight, torch.ones((4, 4), dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.qweight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 1)
+
+    layer.quant_method.process_weights_after_loading(layer)
+
+    assert layer.qweight.numel() == 0
+    assert layer.qweight.shard_id == [0, 1]
+    assert layer.qweight.shard_id_map == {0: 0, 1: 1}
+    assert layer.qweight.shard_offset_map == {0: (0, 4, 4), 1: (4, 8, 4)}
+    assert len(layer.qweight.data_container) == 2
+    assert torch.equal(
+        layer.qweight.data_container[0], torch.ones((4, 4), dtype=torch.uint8)
+    )
+    assert torch.equal(
+        layer.qweight.data_container[1], 2 * torch.ones((4, 4), dtype=torch.uint8)
+    )
+
+
 def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
     monkeypatch.setattr(
         vocab_embedding_module, "get_tensor_model_parallel_rank", lambda: 0
@@ -239,7 +275,7 @@ def test_gguf_linear_same_type_shards_skip_concat(monkeypatch):
     )
     out = layer.quant_method.apply(layer, torch.ones((2, 4), dtype=torch.float32))
 
-    assert calls == [((8, 4), 3)]
+    assert calls == [((4, 4), 3), ((4, 4), 3)]
     assert out.shape == (2, 8)
 
 
@@ -288,10 +324,19 @@ def test_gguf_tuple_shard_loader_splits_fused_qweight(monkeypatch):
         2: (6, 12, 4),
         3: (12, 20, 4),
     }
-    assert torch.equal(layer.qweight[:4], torch.full((4, 4), 1, dtype=torch.uint8))
-    assert torch.equal(layer.qweight[4:6], torch.full((2, 4), 2, dtype=torch.uint8))
-    assert torch.equal(layer.qweight[6:12], torch.full((6, 4), 3, dtype=torch.uint8))
-    assert torch.equal(layer.qweight[12:], torch.full((8, 4), 4, dtype=torch.uint8))
+    assert layer.qweight.numel() == 0
+    assert torch.equal(
+        layer.qweight.data_container[0], torch.full((4, 4), 1, dtype=torch.uint8)
+    )
+    assert torch.equal(
+        layer.qweight.data_container[1], torch.full((2, 4), 2, dtype=torch.uint8)
+    )
+    assert torch.equal(
+        layer.qweight.data_container[2], torch.full((6, 4), 3, dtype=torch.uint8)
+    )
+    assert torch.equal(
+        layer.qweight.data_container[3], torch.full((8, 4), 4, dtype=torch.uint8)
+    )
     assert layer.qweight_type.shard_weight_type == {
         0: WeightType.Q4_0,
         1: WeightType.Q4_0,
@@ -528,6 +573,87 @@ def test_build_qwen35moe_config_from_gguf_metadata(tmp_path, monkeypatch):
     assert config.vision_config.hidden_size == 1152
     assert config.vision_config.out_hidden_size == 2048
     assert config.vision_config.num_position_embeddings == 2304
+
+
+def test_build_qwen35_config_from_gguf_metadata(tmp_path, monkeypatch):
+    gguf_path = tmp_path / "model.gguf"
+    mmproj_path = tmp_path / "mmproj-BF16.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    mmproj_path.write_bytes(b"GGUF")
+    main_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "qwen35",
+            "tokenizer.ggml.tokens": ["a", "b", "c"],
+            "tokenizer.ggml.bos_token_id": 1,
+            "tokenizer.ggml.eos_token_id": 2,
+            "tokenizer.ggml.padding_token_id": 0,
+            "qwen35.attention.head_count": 24,
+            "qwen35.attention.head_count_kv": 4,
+            "qwen35.attention.key_length": 256,
+            "qwen35.attention.layer_norm_rms_epsilon": 1e-6,
+            "qwen35.attention.value_length": 256,
+            "qwen35.block_count": 64,
+            "qwen35.context_length": 262144,
+            "qwen35.embedding_length": 5120,
+            "qwen35.feed_forward_length": 17408,
+            "qwen35.full_attention_interval": 4,
+            "qwen35.rope.dimension_count": 64,
+            "qwen35.rope.freq_base": 10000000.0,
+            "qwen35.ssm.conv_kernel": 4,
+            "qwen35.ssm.group_count": 16,
+            "qwen35.ssm.inner_size": 6144,
+            "qwen35.ssm.state_size": 128,
+        }
+    )
+    mmproj_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "clip",
+            "general.type": "mmproj",
+            "clip.vision.projection_dim": 5120,
+            "clip.vision.image_size": 768,
+            "clip.vision.patch_size": 16,
+            "clip.vision.embedding_length": 1152,
+            "clip.vision.feed_forward_length": 4304,
+            "clip.vision.block_count": 27,
+            "clip.vision.attention.head_count": 16,
+            "clip.vision.spatial_merge_size": 2,
+        }
+    )
+
+    def fake_gguf_reader(path):
+        return mmproj_reader if Path(path) == mmproj_path else main_reader
+
+    monkeypatch.setattr(
+        gguf_config_builder_module.gguf,
+        "GGUFReader",
+        fake_gguf_reader,
+    )
+    monkeypatch.setattr(
+        gguf_config_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: mmproj_path,
+    )
+
+    config = build_config_from_gguf(gguf_path)
+
+    assert config is not None
+    assert isinstance(config, Qwen3_5Config)
+    assert config.model_type == "qwen3_5"
+    assert config.architectures == ["Qwen3_5ForConditionalGeneration"]
+    text_config = config.get_text_config()
+    assert text_config.model_type == "qwen3_5_text"
+    assert text_config.hidden_size == 5120
+    assert text_config.num_hidden_layers == 64
+    assert text_config.num_attention_heads == 24
+    assert text_config.num_key_value_heads == 4
+    assert text_config.linear_num_key_heads == 16
+    assert text_config.linear_key_head_dim == 128
+    assert text_config.linear_num_value_heads == 48
+    assert text_config.linear_value_head_dim == 128
+    assert text_config.layer_types[3] == "full_attention"
+    assert text_config.layer_types[0] == "linear_attention"
+    assert config.vision_config.hidden_size == 1152
+    assert config.vision_config.out_hidden_size == 5120
 
 
 def test_build_gemma4_mm_config_from_gguf_metadata(tmp_path, monkeypatch):
@@ -794,6 +920,65 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     (tokenizer_cache / "preprocessor_config.json").unlink()
     assert build_tokenizer_from_gguf(gguf_path) == tokenizer_path
     assert (tokenizer_cache / "preprocessor_config.json").is_file()
+
+
+def test_build_tokenizer_from_qwen35_gguf_uses_dense_arch_alias(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    main_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "qwen35",
+            "tokenizer.ggml.tokens": ["<pad>", "<bos>", "<eos>", "hello"],
+            "tokenizer.ggml.model": "gpt2",
+            "tokenizer.ggml.merges": ["h ello"],
+            "tokenizer.ggml.bos_token_id": 1,
+            "tokenizer.ggml.eos_token_id": 2,
+            "tokenizer.ggml.padding_token_id": 0,
+        }
+    )
+    calls = []
+
+    class FakeTokenizer:
+        def __init__(self, *args, **kwargs):
+            calls.append(("fast", kwargs))
+            self.chat_template = None
+
+        def save_pretrained(self, path):
+            (path / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (path / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+    def fake_convert(architecture, tokenizer_dict):
+        calls.append(("convert", architecture, tokenizer_dict))
+        return object(), {}
+
+    monkeypatch.setenv(
+        "VLLM_GGUF_TOKENIZER_CACHE",
+        str(tmp_path / "tokenizer-cache"),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module.gguf,
+        "GGUFReader",
+        lambda path: main_reader,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "convert_gguf_tokenizer",
+        fake_convert,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "PreTrainedTokenizerFast",
+        FakeTokenizer,
+    )
+
+    tokenizer_path = build_tokenizer_from_gguf(gguf_path)
+
+    assert tokenizer_path is not None
+    assert calls[0][0] == "convert"
+    assert calls[0][1] == "qwen3"
 
 
 def test_build_tokenizer_from_gguf_returns_none_when_cache_key_stat_fails(
@@ -1072,6 +1257,85 @@ def test_default_adapter_keeps_text_only_sources_without_mmproj(tmp_path, monkey
     )
 
     assert adapter._get_weight_sources(str(main_path), config) == [str(main_path)]
+
+
+def _build_qwen3_5_test_name_map(monkeypatch, config, state_names):
+    class FakeNameMap:
+        def get_name(self, name):
+            return None
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_config(config, trust_remote_code=False):
+            return SimpleNamespace(
+                state_dict=lambda: {
+                    name: torch.empty((), device="meta") for name in state_names
+                },
+            )
+
+    monkeypatch.setattr(
+        default_adapter_module.gguf, "MODEL_ARCH_NAMES", {object(): "qwen35"}
+    )
+    monkeypatch.setattr(
+        default_adapter_module.gguf,
+        "get_tensor_name_map",
+        lambda *args, **kwargs: FakeNameMap(),
+    )
+    monkeypatch.setattr(
+        default_adapter_module,
+        "AutoModelForImageTextToText",
+        FakeAutoModel,
+    )
+    monkeypatch.setattr(
+        default_adapter_module,
+        "AutoModelForCausalLM",
+        FakeAutoModel,
+    )
+
+    model_config = SimpleNamespace(hf_config=config, trust_remote_code=False)
+    return GGUFWeightsAdapter(config).build_name_map(model_config)
+
+
+def test_qwen3_5_dense_multimodal_maps_visual_merger(monkeypatch):
+    config = PretrainedConfig(
+        model_type="qwen3_5",
+        num_hidden_layers=1,
+        layer_types=["linear_attention"],
+    )
+    config.vision_config = PretrainedConfig(num_hidden_layers=1)
+    state_names = [
+        "model.visual.patch_embed.proj.weight.1",
+        "model.visual.merger.linear_fc1.weight",
+        "model.visual.merger.linear_fc1.bias",
+        "model.visual.merger.linear_fc2.weight",
+        "model.visual.merger.linear_fc2.bias",
+        "model.visual.merger.norm.weight",
+        "model.visual.merger.norm.bias",
+    ]
+
+    mapping = _build_qwen3_5_test_name_map(monkeypatch, config, state_names)
+
+    assert mapping["v.patch_embd.weight.1"] == (
+        "model.visual.patch_embed.proj.weight.1"
+    )
+    assert mapping["mm.0.weight"] == "model.visual.merger.linear_fc1.weight"
+    assert mapping["mm.0.bias"] == "model.visual.merger.linear_fc1.bias"
+    assert mapping["mm.2.weight"] == "model.visual.merger.linear_fc2.weight"
+    assert mapping["mm.2.bias"] == "model.visual.merger.linear_fc2.bias"
+
+
+def test_qwen3_5_text_only_does_not_add_visual_merger_mappings(monkeypatch):
+    config = PretrainedConfig(
+        model_type="qwen3_5",
+        num_hidden_layers=1,
+        layer_types=["linear_attention"],
+    )
+
+    mapping = _build_qwen3_5_test_name_map(monkeypatch, config, [])
+
+    assert "v.patch_embd.weight.1" not in mapping
+    assert "mm.0.weight" not in mapping
+    assert "mm.2.weight" not in mapping
 
 
 def test_qwen3_5_adapter_reshapes_gguf_weights():
@@ -1484,6 +1748,49 @@ def test_register_skips_speculator_probe_for_gguf():
     assert speculative_config == {"foo": "bar"}
 
 
+def test_register_speculator_probe_prefers_native_gguf_config(
+    tmp_path,
+    monkeypatch,
+):
+    register()
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    native_config = PretrainedConfig(
+        model_type="qwen3_5",
+        architectures=["Qwen3_5ForConditionalGeneration"],
+    )
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "build_config_from_gguf",
+        lambda model: native_config,
+    )
+
+    def fail_get_config_dict(*args, **kwargs):
+        raise AssertionError("native GGUF config should skip HF GGUF parser")
+
+    monkeypatch.setattr(
+        gguf_plugin_module.PretrainedConfig,
+        "get_config_dict",
+        fail_get_config_dict,
+    )
+
+    model, tokenizer, speculative_config = (
+        config_module.maybe_override_with_speculators(
+            model=str(gguf_path),
+            tokenizer="/tmp/tokenizer",
+            trust_remote_code=False,
+            revision=None,
+            vllm_speculative_config=None,
+            hf_token=None,
+        )
+    )
+
+    assert model == str(gguf_path)
+    assert tokenizer == "/tmp/tokenizer"
+    assert speculative_config is None
+
+
 def test_register_disables_trust_for_gguf_config_redirect(tmp_path, monkeypatch):
     register()
     gguf_path = tmp_path / "model.gguf"
@@ -1621,9 +1928,10 @@ def test_gguf_qkv_shards_are_padded_in_qkv_order(monkeypatch):
         "k": (4, 6, 4),
         "v": (6, 8, 4),
     }
-    assert torch.equal(layer.qweight[:4], q)
-    assert torch.equal(layer.qweight[4:6], k)
-    assert torch.equal(layer.qweight[6:8], v)
+    assert layer.qweight.numel() == 0
+    assert torch.equal(layer.qweight.data_container[0], q)
+    assert torch.equal(layer.qweight.data_container[1], k)
+    assert torch.equal(layer.qweight.data_container[2], v)
 
 
 def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
@@ -1652,6 +1960,10 @@ def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
     layer.quant_method.process_weights_after_loading(layer)
 
     assert layer.qweight.device.type == "cuda"
+    assert [shard.device.type for shard in layer.qweight.data_container] == [
+        "cuda",
+        "cuda",
+    ]
     assert layer.qweight_type.device.type == "cuda"
 
 

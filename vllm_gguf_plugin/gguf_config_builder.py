@@ -16,6 +16,7 @@ from typing import Any
 import gguf
 from transformers import AutoConfig, PretrainedConfig
 from vllm.logger import init_logger
+from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
 from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 from .gguf_utils import (
@@ -164,7 +165,7 @@ def _read_mmproj_reader(model_path: Path) -> gguf.GGUFReader | None:
         return None
 
 
-def _build_qwen35moe_vision_config(
+def _build_qwen35_vision_config(
     reader: gguf.GGUFReader | None,
 ) -> dict[str, Any] | None:
     if reader is None:
@@ -273,6 +274,27 @@ def _qwen35_layer_types(
     ]
 
 
+def _qwen35_ssm_value_heads(
+    reader: gguf.GGUFReader,
+    prefix: str,
+) -> int | None:
+    inner_size = _read_int(reader, f"{prefix}.ssm.inner_size")
+    state_size = _read_int(reader, f"{prefix}.ssm.state_size")
+    if inner_size is None or state_size in (None, 0):
+        return None
+    if inner_size % state_size != 0:
+        logger.warning_once(
+            "Ignoring %s.ssm.inner_size=%s because it is not divisible by "
+            "%s.ssm.state_size=%s",
+            prefix,
+            inner_size,
+            prefix,
+            state_size,
+        )
+        return None
+    return inner_size // state_size
+
+
 def _build_qwen35moe_config(
     reader: gguf.GGUFReader,
     model_path: Path,
@@ -344,8 +366,70 @@ def _build_qwen35moe_config(
     )
     return Qwen3_5MoeConfig(
         text_config=text_config,
-        vision_config=_build_qwen35moe_vision_config(mmproj_reader),
+        vision_config=_build_qwen35_vision_config(mmproj_reader),
         architectures=[architecture],
+        tie_word_embeddings=tie_word_embeddings,
+        vocab_size=text_config.get("vocab_size"),
+    )
+
+
+def _build_qwen35_config(
+    reader: gguf.GGUFReader,
+    model_path: Path,
+    has_lm_head: bool,
+) -> PretrainedConfig:
+    prefix = "qwen35"
+    num_layers = _read_int(reader, f"{prefix}.block_count")
+    head_dim = _read_int(reader, f"{prefix}.attention.key_length")
+    rope_dim = _read_int(reader, f"{prefix}.rope.dimension_count")
+    partial_rotary_factor = None
+    if head_dim and rope_dim:
+        partial_rotary_factor = rope_dim / head_dim
+
+    full_attention_interval = _read_int(reader, f"{prefix}.full_attention_interval")
+    tie_word_embeddings = not has_lm_head
+    text_config = _non_none(
+        {
+            "model_type": "qwen3_5_text",
+            "vocab_size": _token_count(reader),
+            "hidden_size": _read_int(reader, f"{prefix}.embedding_length"),
+            "intermediate_size": _read_int(reader, f"{prefix}.feed_forward_length"),
+            "num_hidden_layers": num_layers,
+            "num_attention_heads": _read_int(reader, f"{prefix}.attention.head_count"),
+            "num_key_value_heads": _read_int(
+                reader, f"{prefix}.attention.head_count_kv"
+            ),
+            "head_dim": head_dim,
+            "max_position_embeddings": _read_int(reader, f"{prefix}.context_length"),
+            "rms_norm_eps": _read_float(
+                reader, f"{prefix}.attention.layer_norm_rms_epsilon"
+            ),
+            "linear_conv_kernel_dim": _read_int(reader, f"{prefix}.ssm.conv_kernel"),
+            "linear_key_head_dim": _read_int(reader, f"{prefix}.ssm.state_size"),
+            "linear_value_head_dim": _read_int(reader, f"{prefix}.ssm.state_size"),
+            "linear_num_key_heads": _read_int(reader, f"{prefix}.ssm.group_count"),
+            "linear_num_value_heads": _qwen35_ssm_value_heads(reader, prefix),
+            "partial_rotary_factor": partial_rotary_factor,
+            "rope_theta": _read_float(reader, f"{prefix}.rope.freq_base"),
+            "rope_parameters": {
+                "rope_type": "default",
+                "rope_theta": _read_float(reader, f"{prefix}.rope.freq_base"),
+                "partial_rotary_factor": partial_rotary_factor,
+            },
+            "layer_types": _qwen35_layer_types(
+                full_attention_interval,
+                num_layers=num_layers,
+            ),
+            "tie_word_embeddings": tie_word_embeddings,
+            **_token_id_fields(reader),
+        }
+    )
+
+    mmproj_reader = _read_mmproj_reader(model_path)
+    return Qwen3_5Config(
+        text_config=text_config,
+        vision_config=_build_qwen35_vision_config(mmproj_reader),
+        architectures=["Qwen3_5ForConditionalGeneration"],
         tie_word_embeddings=tie_word_embeddings,
         vocab_size=text_config.get("vocab_size"),
     )
@@ -534,6 +618,8 @@ def build_config_from_gguf(model: str | PathLike) -> PretrainedConfig | None:
     architecture = _gguf_architecture(reader)
     has_lm_head = _has_lm_head(reader)
     try:
+        if architecture == "qwen35":
+            return _build_qwen35_config(reader, model_path, has_lm_head)
         if architecture == "qwen35moe":
             return _build_qwen35moe_config(reader, model_path, has_lm_head)
         if architecture == "gemma4":
