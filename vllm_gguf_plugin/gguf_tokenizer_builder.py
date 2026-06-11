@@ -158,6 +158,7 @@ _GEMMA4_MODEL_SPECIFIC_TOKENS = {
     "std_token": "<|tool>",
     "str_token": "<|tool_response>",
     "think_token": "<|think|>",
+    "video_token": "<|video|>",
 }
 
 _QWEN_MM_SPECIAL_TOKENS = (
@@ -248,7 +249,14 @@ def _patch_tokenizer_config_from_gguf(
             tokenizer_config["model_specific_special_tokens"] = model_specific_tokens
             for name, token in model_specific_tokens.items():
                 tokenizer_config.setdefault(name, token)
-            tokenizer_config.setdefault("extra_special_tokens", ["<|video|>"])
+            tokenizer_config["extra_special_tokens"] = {
+                **(
+                    tokenizer_config["extra_special_tokens"]
+                    if isinstance(tokenizer_config.get("extra_special_tokens"), dict)
+                    else {}
+                ),
+                **model_specific_tokens,
+            }
             changed = True
 
     if architecture in {"qwen35moe", "qwen3_5_moe"}:
@@ -491,6 +499,27 @@ def _materialize_processor_sidecars(
         _write_json_if_missing(cache_dir, filename, data)
 
 
+def _patch_cached_tokenizer_from_gguf(
+    model_path: Path,
+    cache_dir: Path,
+) -> str | None:
+    try:
+        reader = gguf.GGUFReader(str(model_path))
+        architecture = _gguf_architecture(reader)
+        if architecture is None:
+            return None
+        tokenizer_dict = _extract_tokenizer_dict(reader)
+    except Exception as e:
+        logger.debug(
+            "Failed to read cached GGUF tokenizer metadata %s: %s", model_path, e
+        )
+        return None
+
+    _patch_tokenizer_config_from_gguf(cache_dir, architecture, tokenizer_dict)
+    _materialize_processor_sidecars(model_path, cache_dir, architecture)
+    return architecture
+
+
 def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
     """Materialize a tokenizer directory from GGUF embedded metadata.
 
@@ -507,7 +536,7 @@ def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
         return None
     cache_dir = _tokenizer_cache_root() / cache_key
     if (cache_dir / "tokenizer.json").is_file():
-        _materialize_processor_sidecars(model_path, cache_dir)
+        _patch_cached_tokenizer_from_gguf(model_path, cache_dir)
         return str(cache_dir)
 
     try:

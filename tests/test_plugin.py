@@ -873,6 +873,7 @@ def test_build_tokenizer_from_gguf_patches_gemma4_special_tokens(
                 "<|audio>",
                 "<|audio|>",
                 "<audio|>",
+                "<|video|>",
             ],
             "tokenizer.ggml.model": "gpt2",
             "tokenizer.ggml.merges": ["h ello"],
@@ -928,6 +929,19 @@ def test_build_tokenizer_from_gguf_patches_gemma4_special_tokens(
     assert tokenizer_config["model_specific_special_tokens"]["eoi_token"] == (
         "<image|>"
     )
+    assert tokenizer_config["extra_special_tokens"]["image_token"] == "<|image|>"
+    assert tokenizer_config["extra_special_tokens"]["boi_token"] == "<|image>"
+    assert tokenizer_config["extra_special_tokens"]["eoi_token"] == "<image|>"
+    assert tokenizer_config["extra_special_tokens"]["audio_token"] == "<|audio|>"
+    assert tokenizer_config["extra_special_tokens"]["video_token"] == "<|video|>"
+
+    tokenizer_config_path = Path(tokenizer_path) / "tokenizer_config.json"
+    tokenizer_config_path.write_text("{}", encoding="utf-8")
+    assert build_tokenizer_from_gguf(gguf_path) == tokenizer_path
+    tokenizer_config = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
+    assert tokenizer_config["extra_special_tokens"]["image_token"] == "<|image|>"
+    assert tokenizer_config["extra_special_tokens"]["boi_token"] == "<|image>"
+    assert tokenizer_config["extra_special_tokens"]["eoi_token"] == "<image|>"
 
 
 def test_extract_vision_config_accepts_single_value_metadata(monkeypatch):
