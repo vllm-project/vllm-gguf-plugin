@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import torch
 from gguf import GGMLQuantizationType, dequantize
@@ -10,6 +11,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
 import vllm_gguf_plugin.ops as ops
 from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
+from vllm_gguf_plugin.quantization.vocal_embeds import apply_gguf_embedding
+from vllm_gguf_plugin.triton.dequantize import ggml_dequantize_triton
 from vllm_gguf_plugin.triton.fused_moe import ggml_moe_a8_triton
 from vllm_gguf_plugin.triton.fused_moe.utils import get_triton_moe_block_m
 from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton
@@ -94,6 +97,127 @@ def test_dequantize(
             *list(shape),
             dtype=dtype,
         )
+
+        torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=4e-2)
+
+
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_type", QUANT_TYPES)
+@torch.inference_mode()
+def test_dequantize_triton(
+    hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantizationType
+):
+    tensors = get_gguf_sample_tensors(hidden_size, quant_type)
+    for tensor in tensors:
+        shape_str = tensor.name.split("_")[-1]
+        shape = list(map(int, shape_str.split("x")))
+
+        ref_output = torch.tensor(
+            dequantize(tensor.data, quant_type), device="cuda"
+        ).to(dtype)
+        output = ggml_dequantize_triton(
+            torch.tensor(tensor.data, device="cuda"),
+            quant_type,
+            *shape,
+            dtype=dtype,
+        )
+
+        torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=4e-2)
+
+
+def _f16_bytes(value: float) -> np.ndarray:
+    return np.frombuffer(np.float16(value).tobytes(), dtype=np.uint8)
+
+
+@torch.inference_mode()
+def test_dequantize_triton_extra_standard_quant_synthetic():
+    # The sample GGUF repo does not include Q4_1, Q5_1, or Q8_1 files.
+    q4 = np.zeros((2, 20), dtype=np.uint8)
+    q4[:, 0:2] = _f16_bytes(0.5)
+    q4[:, 2:4] = _f16_bytes(-1.0)
+    q4[:, 4:] = np.arange(16, dtype=np.uint8)
+    q4_out = ggml_dequantize_triton(
+        torch.tensor(q4, device="cuda"),
+        GGMLQuantizationType.Q4_1,
+        2,
+        32,
+        torch.float32,
+    )
+    q4_packed = np.arange(16, dtype=np.uint8)
+    q4_q = np.concatenate([q4_packed & 0x0F, q4_packed >> 4]).astype(np.float32)
+    q4_ref = np.stack([q4_q * 0.5 - 1.0, q4_q * 0.5 - 1.0])
+    torch.testing.assert_close(
+        q4_out.cpu(), torch.tensor(q4_ref, dtype=torch.float32)
+    )
+
+    q5 = np.zeros((2, 24), dtype=np.uint8)
+    q5[:, 0:2] = _f16_bytes(0.25)
+    q5[:, 2:4] = _f16_bytes(-2.0)
+    qh = np.array([0xAA, 0x55, 0x0F, 0xF0], dtype=np.uint8)
+    q5[:, 4:8] = qh
+    q5[:, 8:] = (np.arange(16, dtype=np.uint8) * 7) & 0xFF
+    q5_out = ggml_dequantize_triton(
+        torch.tensor(q5, device="cuda"),
+        GGMLQuantizationType.Q5_1,
+        2,
+        32,
+        torch.float32,
+    )
+    qh_u32 = int.from_bytes(qh.tobytes(), "little")
+    packed = ((np.arange(16, dtype=np.uint8) * 7) & 0xFF).astype(np.uint8)
+    q5_q = []
+    for pos in range(32):
+        nibble = (
+            packed[pos % 16] & 0x0F if pos < 16 else packed[pos % 16] >> 4
+        )
+        q5_q.append(float(nibble | (((qh_u32 >> pos) & 1) << 4)))
+    q5_ref = np.stack([np.array(q5_q, dtype=np.float32) * 0.25 - 2.0] * 2)
+    torch.testing.assert_close(
+        q5_out.cpu(), torch.tensor(q5_ref, dtype=torch.float32)
+    )
+
+    q8 = np.zeros((2, 36), dtype=np.uint8)
+    q8[:, 0:2] = _f16_bytes(0.125)
+    q8[:, 2:4] = _f16_bytes(0.0)
+    vals = np.arange(-16, 16, dtype=np.int8)
+    q8[:, 4:] = vals.view(np.uint8)
+    q8_out = ggml_dequantize_triton(
+        torch.tensor(q8, device="cuda"),
+        GGMLQuantizationType.Q8_1,
+        2,
+        32,
+        torch.float32,
+    )
+    q8_ref = np.stack([vals.astype(np.float32) * 0.125] * 2)
+    torch.testing.assert_close(
+        q8_out.cpu(), torch.tensor(q8_ref, dtype=torch.float32)
+    )
+
+
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_type", QUANT_TYPES)
+@torch.inference_mode()
+def test_gguf_embedding_uses_triton_dequant(
+    hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantizationType
+):
+    tensors = get_gguf_sample_tensors(hidden_size, quant_type)
+    for tensor in tensors:
+        qweight = torch.tensor(tensor.data, device="cuda")
+        weight = torch.tensor(dequantize(tensor.data, quant_type), device="cuda").to(
+            dtype
+        )
+        ids = torch.tensor(
+            [[0, qweight.shape[0] - 1], [qweight.shape[0] // 2, 0]],
+            device="cuda",
+            dtype=torch.long,
+        )
+
+        output = apply_gguf_embedding(
+            ids, qweight, quant_type, hidden_size, dtype=dtype
+        )
+        ref_output = torch.embedding(weight, ids)
 
         torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=4e-2)
 

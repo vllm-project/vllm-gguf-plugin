@@ -53,7 +53,7 @@ def _apply_gguf_embedding_fake(
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     del qweight, qweight_type
-    return torch.empty(x.shape[0], hidden_size, dtype=dtype, device=x.device)
+    return torch.empty(*x.shape, hidden_size, dtype=dtype, device=x.device)
 
 
 try:

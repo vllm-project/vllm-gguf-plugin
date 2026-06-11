@@ -4,6 +4,7 @@ import os
 
 import torch
 
+from .triton.dequantize.interface import ggml_dequantize_triton
 from .triton.fused_moe.interface import ggml_moe_a8_triton
 from .triton.fused_moe.utils import get_triton_moe_block_m
 from .triton.gemm.interface import ggml_mul_mat_a8_triton
@@ -29,6 +30,28 @@ except ImportError:
 # Effective CUDA usage: only when explicitly requested AND available
 _CUDA_ENABLED = _USE_CUDA and _CUDA_AVAILABLE
 
+_CUDA_DEQUANT_TYPES = {
+    2,  # Q4_0
+    3,  # Q4_1
+    6,  # Q5_0
+    7,  # Q5_1
+    8,  # Q8_0
+    10,  # Q2_K
+    11,  # Q3_K
+    12,  # Q4_K
+    13,  # Q5_K
+    14,  # Q6_K
+    16,  # IQ2_XXS
+    17,  # IQ2_XS
+    18,  # IQ3_XXS
+    19,  # IQ1_S
+    20,  # IQ4_NL
+    21,  # IQ3_S
+    22,  # IQ2_S
+    23,  # IQ4_XS
+    29,  # IQ1_M
+}
+
 # --- Fake implementations for CUDA custom ops (needed for torch.compile) ---
 
 if (
@@ -45,7 +68,7 @@ if (
         n: torch.SymInt,
         dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
-        return torch.empty((m, n), dtype=torch.float16, device=W.device)
+        return torch.empty((m, n), dtype=dtype or torch.float16, device=W.device)
 
     @register_fake("_C_gguf::ggml_mul_mat_vec_a8")
     def _ggml_mul_mat_vec_a8_fake(
@@ -107,7 +130,9 @@ if (
 def ggml_dequantize(
     W: torch.Tensor, quant_type: int, m: int, n: int, dtype: torch.dtype | None
 ) -> torch.Tensor:
-    return torch.ops._C_gguf.ggml_dequantize(W, quant_type, m, n, dtype)
+    if _CUDA_ENABLED and int(quant_type) in _CUDA_DEQUANT_TYPES:
+        return torch.ops._C_gguf.ggml_dequantize(W, quant_type, m, n, dtype)
+    return ggml_dequantize_triton(W, quant_type, m, n, dtype)
 
 
 def ggml_mul_mat_vec_a8(
