@@ -30,27 +30,6 @@ except ImportError:
 # Effective CUDA usage: only when explicitly requested AND available
 _CUDA_ENABLED = _USE_CUDA and _CUDA_AVAILABLE
 
-_CUDA_DEQUANT_TYPES = {
-    2,  # Q4_0
-    3,  # Q4_1
-    6,  # Q5_0
-    7,  # Q5_1
-    8,  # Q8_0
-    10,  # Q2_K
-    11,  # Q3_K
-    12,  # Q4_K
-    13,  # Q5_K
-    14,  # Q6_K
-    16,  # IQ2_XXS
-    17,  # IQ2_XS
-    18,  # IQ3_XXS
-    19,  # IQ1_S
-    20,  # IQ4_NL
-    21,  # IQ3_S
-    22,  # IQ2_S
-    23,  # IQ4_XS
-    29,  # IQ1_M
-}
 
 # --- Fake implementations for CUDA custom ops (needed for torch.compile) ---
 
@@ -130,7 +109,7 @@ if (
 def ggml_dequantize(
     W: torch.Tensor, quant_type: int, m: int, n: int, dtype: torch.dtype | None
 ) -> torch.Tensor:
-    if _CUDA_ENABLED and int(quant_type) in _CUDA_DEQUANT_TYPES:
+    if _CUDA_ENABLED:
         return torch.ops._C_gguf.ggml_dequantize(W, quant_type, m, n, dtype)
     return ggml_dequantize_triton(W, quant_type, m, n, dtype)
 
