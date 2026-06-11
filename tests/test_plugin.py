@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -85,6 +87,31 @@ def test_register_is_idempotent():
         get_model_loader(LoadConfig(load_format="gguf")), OOTGGUFModelLoader
     )
     assert isinstance(get_config_parser("gguf"), GGUFConfigParser)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        """
+import torch
+import vllm_gguf_plugin
+import vllm.model_executor.layers.quantization.gguf
+assert hasattr(torch.ops.vllm_gguf_plugin, "_fused_mul_mat_gguf")
+assert hasattr(torch.ops.vllm_gguf_plugin, "_fused_moe_gguf")
+assert hasattr(torch.ops.vllm_gguf_plugin, "_apply_gguf_embedding")
+""",
+        """
+import torch
+import vllm.model_executor.layers.quantization.gguf
+import vllm_gguf_plugin
+assert hasattr(torch.ops.vllm_gguf_plugin, "_fused_mul_mat_gguf")
+assert hasattr(torch.ops.vllm_gguf_plugin, "_fused_moe_gguf")
+assert hasattr(torch.ops.vllm_gguf_plugin, "_apply_gguf_embedding")
+""",
+    ],
+)
+def test_plugin_custom_ops_do_not_conflict_with_core_gguf_import(script):
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def test_register_patches_model_config_gguf_helper():

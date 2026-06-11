@@ -24,6 +24,7 @@ from .params import (
 )
 from .utils import (
     DEQUANT_TYPES,
+    GGUF_PLUGIN_TORCH_LIB,
     IMATRIX_QUANT_TYPES,
     MMQ_QUANT_TYPES,
     MMVQ_QUANT_TYPES,
@@ -72,8 +73,9 @@ try:
         op_name="_fused_mul_mat_gguf",
         op_func=_fused_mul_mat_gguf,
         fake_impl=_fused_mul_mat_gguf_fake,
+        target_lib=GGUF_PLUGIN_TORCH_LIB,
     )
-    fused_mul_mat_gguf = torch.ops.vllm._fused_mul_mat_gguf
+    fused_mul_mat_gguf = torch.ops.vllm_gguf_plugin._fused_mul_mat_gguf
 except AttributeError as error:
     raise error
 

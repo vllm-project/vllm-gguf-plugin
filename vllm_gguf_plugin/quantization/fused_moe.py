@@ -29,7 +29,7 @@ from .params import (
     _gguf_moe_weight_loader,
     _gguf_moe_weight_type_loader,
 )
-from .utils import MMQ_QUANT_TYPES, MMVQ_QUANT_TYPES, logger
+from .utils import GGUF_PLUGIN_TORCH_LIB, MMQ_QUANT_TYPES, MMVQ_QUANT_TYPES, logger
 
 IQ4_XS_MOE_MMQ_V2_BLOCK_SIZE = 8
 
@@ -236,8 +236,9 @@ try:
         op_name="_fused_moe_gguf",
         op_func=_fused_moe_gguf,
         fake_impl=_fused_moe_gguf_fake,
+        target_lib=GGUF_PLUGIN_TORCH_LIB,
     )
-    fused_moe_gguf = torch.ops.vllm._fused_moe_gguf
+    fused_moe_gguf = torch.ops.vllm_gguf_plugin._fused_moe_gguf
 except AttributeError as error:
     raise error
 
