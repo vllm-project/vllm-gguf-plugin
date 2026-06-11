@@ -16,6 +16,7 @@ from typing import Any
 import gguf
 from transformers import AutoConfig, PretrainedConfig
 from vllm.logger import init_logger
+from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 from .gguf_utils import (
     _gguf_reader_value,
@@ -133,6 +134,98 @@ def _sliding_layer_types(
     return ["sliding_attention"] * num_layers
 
 
+def _read_mmproj_reader(model_path: Path) -> gguf.GGUFReader | None:
+    mmproj_path = detect_gguf_multimodal(str(model_path))
+    if mmproj_path is None:
+        return None
+    try:
+        return gguf.GGUFReader(str(mmproj_path))
+    except Exception as e:
+        logger.debug("Failed to read GGUF mmproj metadata from %s: %s", mmproj_path, e)
+        return None
+
+
+def _build_qwen35moe_vision_config(
+    reader: gguf.GGUFReader | None,
+) -> dict[str, Any] | None:
+    if reader is None:
+        return None
+
+    image_size = _read_int(reader, "clip.vision.image_size")
+    patch_size = _read_int(reader, "clip.vision.patch_size")
+    num_position_embeddings = None
+    if image_size and patch_size:
+        num_position_embeddings = (image_size // patch_size) ** 2
+
+    vision_config = _non_none(
+        {
+            "depth": _read_int(reader, "clip.vision.block_count"),
+            "hidden_size": _read_int(reader, "clip.vision.embedding_length"),
+            "intermediate_size": _read_int(
+                reader,
+                "clip.vision.feed_forward_length",
+            ),
+            "num_heads": _read_int(reader, "clip.vision.attention.head_count"),
+            "patch_size": patch_size,
+            "spatial_merge_size": _read_int(
+                reader,
+                "clip.vision.spatial_merge_size",
+            ),
+            "temporal_patch_size": _read_int(
+                reader,
+                "clip.vision.temporal_patch_size",
+            ),
+            "out_hidden_size": _read_int(reader, "clip.vision.projection_dim"),
+            "num_position_embeddings": num_position_embeddings,
+        }
+    )
+    return vision_config or None
+
+
+def _build_gemma4_vision_config(
+    reader: gguf.GGUFReader | None,
+) -> dict[str, Any] | None:
+    if reader is None:
+        return None
+
+    hidden_size = _read_int(reader, "clip.vision.embedding_length")
+    num_heads = _read_int(reader, "clip.vision.attention.head_count")
+    head_dim = None
+    if hidden_size and num_heads:
+        head_dim = hidden_size // num_heads
+
+    # GGUF mmproj metadata does not currently carry this Gemma4 HF field, but
+    # the Transformers config class preserves it and vLLM requires it.
+    default_output_length = (
+        _read_int(reader, "clip.vision.default_output_length") or 280
+    )
+
+    vision_config = _non_none(
+        {
+            "hidden_size": hidden_size,
+            "intermediate_size": _read_int(
+                reader,
+                "clip.vision.feed_forward_length",
+            ),
+            "num_hidden_layers": _read_int(reader, "clip.vision.block_count"),
+            "num_attention_heads": num_heads,
+            "num_key_value_heads": num_heads,
+            "head_dim": head_dim,
+            "patch_size": _read_int(reader, "clip.vision.patch_size"),
+            "rms_norm_eps": _read_float(
+                reader,
+                "clip.vision.attention.layer_norm_epsilon",
+            ),
+            "pooling_kernel_size": 3,
+            "position_embedding_size": 10240,
+            "standardize": True,
+            "use_clipped_linears": False,
+            "default_output_length": default_output_length,
+        }
+    )
+    return vision_config or None
+
+
 def _qwen35_layer_types(
     interval: int | None,
     *,
@@ -211,15 +304,16 @@ def _build_qwen35moe_config(
         }
     )
 
-    is_multimodal = detect_gguf_multimodal(str(model_path)) is not None
+    mmproj_reader = _read_mmproj_reader(model_path)
+    is_multimodal = mmproj_reader is not None
     architecture = (
         "Qwen3_5MoeForConditionalGeneration"
         if is_multimodal
         else "Qwen3_5MoeForCausalLM"
     )
-    return AutoConfig.for_model(
-        "qwen3_5_moe",
+    return Qwen3_5MoeConfig(
         text_config=text_config,
+        vision_config=_build_qwen35moe_vision_config(mmproj_reader),
         architectures=[architecture],
         tie_word_embeddings=tie_word_embeddings,
         vocab_size=text_config.get("vocab_size"),
@@ -300,13 +394,15 @@ def _build_gemma4_config(
     model_path: Path,
 ) -> PretrainedConfig:
     text_config = _build_gemma4_text_config(reader, "gemma4")
-    is_multimodal = detect_gguf_multimodal(str(model_path)) is not None
+    mmproj_reader = _read_mmproj_reader(model_path)
+    is_multimodal = mmproj_reader is not None
     architecture = (
         "Gemma4ForConditionalGeneration" if is_multimodal else "Gemma4ForCausalLM"
     )
     return AutoConfig.for_model(
         "gemma4",
         text_config=text_config,
+        vision_config=_build_gemma4_vision_config(mmproj_reader),
         architectures=[architecture],
         tie_word_embeddings=text_config.get("tie_word_embeddings"),
         vocab_size=text_config.get("vocab_size"),

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+from pathlib import Path
+
 import torch
 import vllm.config.model as model_config_module
 import vllm.engine.arg_utils as arg_utils_module
@@ -21,6 +24,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
+from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
 import vllm_gguf_plugin.gguf_config_builder as gguf_config_builder_module
@@ -427,8 +431,10 @@ class _FakeGGUFReader:
 
 def test_build_qwen35moe_config_from_gguf_metadata(tmp_path, monkeypatch):
     gguf_path = tmp_path / "model.gguf"
+    mmproj_path = tmp_path / "mmproj.gguf"
     gguf_path.write_bytes(b"GGUF")
-    fake_reader = _FakeGGUFReader(
+    mmproj_path.write_bytes(b"GGUF")
+    main_reader = _FakeGGUFReader(
         {
             "general.architecture": "qwen35moe",
             "tokenizer.ggml.tokens": ["a", "b", "c"],
@@ -451,20 +457,39 @@ def test_build_qwen35moe_config_from_gguf_metadata(tmp_path, monkeypatch):
             "qwen35moe.rope.freq_base": 10000000.0,
         }
     )
+    mmproj_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "clip",
+            "general.type": "mmproj",
+            "clip.vision.projection_dim": 2048,
+            "clip.vision.image_size": 768,
+            "clip.vision.patch_size": 16,
+            "clip.vision.embedding_length": 1152,
+            "clip.vision.feed_forward_length": 4304,
+            "clip.vision.block_count": 27,
+            "clip.vision.attention.head_count": 16,
+            "clip.vision.spatial_merge_size": 2,
+        }
+    )
+
+    def fake_gguf_reader(path):
+        return mmproj_reader if Path(path) == mmproj_path else main_reader
+
     monkeypatch.setattr(
         gguf_config_builder_module.gguf,
         "GGUFReader",
-        lambda path: fake_reader,
+        fake_gguf_reader,
     )
     monkeypatch.setattr(
         gguf_config_builder_module,
         "detect_gguf_multimodal",
-        lambda model: tmp_path / "mmproj.gguf",
+        lambda model: mmproj_path,
     )
 
     config = build_config_from_gguf(gguf_path)
 
     assert config is not None
+    assert isinstance(config, Qwen3_5MoeConfig)
     assert config.model_type == "qwen3_5_moe"
     assert config.architectures == ["Qwen3_5MoeForConditionalGeneration"]
     text_config = config.get_text_config()
@@ -474,6 +499,79 @@ def test_build_qwen35moe_config_from_gguf_metadata(tmp_path, monkeypatch):
     assert text_config.num_key_value_heads == 2
     assert text_config.layer_types[3] == "full_attention"
     assert text_config.layer_types[0] == "linear_attention"
+    assert config.vision_config.hidden_size == 1152
+    assert config.vision_config.out_hidden_size == 2048
+    assert config.vision_config.num_position_embeddings == 2304
+
+
+def test_build_gemma4_mm_config_from_gguf_metadata(tmp_path, monkeypatch):
+    gguf_path = tmp_path / "model.gguf"
+    mmproj_path = tmp_path / "mmproj-BF16.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    mmproj_path.write_bytes(b"GGUF")
+    main_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "gemma4",
+            "tokenizer.ggml.tokens": ["a", "b", "c"],
+            "gemma4.attention.head_count": 16,
+            "gemma4.attention.head_count_kv": [8, 8, 8, 2],
+            "gemma4.attention.key_length": 512,
+            "gemma4.attention.key_length_swa": 256,
+            "gemma4.attention.layer_norm_rms_epsilon": 1e-6,
+            "gemma4.attention.shared_kv_layers": 4,
+            "gemma4.attention.sliding_window": 1024,
+            "gemma4.attention.sliding_window_pattern": [
+                True,
+                True,
+                True,
+                False,
+            ],
+            "gemma4.block_count": 4,
+            "gemma4.context_length": 262144,
+            "gemma4.embedding_length": 2816,
+            "gemma4.feed_forward_length": 8192,
+            "gemma4.rope.freq_base": 1000000.0,
+            "gemma4.rope.freq_base_swa": 10000.0,
+        }
+    )
+    mmproj_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "clip",
+            "general.type": "mmproj",
+            "clip.vision.projection_dim": 2816,
+            "clip.vision.patch_size": 16,
+            "clip.vision.embedding_length": 1152,
+            "clip.vision.feed_forward_length": 4304,
+            "clip.vision.block_count": 27,
+            "clip.vision.attention.head_count": 16,
+            "clip.vision.attention.layer_norm_epsilon": 1e-6,
+        }
+    )
+
+    def fake_gguf_reader(path):
+        return mmproj_reader if Path(path) == mmproj_path else main_reader
+
+    monkeypatch.setattr(
+        gguf_config_builder_module.gguf,
+        "GGUFReader",
+        fake_gguf_reader,
+    )
+    monkeypatch.setattr(
+        gguf_config_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: mmproj_path,
+    )
+
+    config = build_config_from_gguf(gguf_path)
+
+    assert config is not None
+    assert config.model_type == "gemma4"
+    assert config.architectures == ["Gemma4ForConditionalGeneration"]
+    assert config.vision_config is not None
+    assert config.vision_config.hidden_size == 1152
+    assert config.vision_config.num_hidden_layers == 27
+    assert config.vision_config.head_dim == 72
+    assert config.vision_config.default_output_length == 280
 
 
 def test_build_gemma4_assistant_config_from_gguf_metadata(tmp_path, monkeypatch):
@@ -534,8 +632,10 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     monkeypatch,
 ):
     gguf_path = tmp_path / "model.gguf"
+    mmproj_path = tmp_path / "mmproj.gguf"
     gguf_path.write_bytes(b"GGUF")
-    fake_reader = _FakeGGUFReader(
+    mmproj_path.write_bytes(b"GGUF")
+    main_reader = _FakeGGUFReader(
         {
             "general.architecture": "qwen35moe",
             "tokenizer.ggml.tokens": ["<pad>", "<bos>", "<eos>", "hello"],
@@ -545,6 +645,15 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
             "tokenizer.ggml.eos_token_id": 2,
             "tokenizer.ggml.padding_token_id": 0,
             "tokenizer.chat_template": "{{ messages }}",
+        }
+    )
+    mmproj_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "clip",
+            "general.type": "mmproj",
+            "clip.vision.patch_size": 16,
+            "clip.vision.spatial_merge_size": 2,
+            "clip.vision.temporal_patch_size": 2,
         }
     )
     calls = []
@@ -562,6 +671,9 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
         calls.append(("convert", architecture, tokenizer_dict))
         return object(), {}
 
+    def fake_gguf_reader(path):
+        return mmproj_reader if Path(path) == mmproj_path else main_reader
+
     monkeypatch.setenv(
         "VLLM_GGUF_TOKENIZER_CACHE",
         str(tmp_path / "tokenizer-cache"),
@@ -569,7 +681,7 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     monkeypatch.setattr(
         gguf_tokenizer_builder_module.gguf,
         "GGUFReader",
-        lambda path: fake_reader,
+        fake_gguf_reader,
     )
     monkeypatch.setattr(
         gguf_tokenizer_builder_module,
@@ -581,11 +693,33 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
         "PreTrainedTokenizerFast",
         FakeTokenizer,
     )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: mmproj_path,
+    )
 
     tokenizer_path = build_tokenizer_from_gguf(gguf_path)
 
     assert tokenizer_path is not None
+    tokenizer_cache = Path(tokenizer_path)
     assert (tmp_path / "tokenizer-cache").is_dir()
+    processor_config = json.loads(
+        (tokenizer_cache / "processor_config.json").read_text(encoding="utf-8")
+    )
+    preprocessor_config = json.loads(
+        (tokenizer_cache / "preprocessor_config.json").read_text(encoding="utf-8")
+    )
+    video_config = json.loads(
+        (tokenizer_cache / "video_preprocessor_config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert processor_config["processor_class"] == "Qwen3VLProcessor"
+    assert processor_config["image_processor"]["patch_size"] == 16
+    assert preprocessor_config["image_processor_type"] == "Qwen2VLImageProcessor"
+    assert preprocessor_config["merge_size"] == 2
+    assert video_config["video_processor_type"] == "Qwen3VLVideoProcessor"
     assert calls[0][0] == "convert"
     assert calls[0][1] == "qwen3_moe"
     assert calls[0][2]["tokens"] == ["<pad>", "<bos>", "<eos>", "hello"]
@@ -601,7 +735,150 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
         "convert_gguf_tokenizer",
         fail_convert,
     )
+    (tokenizer_cache / "preprocessor_config.json").unlink()
     assert build_tokenizer_from_gguf(gguf_path) == tokenizer_path
+    assert (tokenizer_cache / "preprocessor_config.json").is_file()
+
+
+def test_build_tokenizer_from_gguf_copies_local_sidecars_first(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    local_preprocessor = {"processor_class": "LocalProcessor"}
+    (tmp_path / "preprocessor_config.json").write_text(
+        json.dumps(local_preprocessor),
+        encoding="utf-8",
+    )
+    fake_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "gemma4",
+            "tokenizer.ggml.tokens": ["<pad>", "<bos>", "<eos>", "hello"],
+            "tokenizer.ggml.model": "gpt2",
+            "tokenizer.ggml.merges": ["h ello"],
+        }
+    )
+
+    class FakeTokenizer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def save_pretrained(self, path):
+            (path / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv(
+        "VLLM_GGUF_TOKENIZER_CACHE",
+        str(tmp_path / "tokenizer-cache"),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module.gguf,
+        "GGUFReader",
+        lambda path: fake_reader,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "convert_gguf_tokenizer",
+        lambda architecture, tokenizer_dict: (object(), {}),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "PreTrainedTokenizerFast",
+        FakeTokenizer,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: None,
+    )
+
+    tokenizer_path = build_tokenizer_from_gguf(gguf_path)
+
+    assert tokenizer_path is not None
+    copied = json.loads(
+        (Path(tokenizer_path) / "preprocessor_config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert copied == local_preprocessor
+
+
+def test_build_tokenizer_from_gguf_patches_gemma4_special_tokens(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    fake_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "gemma4",
+            "tokenizer.ggml.tokens": [
+                "<pad>",
+                "<bos>",
+                "<eos>",
+                "<|image>",
+                "<|image|>",
+                "<image|>",
+                "<|audio>",
+                "<|audio|>",
+                "<audio|>",
+            ],
+            "tokenizer.ggml.model": "gpt2",
+            "tokenizer.ggml.merges": ["h ello"],
+        }
+    )
+
+    class FakeTokenizer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def save_pretrained(self, path):
+            (path / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (path / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv(
+        "VLLM_GGUF_TOKENIZER_CACHE",
+        str(tmp_path / "tokenizer-cache"),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module.gguf,
+        "GGUFReader",
+        lambda path: fake_reader,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "convert_gguf_tokenizer",
+        lambda architecture, tokenizer_dict: (object(), {}),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "PreTrainedTokenizerFast",
+        FakeTokenizer,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: None,
+    )
+
+    tokenizer_path = build_tokenizer_from_gguf(gguf_path)
+
+    assert tokenizer_path is not None
+    tokenizer_config = json.loads(
+        (Path(tokenizer_path) / "tokenizer_config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert tokenizer_config["processor_class"] == "Gemma4Processor"
+    assert tokenizer_config["model_specific_special_tokens"]["image_token"] == (
+        "<|image|>"
+    )
+    assert tokenizer_config["model_specific_special_tokens"]["boi_token"] == (
+        "<|image>"
+    )
+    assert tokenizer_config["model_specific_special_tokens"]["eoi_token"] == (
+        "<image|>"
+    )
 
 
 def test_extract_vision_config_accepts_single_value_metadata(monkeypatch):

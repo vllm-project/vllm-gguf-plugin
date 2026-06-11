@@ -3,10 +3,12 @@
 """Build a HF-compatible tokenizer directory from GGUF embedded metadata."""
 
 import hashlib
+import json
 import os
 from contextlib import suppress
 from os import PathLike
 from pathlib import Path
+from shutil import copyfile
 from typing import Any
 
 import gguf
@@ -17,12 +19,23 @@ from transformers.integrations.ggml import (
 )
 from vllm.logger import init_logger
 
-from .gguf_utils import _gguf_reader_value, _gguf_scalar_value, check_gguf_file
+from .gguf_utils import (
+    _gguf_reader_value,
+    _gguf_scalar_value,
+    check_gguf_file,
+    detect_gguf_multimodal,
+)
 
 logger = init_logger(__name__)
 
 _TOKENIZER_CACHE_ENV = "VLLM_GGUF_TOKENIZER_CACHE"
 _DEFAULT_TOKENIZER_CACHE = "~/.cache/vllm-gguf-plugin/tokenizers"
+_PROCESSOR_SIDECAR_FILES = (
+    "processor_config.json",
+    "preprocessor_config.json",
+    "video_preprocessor_config.json",
+    "image_processor_config.json",
+)
 
 _TOKENIZER_ARCH_ALIASES = {
     "qwen35moe": "qwen3_moe",
@@ -117,6 +130,291 @@ def _special_token_kwargs(tokenizer_dict: dict[str, Any]) -> dict[str, str]:
     }
 
 
+_GEMMA4_MODEL_SPECIFIC_TOKENS = {
+    "audio_token": "<|audio|>",
+    "boa_token": "<|audio>",
+    "boi_token": "<|image>",
+    "eoa_token": "<audio|>",
+    "eoc_token": "<channel|>",
+    "eoi_token": "<image|>",
+    "eot_token": "<turn|>",
+    "escape_token": '<|"|>',
+    "etc_token": "<tool_call|>",
+    "etd_token": "<tool|>",
+    "etr_token": "<tool_response|>",
+    "image_token": "<|image|>",
+    "soc_token": "<|channel>",
+    "sot_token": "<|turn>",
+    "stc_token": "<|tool_call>",
+    "std_token": "<|tool>",
+    "str_token": "<|tool_response>",
+    "think_token": "<|think|>",
+}
+
+
+def _gemma4_model_specific_special_tokens(
+    tokenizer_dict: dict[str, Any],
+) -> dict[str, str]:
+    tokens = tokenizer_dict.get("tokens")
+    if not isinstance(tokens, list):
+        return {}
+    token_set = {token for token in tokens if isinstance(token, str)}
+    return {
+        name: token
+        for name, token in _GEMMA4_MODEL_SPECIFIC_TOKENS.items()
+        if token in token_set
+    }
+
+
+def _patch_tokenizer_config_from_gguf(
+    cache_dir: Path,
+    architecture: str,
+    tokenizer_dict: dict[str, Any],
+) -> None:
+    tokenizer_config_path = cache_dir / "tokenizer_config.json"
+    if not tokenizer_config_path.is_file():
+        return
+
+    if architecture not in {"gemma4", "gemma4-assistant", "gemma4_assistant"}:
+        return
+
+    model_specific_tokens = _gemma4_model_specific_special_tokens(tokenizer_dict)
+    if not model_specific_tokens:
+        return
+
+    try:
+        tokenizer_config = json.loads(
+            tokenizer_config_path.read_text(encoding="utf-8")
+        )
+    except Exception as e:
+        logger.debug("Failed to read tokenizer config %s: %s", tokenizer_config_path, e)
+        return
+
+    tokenizer_config["processor_class"] = "Gemma4Processor"
+    tokenizer_config["model_specific_special_tokens"] = model_specific_tokens
+    for name, token in model_specific_tokens.items():
+        tokenizer_config.setdefault(name, token)
+    tokenizer_config.setdefault("extra_special_tokens", ["<|video|>"])
+    tokenizer_config_path.write_text(
+        json.dumps(tokenizer_config, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _read_int(reader: gguf.GGUFReader, key: str) -> int | None:
+    value = _gguf_scalar_value(_gguf_reader_value(reader, key))
+    if value is None:
+        return None
+    with suppress(TypeError, ValueError):
+        return int(value)
+    return None
+
+
+def _copy_local_processor_sidecars(model_path: Path, cache_dir: Path) -> None:
+    """Copy local sidecar files next to the GGUF, without network fallback."""
+    for filename in _PROCESSOR_SIDECAR_FILES:
+        source = model_path.parent / filename
+        target = cache_dir / filename
+        if target.is_file() or not source.is_file():
+            continue
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            copyfile(source, target)
+        except Exception as e:
+            logger.debug("Failed to copy local GGUF sidecar %s: %s", source, e)
+
+
+def _write_json_if_missing(cache_dir: Path, filename: str, data: dict[str, Any]) -> None:
+    target = cache_dir / filename
+    if target.is_file():
+        return
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_mmproj_reader(model_path: Path) -> gguf.GGUFReader | None:
+    mmproj_path = detect_gguf_multimodal(str(model_path))
+    if mmproj_path is None:
+        return None
+    try:
+        return gguf.GGUFReader(str(mmproj_path))
+    except Exception as e:
+        logger.debug("Failed to read GGUF mmproj sidecar %s: %s", mmproj_path, e)
+        return None
+
+
+def _qwen_image_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
+    return {
+        "do_convert_rgb": True,
+        "do_normalize": True,
+        "do_rescale": True,
+        "do_resize": True,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_processor_type": "Qwen2VLImageProcessor",
+        "image_std": [0.5, 0.5, 0.5],
+        "merge_size": _read_int(reader, "clip.vision.spatial_merge_size") or 2,
+        "patch_size": _read_int(reader, "clip.vision.patch_size") or 16,
+        "resample": 3,
+        "rescale_factor": 1.0 / 255.0,
+        "size": {
+            "longest_edge": 16777216,
+            "shortest_edge": 65536,
+        },
+        "temporal_patch_size": (
+            _read_int(reader, "clip.vision.temporal_patch_size") or 2
+        ),
+    }
+
+
+def _qwen_video_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
+    config = _qwen_image_processor_config(reader)
+    config.update(
+        {
+            "do_sample_frames": True,
+            "fps": 2,
+            "max_frames": 768,
+            "min_frames": 4,
+            "return_metadata": False,
+            "size": {
+                "longest_edge": 25165824,
+                "shortest_edge": 4096,
+            },
+            "video_processor_type": "Qwen3VLVideoProcessor",
+        }
+    )
+    config.pop("image_processor_type", None)
+    return config
+
+
+def _gemma4_image_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
+    patch_size = _read_int(reader, "clip.vision.patch_size") or 16
+    image_seq_length = _read_int(reader, "clip.vision.default_output_length") or 280
+    return {
+        "do_convert_rgb": True,
+        "do_normalize": False,
+        "do_rescale": True,
+        "do_resize": True,
+        "image_mean": [0.0, 0.0, 0.0],
+        "image_processor_type": "Gemma4ImageProcessor",
+        "image_seq_length": image_seq_length,
+        "image_std": [1.0, 1.0, 1.0],
+        "max_soft_tokens": image_seq_length,
+        "patch_size": patch_size,
+        "pooling_kernel_size": 3,
+        "resample": 3,
+        "rescale_factor": 1.0 / 255.0,
+    }
+
+
+def _gemma4_video_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
+    patch_size = _read_int(reader, "clip.vision.patch_size") or 16
+    return {
+        "do_convert_rgb": True,
+        "do_normalize": True,
+        "do_rescale": True,
+        "do_resize": True,
+        "do_sample_frames": True,
+        "image_mean": [0.0, 0.0, 0.0],
+        "image_std": [1.0, 1.0, 1.0],
+        "max_soft_tokens": 70,
+        "num_frames": 32,
+        "patch_size": patch_size,
+        "pooling_kernel_size": 3,
+        "resample": 3,
+        "rescale_factor": 1.0 / 255.0,
+        "return_metadata": False,
+        "video_processor_type": "Gemma4VideoProcessor",
+    }
+
+
+def _gemma4_feature_extractor_config() -> dict[str, Any]:
+    return {
+        "dither": 0.0,
+        "feature_extractor_type": "Gemma4AudioFeatureExtractor",
+        "feature_size": 128,
+        "fft_length": 512,
+        "fft_overdrive": False,
+        "frame_length": 320,
+        "hop_length": 160,
+        "input_scale_factor": 1.0,
+        "max_frequency": 8000.0,
+        "mel_floor": 0.001,
+        "min_frequency": 0.0,
+        "padding_side": "right",
+        "padding_value": 0.0,
+        "per_bin_mean": None,
+        "per_bin_stddev": None,
+        "preemphasis": 0.0,
+        "preemphasis_htk_flavor": True,
+        "return_attention_mask": True,
+        "sampling_rate": 16000,
+    }
+
+
+def _processor_sidecars_from_metadata(
+    architecture: str,
+    mmproj_reader: gguf.GGUFReader,
+) -> dict[str, dict[str, Any]]:
+    if architecture in {"qwen35moe", "qwen3_5_moe"}:
+        image_config = _qwen_image_processor_config(mmproj_reader)
+        video_config = _qwen_video_processor_config(mmproj_reader)
+        return {
+            "processor_config.json": {
+                "image_processor": image_config,
+                "processor_class": "Qwen3VLProcessor",
+                "video_processor": video_config,
+            },
+            "preprocessor_config.json": image_config,
+            "video_preprocessor_config.json": video_config,
+        }
+
+    if architecture == "gemma4":
+        image_config = _gemma4_image_processor_config(mmproj_reader)
+        video_config = _gemma4_video_processor_config(mmproj_reader)
+        return {
+            "processor_config.json": {
+                "audio_ms_per_token": 40,
+                "audio_seq_length": 750,
+                "feature_extractor": _gemma4_feature_extractor_config(),
+                "image_processor": image_config,
+                "image_seq_length": image_config["image_seq_length"],
+                "processor_class": "Gemma4Processor",
+                "video_processor": video_config,
+            },
+            "preprocessor_config.json": image_config,
+            "video_preprocessor_config.json": video_config,
+        }
+
+    return {}
+
+
+def _materialize_processor_sidecars(
+    model_path: Path,
+    cache_dir: Path,
+    architecture: str | None = None,
+) -> None:
+    """Materialize processor sidecars without implicit HF Hub access."""
+    _copy_local_processor_sidecars(model_path, cache_dir)
+    mmproj_reader = _read_mmproj_reader(model_path)
+    if mmproj_reader is None:
+        return
+
+    if architecture is None:
+        try:
+            architecture = _gguf_architecture(gguf.GGUFReader(str(model_path)))
+        except Exception as e:
+            logger.debug("Failed to read GGUF architecture from %s: %s", model_path, e)
+            return
+    if architecture is None:
+        return
+
+    for filename, data in _processor_sidecars_from_metadata(
+        architecture,
+        mmproj_reader,
+    ).items():
+        _write_json_if_missing(cache_dir, filename, data)
+
+
 def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
     """Materialize a tokenizer directory from GGUF embedded metadata.
 
@@ -130,6 +428,7 @@ def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
 
     cache_dir = _tokenizer_cache_root() / _cache_key(model_path)
     if (cache_dir / "tokenizer.json").is_file():
+        _materialize_processor_sidecars(model_path, cache_dir)
         return str(cache_dir)
 
     try:
@@ -160,4 +459,6 @@ def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(cache_dir)
+    _patch_tokenizer_config_from_gguf(cache_dir, architecture, tokenizer_dict)
+    _materialize_processor_sidecars(model_path, cache_dir, architecture)
     return str(cache_dir)
