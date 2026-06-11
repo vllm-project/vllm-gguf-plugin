@@ -63,6 +63,15 @@ TRITON_FUSED_MOE_BLOCK_M = 4
 TRITON_FUSED_MOE_BLOCK_N = 128
 TRITON_FUSED_MOE_BLOCK_K_BLOCKS = 4
 
+# Per-type BLOCK_M overrides for Triton MoE kernels.
+TRITON_MOE_BLOCK_M_BY_TYPE: dict[int, int] = {
+    GGML_TYPE_Q4_0: 8,
+}
+
+
+def get_triton_moe_block_m(quant_type: int) -> int:
+    return TRITON_MOE_BLOCK_M_BY_TYPE.get(quant_type, TRITON_FUSED_MOE_BLOCK_M)
+
 
 @triton.jit
 def load_moe_token_info(
@@ -139,6 +148,7 @@ def _validate_args(
     top_k: int,
     tokens: int,
     quant_type: int,
+    block_m: int = TRITON_FUSED_MOE_BLOCK_M,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int
 ]:
@@ -190,13 +200,24 @@ def _validate_args(
     # Use tensor shapes (CPU-known) instead of .item() to avoid GPU→CPU sync.
     # This is required for CUDA graph capture compatibility.
     max_num_blocks = expert_ids.numel()
-    if max_num_blocks != sorted_token_ids.numel() // TRITON_FUSED_MOE_BLOCK_M:
+    expected_token_ids_len = max_num_blocks * block_m
+    actual_token_ids_len = sorted_token_ids.numel()
+    if actual_token_ids_len > expected_token_ids_len:
         raise ValueError(
-            "expert_ids and sorted_token_ids have inconsistent shapes: "
-            f"expert_ids.numel()={max_num_blocks}, "
-            f"sorted_token_ids.numel()//BLOCK_M="
-            f"{sorted_token_ids.numel() // TRITON_FUSED_MOE_BLOCK_M}"
+            "sorted_token_ids has more elements than expert_ids * block_m: "
+            f"sorted_token_ids.numel()={actual_token_ids_len}, "
+            f"expert_ids.numel()*block_m={expected_token_ids_len}"
         )
+    # Pad sorted_token_ids to match expert_ids.numel() * block_m if needed.
+    # moe_align_block_size may not produce a perfect multiple for block_m > 4.
+    if actual_token_ids_len < expected_token_ids_len:
+        pad = torch.full(
+            (expected_token_ids_len - actual_token_ids_len,),
+            -1,
+            dtype=sorted_token_ids.dtype,
+            device=sorted_token_ids.device,
+        )
+        sorted_token_ids = torch.cat([sorted_token_ids, pad])
 
     return (
         W.contiguous(),
@@ -221,6 +242,7 @@ def run_triton_fused_moe_kernel(
     tokens: int,
     quant_type: int,
     extra_args: tuple = (),
+    block_m: int = TRITON_FUSED_MOE_BLOCK_M,
     block_n: int = TRITON_FUSED_MOE_BLOCK_N,
     block_k_blocks: int = TRITON_FUSED_MOE_BLOCK_K_BLOCKS,
     num_warps: int = TRITON_NUM_WARPS,
@@ -244,6 +266,7 @@ def run_triton_fused_moe_kernel(
         top_k,
         tokens,
         quant_type,
+        block_m,
     )
 
     out = torch.zeros((num_valid_tokens, row), device=X.device, dtype=X.dtype)
@@ -275,7 +298,7 @@ def run_triton_fused_moe_kernel(
         out.stride(0),
         out.stride(1),
         *extra_args,
-        BLOCK_M=TRITON_FUSED_MOE_BLOCK_M,
+        BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K_BLOCKS=block_k_blocks,
         num_warps=num_warps,

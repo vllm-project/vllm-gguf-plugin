@@ -8,6 +8,7 @@ import triton.language as tl
 
 from ...gemm.utils import (
     GGML_TYPE_Q4_0,
+    load_f16_from_u8,
 )
 from ..utils import (
     load_moe_token_info,
@@ -15,6 +16,7 @@ from ..utils import (
     run_triton_fused_moe_kernel,
 )
 
+Q4_0_MOE_BLOCK_M = 8
 Q4_0_MOE_BLOCK_N = 64
 Q4_0_MOE_BLOCK_K_BLOCKS = 2
 Q4_0_MOE_NUM_WARPS = 2
@@ -60,10 +62,7 @@ def q4_0_moe_kernel(
     offs_byte = tl.arange(0, 16)
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    w_packed_row_ptrs = (
-        w_u8_ptr + expert * stride_we + offs_n[:, None, None] * stride_wn
-    )
-    w_block_row_ptrs = w_u8_ptr + expert * stride_we + offs_n[:, None] * stride_wn
+    w_row_ptrs = w_u8_ptr + expert * stride_we + offs_n[:, None] * stride_wn
 
     for kb_start in range(0, num_k_blocks, BLOCK_K_BLOCKS):
         x_tile, cur_kb, kb_mask = load_moe_x_tile(
@@ -81,15 +80,12 @@ def q4_0_moe_kernel(
         )
         x_dtype = x_tile.dtype
 
-        scale_ptrs = w_block_row_ptrs + cur_kb[None, :] * 18
+        scale_ptrs = w_row_ptrs + cur_kb[None, :] * 18
         scale_mask = n_mask[:, None] & kb_mask[None, :]
-        scale_lo = tl.load(scale_ptrs + 0, mask=scale_mask, other=0)
-        scale_hi = tl.load(scale_ptrs + 1, mask=scale_mask, other=0)
-        scale_bits = scale_lo.to(tl.uint16) | (scale_hi.to(tl.uint16) << 8)
-        scales = tl.cast(scale_bits, tl.float16, bitcast=True).to(x_dtype)
+        scales = load_f16_from_u8(scale_ptrs, scale_mask).to(x_dtype)
 
         packed_ptrs = (
-            w_packed_row_ptrs
+            w_row_ptrs[:, :, None]
             + cur_kb[None, :, None] * 18
             + 2
             + offs_byte[None, None, :]
@@ -99,10 +95,14 @@ def q4_0_moe_kernel(
 
         low = ((packed & 0x0F).to(x_dtype) - 8.0) * scales[:, :, None]
         high = (((packed >> 4) & 0x0F).to(x_dtype) - 8.0) * scales[:, :, None]
-        q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
+        q_tile = tl.reshape(
+            tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32)
+        )
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
-    y_ptrs = y_ptr + offs_output[:, None] * stride_ym + offs_n[None, :] * stride_yn
+    y_ptrs = (
+        y_ptr + offs_output[:, None] * stride_ym + offs_n[None, :] * stride_yn
+    )
     y_mask = token_mask[:, None] & n_mask[None, :]
     tl.store(y_ptrs, acc, mask=y_mask)
 
@@ -128,6 +128,7 @@ def ggml_moe_q4_0_triton(
         top_k,
         tokens,
         GGML_TYPE_Q4_0,
+        block_m=Q4_0_MOE_BLOCK_M,
         block_n=Q4_0_MOE_BLOCK_N,
         block_k_blocks=Q4_0_MOE_BLOCK_K_BLOCKS,
         num_warps=Q4_0_MOE_NUM_WARPS,

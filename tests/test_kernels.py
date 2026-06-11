@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 import vllm_gguf_plugin.ops as ops
 from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
 from vllm_gguf_plugin.triton.fused_moe import ggml_moe_a8_triton
+from vllm_gguf_plugin.triton.fused_moe.utils import get_triton_moe_block_m
 from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton
 
 from .utils import get_gguf_moe_tensors, get_gguf_sample_tensors, seed_everything
@@ -364,7 +365,7 @@ def test_moe_triton(
     )
     w2_dequant = torch.tensor(dequantize(w2.data, quant_type), device="cuda").to(dtype)
 
-    block_size = ops.ggml_moe_get_block_size(quant_type)
+    block_size = get_triton_moe_block_m(quant_type)
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, block_size, E
     )

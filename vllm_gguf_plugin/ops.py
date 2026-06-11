@@ -5,7 +5,7 @@ import os
 import torch
 
 from .triton.fused_moe.interface import ggml_moe_a8_triton
-from .triton.fused_moe.utils import TRITON_FUSED_MOE_BLOCK_M
+from .triton.fused_moe.utils import get_triton_moe_block_m
 from .triton.gemm.interface import ggml_mul_mat_a8_triton
 
 try:
@@ -185,7 +185,7 @@ def ggml_moe_a8_vec(
 
     E = W.shape[0]
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, TRITON_FUSED_MOE_BLOCK_M, E
+        topk_ids, get_triton_moe_block_m(quant_type), E
     )
     return ggml_moe_a8_triton(
         X,
@@ -203,7 +203,7 @@ def ggml_moe_a8_vec(
 def ggml_moe_get_block_size(quant_type: int) -> int:
     if _CUDA_ENABLED:
         return torch.ops._C_gguf.ggml_moe_get_block_size(quant_type)
-    return TRITON_FUSED_MOE_BLOCK_M
+    return get_triton_moe_block_m(quant_type)
 
 
 def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
