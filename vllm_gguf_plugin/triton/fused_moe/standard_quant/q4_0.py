@@ -95,14 +95,10 @@ def q4_0_moe_kernel(
 
         low = ((packed & 0x0F).to(x_dtype) - 8.0) * scales[:, :, None]
         high = (((packed >> 4) & 0x0F).to(x_dtype) - 8.0) * scales[:, :, None]
-        q_tile = tl.reshape(
-            tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32)
-        )
+        q_tile = tl.reshape(tl.join(low, high), (BLOCK_N, BLOCK_K_BLOCKS * 32))
         acc = tl.dot(x_tile, tl.trans(q_tile), acc=acc)
 
-    y_ptrs = (
-        y_ptr + offs_output[:, None] * stride_ym + offs_n[None, :] * stride_yn
-    )
+    y_ptrs = y_ptr + offs_output[:, None] * stride_ym + offs_n[None, :] * stride_yn
     y_mask = token_mask[:, None] & n_mask[None, :]
     tl.store(y_ptrs, acc, mask=y_mask)
 
