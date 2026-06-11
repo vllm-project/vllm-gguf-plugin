@@ -14,7 +14,7 @@ except ImportError:
     from torch.library import impl_abstract as register_fake
 
 # Backend selection: default to Triton, CUDA only when explicitly enabled
-_USE_CUDA = os.environ.get("GGUF_USE_CUDA", "0") == "1"
+_USE_CUDA = os.environ.get("VLLM_GGUF_USE_CUDA", "0") == "1"
 
 # Try importing CUDA extension
 try:
