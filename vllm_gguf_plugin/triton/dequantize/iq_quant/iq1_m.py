@@ -28,14 +28,9 @@ def iq1_m_dequantize_kernel(
     sc2 = load_u16_from_u8(block_ptrs + 48 + 4, mask)
     sc3 = load_u16_from_u8(block_ptrs + 48 + 6, mask)
     base_bits = (
-        (sc0 >> 12)
-        | ((sc1 >> 8) & 0x00F0)
-        | ((sc2 >> 4) & 0x0F00)
-        | (sc3 & 0xF000)
+        (sc0 >> 12) | ((sc1 >> 8) & 0x00F0) | ((sc2 >> 4) & 0x0F00) | (sc3 & 0xF000)
     )
-    qh = tl.load(block_ptrs + 32 + 2 * ib + (il // 2), mask=mask, other=0).to(
-        tl.int32
-    )
+    qh = tl.load(block_ptrs + 32 + 2 * ib + (il // 2), mask=mask, other=0).to(tl.int32)
     idx = tl.load(block_ptrs + 4 * ib + il, mask=mask, other=0).to(tl.int32)
     idx = idx | (((qh >> (4 * (il % 2))) & 0x07) << 8)
     delta_num = tl.where((qh & (0x08 << (4 * (il % 2)))) != 0, -9.0, -7.0)

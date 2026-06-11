@@ -1,4 +1,3 @@
-import numpy as np
 import pytest
 import torch
 from gguf import GGMLQuantizationType, dequantize
@@ -12,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 import vllm_gguf_plugin.ops as ops
 from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
 from vllm_gguf_plugin.quantization.vocal_embeds import apply_gguf_embedding
-from vllm_gguf_plugin.triton.dequantize import ggml_dequantize_triton
 from vllm_gguf_plugin.triton.fused_moe import ggml_moe_a8_triton
 from vllm_gguf_plugin.triton.fused_moe.utils import get_triton_moe_block_m
 from vllm_gguf_plugin.triton.gemm.interface import ggml_mul_mat_a8_triton

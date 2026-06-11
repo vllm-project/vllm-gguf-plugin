@@ -25,9 +25,7 @@ def q5_k_dequantize_kernel(w_ptr, y_ptr, total, BLOCK_SIZE: tl.constexpr):
     qh = tl.load(block_ptrs + 16 + q_idx, mask=mask, other=0)
     q = tl.load(block_ptrs + 48 + 32 * group + q_idx, mask=mask, other=0)
     q = tl.where(part == 0, q & 0x0F, q >> 4)
-    q = q.to(tl.float32) + 16.0 * ((qh & (1 << (2 * group + part))) != 0).to(
-        tl.float32
-    )
+    q = q.to(tl.float32) + 16.0 * ((qh & (1 << (2 * group + part))) != 0).to(tl.float32)
     dall = load_f16_from_u8(block_ptrs + 0, mask).to(tl.float32)
     dmin = load_f16_from_u8(block_ptrs + 2, mask).to(tl.float32)
     out = q * (scale_q.to(tl.float32) * dall)

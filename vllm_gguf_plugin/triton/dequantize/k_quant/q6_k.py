@@ -15,8 +15,8 @@ def q6_k_dequantize_kernel(w_ptr, y_ptr, total, BLOCK_SIZE: tl.constexpr):
     rem = pos % 128
     group = rem // 32
     half = (rem % 32) // 16
-    l = rem % 16
-    il = 16 * half + l
+    sub_idx = rem % 16
+    il = 16 * half + sub_idx
 
     scale = tl.load(
         block_ptrs + 192 + 8 * half_block + 2 * group + half,

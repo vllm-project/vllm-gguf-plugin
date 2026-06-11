@@ -19,13 +19,13 @@ def q3_k_dequantize_kernel(w_ptr, y_ptr, total, BLOCK_SIZE: tl.constexpr):
     rem = pos % 128
     j = rem // 32
     half = (rem % 32) // 16
-    l = rem % 16
+    sub_idx = rem % 16
 
     is_idx = 8 * group + 2 * j + half
     hm_mask = 1 << (4 * group + j)
     scale = load_q3_k_scale_vector(block_ptrs + 96, is_idx, mask)
-    ql = tl.load(block_ptrs + 32 + 32 * group + 16 * half + l, mask=mask, other=0)
-    hm = tl.load(block_ptrs + 16 * half + l, mask=mask, other=0)
+    ql = tl.load(block_ptrs + 32 + 32 * group + 16 * half + sub_idx, mask=mask, other=0)
+    hm = tl.load(block_ptrs + 16 * half + sub_idx, mask=mask, other=0)
     d = load_f16_from_u8(block_ptrs + 108, mask).to(tl.float32)
     q = ((ql >> (2 * j)) & 0x03).to(tl.int16)
     q = (q - tl.where((hm & hm_mask) != 0, 0, 4).to(tl.int16)).to(tl.float32)
