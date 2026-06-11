@@ -83,6 +83,8 @@ def _add_gemma4_mtp_gguf_mappings(
         }
     )
 
+    # Gemma4 MTP attention is Q-only and reuses the target model KV cache,
+    # so GGUF assistant blocks intentionally do not map attn_k/attn_v.
     for idx in range(num_layers):
         layer_prefix = f"model.layers.{idx}"
         gguf_to_hf_name_map.update(
@@ -127,6 +129,24 @@ def _add_qwen3_5_mtp_gguf_mappings(
         return
 
     base_layer = int(getattr(text_config, "num_hidden_layers", 0) or 0)
+    shared_nextn_gguf_idx = base_layer
+    gguf_to_hf_name_map.update(
+        {
+            f"blk.{shared_nextn_gguf_idx}.nextn.eh_proj.weight": "mtp.fc.weight",
+            f"blk.{shared_nextn_gguf_idx}.nextn.enorm.weight": (
+                "mtp.pre_fc_norm_embedding.weight"
+            ),
+            f"blk.{shared_nextn_gguf_idx}.nextn.hnorm.weight": (
+                "mtp.pre_fc_norm_hidden.weight"
+            ),
+            f"blk.{shared_nextn_gguf_idx}.nextn.shared_head_norm.weight": (
+                "mtp.norm.weight"
+            ),
+            f"blk.{shared_nextn_gguf_idx}.nextn.embed_tokens.weight": (
+                "mtp.embed_tokens.weight"
+            ),
+        }
+    )
     for mtp_idx in range(num_mtp_layers):
         gguf_idx = base_layer + mtp_idx
         layer_prefix = f"mtp.layers.{mtp_idx}"
@@ -179,15 +199,6 @@ def _add_qwen3_5_mtp_gguf_mappings(
                 ),
                 f"blk.{gguf_idx}.ffn_down_exps.weight": (
                     f"{layer_prefix}.mlp.experts.0.down_proj.weight"
-                ),
-                f"blk.{gguf_idx}.nextn.eh_proj.weight": "mtp.fc.weight",
-                f"blk.{gguf_idx}.nextn.enorm.weight": (
-                    "mtp.pre_fc_norm_embedding.weight"
-                ),
-                f"blk.{gguf_idx}.nextn.hnorm.weight": ("mtp.pre_fc_norm_hidden.weight"),
-                f"blk.{gguf_idx}.nextn.shared_head_norm.weight": ("mtp.norm.weight"),
-                f"blk.{gguf_idx}.nextn.embed_tokens.weight": (
-                    "mtp.embed_tokens.weight"
                 ),
             }
         )
@@ -294,9 +305,7 @@ def _add_gemma4_gguf_mappings(
                 f"v.blk.{idx}.ffn_down.weight": (
                     f"{vision_prefix}.mlp.down_proj.linear.weight"
                 ),
-                f"v.blk.{idx}.ln1.weight": (
-                    f"{vision_prefix}.input_layernorm.weight"
-                ),
+                f"v.blk.{idx}.ln1.weight": (f"{vision_prefix}.input_layernorm.weight"),
                 f"v.blk.{idx}.attn_post_norm.weight": (
                     f"{vision_prefix}.post_attention_layernorm.weight"
                 ),
@@ -402,9 +411,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         if orig_model_type == "qwen3_5_moe" and is_multimodal:
             gguf_to_hf_name_map.update(
                 {
-                    "v.patch_embd.weight.1": (
-                        "model.visual.patch_embed.proj.weight.1"
-                    ),
+                    "v.patch_embd.weight.1": ("model.visual.patch_embed.proj.weight.1"),
                     "mm.0.weight": "model.visual.merger.linear_fc1.weight",
                     "mm.0.bias": "model.visual.merger.linear_fc1.bias",
                     "mm.2.weight": "model.visual.merger.linear_fc2.weight",

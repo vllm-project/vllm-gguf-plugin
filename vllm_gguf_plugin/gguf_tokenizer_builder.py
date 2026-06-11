@@ -36,6 +36,11 @@ _PROCESSOR_SIDECAR_FILES = (
     "video_preprocessor_config.json",
     "image_processor_config.json",
 )
+_PROCESSOR_DEFAULT_SOURCE = (
+    "non-GGUF processor defaults mirrored from Unsloth Qwen3.6/Gemma4 "
+    "GGUF sidecars observed on 2026-06-11; GGUF metadata values take "
+    "precedence when present"
+)
 
 _TOKENIZER_ARCH_ALIASES = {
     "qwen35moe": "qwen3_moe",
@@ -77,8 +82,12 @@ def _tokenizer_cache_root() -> Path:
     ).expanduser()
 
 
-def _cache_key(model_path: Path) -> str:
-    stat = model_path.stat()
+def _cache_key(model_path: Path) -> str | None:
+    try:
+        stat = model_path.stat()
+    except OSError as e:
+        logger.debug("Failed to stat GGUF tokenizer source %s: %s", model_path, e)
+        return None
     raw_key = f"{model_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:24]
 
@@ -151,19 +160,69 @@ _GEMMA4_MODEL_SPECIFIC_TOKENS = {
     "think_token": "<|think|>",
 }
 
+_QWEN_MM_SPECIAL_TOKENS = (
+    "<|vision_start|>",
+    "<|vision_end|>",
+    "<|vision_pad|>",
+    "<|image_pad|>",
+    "<|video_pad|>",
+)
+
+
+def _tokens_present(
+    tokenizer_dict: dict[str, Any],
+    candidates: tuple[str, ...],
+) -> list[str]:
+    tokens = tokenizer_dict.get("tokens")
+    if not isinstance(tokens, list):
+        return []
+    token_set = {token for token in tokens if isinstance(token, str)}
+    return [token for token in candidates if token in token_set]
+
 
 def _gemma4_model_specific_special_tokens(
     tokenizer_dict: dict[str, Any],
 ) -> dict[str, str]:
-    tokens = tokenizer_dict.get("tokens")
-    if not isinstance(tokens, list):
-        return {}
-    token_set = {token for token in tokens if isinstance(token, str)}
     return {
         name: token
         for name, token in _GEMMA4_MODEL_SPECIFIC_TOKENS.items()
-        if token in token_set
+        if token in _tokens_present(tokenizer_dict, (token,))
     }
+
+
+def _append_additional_special_tokens(
+    tokenizer_config: dict[str, Any],
+    tokens: list[str],
+) -> bool:
+    if not tokens:
+        return False
+
+    existing = tokenizer_config.get("additional_special_tokens")
+    if existing is None:
+        additional_tokens: list[Any] = []
+    elif isinstance(existing, list):
+        additional_tokens = list(existing)
+    else:
+        additional_tokens = [existing]
+
+    existing_tokens: set[str] = set()
+    for item in additional_tokens:
+        if isinstance(item, str):
+            existing_tokens.add(item)
+        elif isinstance(item, dict) and isinstance(item.get("content"), str):
+            existing_tokens.add(item["content"])
+
+    changed = False
+    for token in tokens:
+        if token in existing_tokens:
+            continue
+        additional_tokens.append(token)
+        existing_tokens.add(token)
+        changed = True
+
+    if changed:
+        tokenizer_config["additional_special_tokens"] = additional_tokens
+    return changed
 
 
 def _patch_tokenizer_config_from_gguf(
@@ -175,30 +234,38 @@ def _patch_tokenizer_config_from_gguf(
     if not tokenizer_config_path.is_file():
         return
 
-    if architecture not in {"gemma4", "gemma4-assistant", "gemma4_assistant"}:
-        return
-
-    model_specific_tokens = _gemma4_model_specific_special_tokens(tokenizer_dict)
-    if not model_specific_tokens:
-        return
-
     try:
-        tokenizer_config = json.loads(
-            tokenizer_config_path.read_text(encoding="utf-8")
-        )
+        tokenizer_config = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
     except Exception as e:
         logger.debug("Failed to read tokenizer config %s: %s", tokenizer_config_path, e)
         return
 
-    tokenizer_config["processor_class"] = "Gemma4Processor"
-    tokenizer_config["model_specific_special_tokens"] = model_specific_tokens
-    for name, token in model_specific_tokens.items():
-        tokenizer_config.setdefault(name, token)
-    tokenizer_config.setdefault("extra_special_tokens", ["<|video|>"])
-    tokenizer_config_path.write_text(
-        json.dumps(tokenizer_config, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    changed = False
+    if architecture in {"gemma4", "gemma4-assistant", "gemma4_assistant"}:
+        model_specific_tokens = _gemma4_model_specific_special_tokens(tokenizer_dict)
+        if model_specific_tokens:
+            tokenizer_config["processor_class"] = "Gemma4Processor"
+            tokenizer_config["model_specific_special_tokens"] = model_specific_tokens
+            for name, token in model_specific_tokens.items():
+                tokenizer_config.setdefault(name, token)
+            tokenizer_config.setdefault("extra_special_tokens", ["<|video|>"])
+            changed = True
+
+    if architecture in {"qwen35moe", "qwen3_5_moe"}:
+        mm_tokens = _tokens_present(tokenizer_dict, _QWEN_MM_SPECIAL_TOKENS)
+        changed |= _append_additional_special_tokens(tokenizer_config, mm_tokens)
+        if "<|image_pad|>" in mm_tokens:
+            tokenizer_config.setdefault("image_token", "<|image_pad|>")
+            changed = True
+        if "<|video_pad|>" in mm_tokens:
+            tokenizer_config.setdefault("video_token", "<|video_pad|>")
+            changed = True
+
+    if changed:
+        tokenizer_config_path.write_text(
+            json.dumps(tokenizer_config, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _read_int(reader: gguf.GGUFReader, key: str) -> int | None:
@@ -224,7 +291,11 @@ def _copy_local_processor_sidecars(model_path: Path, cache_dir: Path) -> None:
             logger.debug("Failed to copy local GGUF sidecar %s: %s", source, e)
 
 
-def _write_json_if_missing(cache_dir: Path, filename: str, data: dict[str, Any]) -> None:
+def _write_json_if_missing(
+    cache_dir: Path,
+    filename: str,
+    data: dict[str, Any],
+) -> None:
     target = cache_dir / filename
     if target.is_file():
         return
@@ -244,6 +315,7 @@ def _read_mmproj_reader(model_path: Path) -> gguf.GGUFReader | None:
 
 
 def _qwen_image_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
+    # See _PROCESSOR_DEFAULT_SOURCE for the provenance of non-GGUF defaults.
     return {
         "do_convert_rgb": True,
         "do_normalize": True,
@@ -267,6 +339,7 @@ def _qwen_image_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
 
 
 def _qwen_video_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
+    # See _PROCESSOR_DEFAULT_SOURCE for the provenance of non-GGUF defaults.
     config = _qwen_image_processor_config(reader)
     config.update(
         {
@@ -287,6 +360,7 @@ def _qwen_video_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
 
 
 def _gemma4_image_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
+    # See _PROCESSOR_DEFAULT_SOURCE for the provenance of non-GGUF defaults.
     patch_size = _read_int(reader, "clip.vision.patch_size") or 16
     image_seq_length = _read_int(reader, "clip.vision.default_output_length") or 280
     return {
@@ -307,6 +381,7 @@ def _gemma4_image_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
 
 
 def _gemma4_video_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
+    # See _PROCESSOR_DEFAULT_SOURCE for the provenance of non-GGUF defaults.
     patch_size = _read_int(reader, "clip.vision.patch_size") or 16
     return {
         "do_convert_rgb": True,
@@ -328,6 +403,7 @@ def _gemma4_video_processor_config(reader: gguf.GGUFReader) -> dict[str, Any]:
 
 
 def _gemma4_feature_extractor_config() -> dict[str, Any]:
+    # See _PROCESSOR_DEFAULT_SOURCE for the provenance of non-GGUF defaults.
     return {
         "dither": 0.0,
         "feature_extractor_type": "Gemma4AudioFeatureExtractor",
@@ -426,7 +502,10 @@ def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
     if not check_gguf_file(model_path):
         return None
 
-    cache_dir = _tokenizer_cache_root() / _cache_key(model_path)
+    cache_key = _cache_key(model_path)
+    if cache_key is None:
+        return None
+    cache_dir = _tokenizer_cache_root() / cache_key
     if (cache_dir / "tokenizer.json").is_file():
         _materialize_processor_sidecars(model_path, cache_dir)
         return str(cache_dir)

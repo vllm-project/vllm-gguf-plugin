@@ -28,6 +28,15 @@ from .gguf_utils import (
 
 logger = init_logger(__name__)
 
+_GEMMA4_HF_DEFAULT_SOURCE = (
+    "Gemma4 HF config defaults observed in google/gemma-3n-E4B-it "
+    "and Unsloth Gemma4 GGUF sidecars"
+)
+_GEMMA4_DEFAULT_OUTPUT_LENGTH = 280
+_GEMMA4_POOLING_KERNEL_SIZE = 3
+_GEMMA4_POSITION_EMBEDDING_SIZE = 10240
+_GEMMA4_ASSISTANT_N_PREDICT = 1
+
 
 def _decode_string(value: Any) -> str | None:
     value = _gguf_scalar_value(value)
@@ -64,17 +73,6 @@ def _read_float(reader: gguf.GGUFReader, key: str) -> float | None:
     return None
 
 
-def _read_bool(reader: gguf.GGUFReader, key: str) -> bool | None:
-    value = _read(reader, key)
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    with suppress(TypeError, ValueError):
-        return bool(value)
-    return None
-
-
 def _read_list(reader: gguf.GGUFReader, key: str) -> list[Any] | None:
     value = _gguf_reader_value(reader, key)
     if value is None or isinstance(value, (str, bytes)):
@@ -98,7 +96,28 @@ def _token_count(reader: gguf.GGUFReader) -> int | None:
 
 
 def _has_lm_head(reader: gguf.GGUFReader) -> bool:
-    return any(getattr(tensor, "name", None) == "output.weight" for tensor in reader.tensors)
+    return any(
+        getattr(tensor, "name", None) == "output.weight" for tensor in reader.tensors
+    )
+
+
+def _read_int_or_warn_default(
+    reader: gguf.GGUFReader,
+    key: str,
+    default: int,
+    hf_field: str,
+) -> int:
+    value = _read_int(reader, key)
+    if value is not None:
+        return value
+    logger.warning_once(
+        "GGUF metadata key %s is missing; using %s=%s from %s.",
+        key,
+        hf_field,
+        default,
+        _GEMMA4_HF_DEFAULT_SOURCE,
+    )
+    return default
 
 
 def _non_none(values: dict[str, Any]) -> dict[str, Any]:
@@ -196,8 +215,23 @@ def _build_gemma4_vision_config(
 
     # GGUF mmproj metadata does not currently carry this Gemma4 HF field, but
     # the Transformers config class preserves it and vLLM requires it.
-    default_output_length = (
-        _read_int(reader, "clip.vision.default_output_length") or 280
+    default_output_length = _read_int_or_warn_default(
+        reader,
+        "clip.vision.default_output_length",
+        _GEMMA4_DEFAULT_OUTPUT_LENGTH,
+        "vision_config.default_output_length",
+    )
+    pooling_kernel_size = _read_int_or_warn_default(
+        reader,
+        "clip.vision.pooling_kernel_size",
+        _GEMMA4_POOLING_KERNEL_SIZE,
+        "vision_config.pooling_kernel_size",
+    )
+    position_embedding_size = _read_int_or_warn_default(
+        reader,
+        "clip.vision.position_embedding_size",
+        _GEMMA4_POSITION_EMBEDDING_SIZE,
+        "vision_config.position_embedding_size",
     )
 
     vision_config = _non_none(
@@ -216,8 +250,8 @@ def _build_gemma4_vision_config(
                 reader,
                 "clip.vision.attention.layer_norm_epsilon",
             ),
-            "pooling_kernel_size": 3,
-            "position_embedding_size": 10240,
+            "pooling_kernel_size": pooling_kernel_size,
+            "position_embedding_size": position_embedding_size,
             "standardize": True,
             "use_clipped_linears": False,
             "default_output_length": default_output_length,
@@ -242,6 +276,7 @@ def _qwen35_layer_types(
 def _build_qwen35moe_config(
     reader: gguf.GGUFReader,
     model_path: Path,
+    has_lm_head: bool,
 ) -> PretrainedConfig:
     prefix = "qwen35moe"
     block_count = _read_int(reader, f"{prefix}.block_count")
@@ -257,7 +292,7 @@ def _build_qwen35moe_config(
         partial_rotary_factor = rope_dim / head_dim
 
     full_attention_interval = _read_int(reader, f"{prefix}.full_attention_interval")
-    tie_word_embeddings = not _has_lm_head(reader)
+    tie_word_embeddings = not has_lm_head
     text_config = _non_none(
         {
             "model_type": "qwen3_5_moe_text",
@@ -267,9 +302,7 @@ def _build_qwen35moe_config(
             "num_hidden_layers": num_layers,
             "mtp_num_hidden_layers": nextn_layers or None,
             "num_nextn_predict_layers": nextn_layers or None,
-            "num_attention_heads": _read_int(
-                reader, f"{prefix}.attention.head_count"
-            ),
+            "num_attention_heads": _read_int(reader, f"{prefix}.attention.head_count"),
             "num_key_value_heads": _read_int(
                 reader, f"{prefix}.attention.head_count_kv"
             ),
@@ -279,9 +312,7 @@ def _build_qwen35moe_config(
                 reader, f"{prefix}.attention.layer_norm_rms_epsilon"
             ),
             "num_experts": _read_int(reader, f"{prefix}.expert_count"),
-            "num_experts_per_tok": _read_int(
-                reader, f"{prefix}.expert_used_count"
-            ),
+            "num_experts_per_tok": _read_int(reader, f"{prefix}.expert_used_count"),
             "moe_intermediate_size": _read_int(
                 reader, f"{prefix}.expert_feed_forward_length"
             ),
@@ -323,23 +354,30 @@ def _build_qwen35moe_config(
 def _build_gemma4_text_config(
     reader: gguf.GGUFReader,
     prefix: str,
+    has_lm_head: bool,
 ) -> dict[str, Any]:
     block_count = _read_int(reader, f"{prefix}.block_count")
     sliding_pattern = _read_list(reader, f"{prefix}.attention.sliding_window_pattern")
     head_count_kv = _gguf_reader_value(reader, f"{prefix}.attention.head_count_kv")
     rope_theta = _read_float(reader, f"{prefix}.rope.freq_base")
     rope_theta_swa = _read_float(reader, f"{prefix}.rope.freq_base_swa")
+    layer_types = _sliding_layer_types(
+        sliding_pattern,
+        num_layers=block_count,
+    )
 
     return _non_none(
         {
             "model_type": "gemma4_text",
             "vocab_size": _token_count(reader),
             "hidden_size": _read_int(reader, f"{prefix}.embedding_length"),
+            "hidden_size_per_layer_input": _read_int(
+                reader,
+                f"{prefix}.embedding_length_per_layer_input",
+            ),
             "intermediate_size": _read_int(reader, f"{prefix}.feed_forward_length"),
             "num_hidden_layers": block_count,
-            "num_attention_heads": _read_int(
-                reader, f"{prefix}.attention.head_count"
-            ),
+            "num_attention_heads": _read_int(reader, f"{prefix}.attention.head_count"),
             "num_key_value_heads": _gguf_sequence_edge(head_count_kv, first=True),
             "num_global_key_value_heads": _gguf_sequence_edge(
                 head_count_kv,
@@ -351,22 +389,14 @@ def _build_gemma4_text_config(
             "rms_norm_eps": _read_float(
                 reader, f"{prefix}.attention.layer_norm_rms_epsilon"
             ),
-            "sliding_window": _read_int(
-                reader, f"{prefix}.attention.sliding_window"
-            ),
-            "layer_types": _sliding_layer_types(
-                sliding_pattern,
-                num_layers=block_count,
-            ),
-            "attention_k_eq_v": _read_bool(
-                reader, f"{prefix}.attention.shared_kv_layers"
-            ),
+            "sliding_window": _read_int(reader, f"{prefix}.attention.sliding_window"),
+            "layer_types": layer_types,
+            "attention_k_eq_v": True,
             "attention_bias": False,
             "num_kv_shared_layers": _read_int(
                 reader, f"{prefix}.attention.shared_kv_layers"
             ),
-            "enable_moe_block": _read_int(reader, f"{prefix}.expert_count")
-            is not None,
+            "enable_moe_block": _read_int(reader, f"{prefix}.expert_count") is not None,
             "num_experts": _read_int(reader, f"{prefix}.expert_count"),
             "top_k_experts": _read_int(reader, f"{prefix}.expert_used_count"),
             "moe_intermediate_size": _read_int(
@@ -383,7 +413,7 @@ def _build_gemma4_text_config(
                     "rope_theta": rope_theta,
                 },
             },
-            "tie_word_embeddings": not _has_lm_head(reader),
+            "tie_word_embeddings": not has_lm_head,
             **_token_id_fields(reader),
         }
     )
@@ -392,8 +422,9 @@ def _build_gemma4_text_config(
 def _build_gemma4_config(
     reader: gguf.GGUFReader,
     model_path: Path,
+    has_lm_head: bool,
 ) -> PretrainedConfig:
-    text_config = _build_gemma4_text_config(reader, "gemma4")
+    text_config = _build_gemma4_text_config(reader, "gemma4", has_lm_head)
     mmproj_reader = _read_mmproj_reader(model_path)
     is_multimodal = mmproj_reader is not None
     architecture = (
@@ -409,25 +440,32 @@ def _build_gemma4_config(
     )
 
 
-def _build_gemma4_assistant_config(reader: gguf.GGUFReader) -> PretrainedConfig:
+def _build_gemma4_assistant_config(
+    reader: gguf.GGUFReader,
+    has_lm_head: bool,
+) -> PretrainedConfig:
     prefix = "gemma4-assistant"
-    text_config = _build_gemma4_text_config(reader, prefix)
+    text_config = _build_gemma4_text_config(reader, prefix, has_lm_head)
     text_config.pop("model_type", None)
     nextn_layers = _read_int(reader, f"{prefix}.nextn_predict_layers")
+    n_predict = _read_int_or_warn_default(
+        reader,
+        f"{prefix}.nextn_predict_count",
+        _GEMMA4_ASSISTANT_N_PREDICT,
+        "n_predict",
+    )
     text_config.update(
         _non_none(
             {
-                "model_type": "gemma4_assistant",
                 "backbone_hidden_size": _read_int(
                     reader, f"{prefix}.embedding_length_out"
                 ),
                 "num_nextn_predict_layers": nextn_layers,
                 "mtp_num_hidden_layers": nextn_layers,
-                "n_predict": 1,
+                "n_predict": n_predict,
             }
         )
     )
-    text_config.pop("model_type", None)
     return AutoConfig.for_model(
         "gemma4_assistant",
         **text_config,
@@ -450,6 +488,7 @@ _SIMPLE_ARCH_CONFIGS: dict[str, tuple[str, str]] = {
 def _build_simple_causal_config(
     reader: gguf.GGUFReader,
     architecture: str,
+    has_lm_head: bool,
 ) -> PretrainedConfig | None:
     mapped = _SIMPLE_ARCH_CONFIGS.get(architecture)
     if mapped is None:
@@ -463,9 +502,7 @@ def _build_simple_causal_config(
             "hidden_size": _read_int(reader, f"{prefix}.embedding_length"),
             "intermediate_size": _read_int(reader, f"{prefix}.feed_forward_length"),
             "num_hidden_layers": _read_int(reader, f"{prefix}.block_count"),
-            "num_attention_heads": _read_int(
-                reader, f"{prefix}.attention.head_count"
-            ),
+            "num_attention_heads": _read_int(reader, f"{prefix}.attention.head_count"),
             "num_key_value_heads": _read_int(
                 reader, f"{prefix}.attention.head_count_kv"
             ),
@@ -475,7 +512,7 @@ def _build_simple_causal_config(
                 reader, f"{prefix}.attention.layer_norm_rms_epsilon"
             ),
             "rope_theta": _read_float(reader, f"{prefix}.rope.freq_base"),
-            "tie_word_embeddings": not _has_lm_head(reader),
+            "tie_word_embeddings": not has_lm_head,
             **_token_id_fields(reader),
         }
     )
@@ -495,15 +532,16 @@ def build_config_from_gguf(model: str | PathLike) -> PretrainedConfig | None:
         return None
 
     architecture = _gguf_architecture(reader)
+    has_lm_head = _has_lm_head(reader)
     try:
         if architecture == "qwen35moe":
-            return _build_qwen35moe_config(reader, model_path)
+            return _build_qwen35moe_config(reader, model_path, has_lm_head)
         if architecture == "gemma4":
-            return _build_gemma4_config(reader, model_path)
+            return _build_gemma4_config(reader, model_path, has_lm_head)
         if architecture == "gemma4-assistant":
-            return _build_gemma4_assistant_config(reader)
+            return _build_gemma4_assistant_config(reader, has_lm_head)
         if architecture is not None:
-            return _build_simple_causal_config(reader, architecture)
+            return _build_simple_causal_config(reader, architecture, has_lm_head)
     except Exception as e:
         logger.debug(
             "Failed to build native GGUF config for %s (%s): %s",

@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 import torch
 import vllm.config.model as model_config_module
 import vllm.engine.arg_utils as arg_utils_module
@@ -278,9 +279,7 @@ def test_gguf_row_parallel_weight_loader_v2_omits_empty_shard_id(monkeypatch):
     monkeypatch.setattr(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
-    monkeypatch.setattr(
-        gguf_params_module, "get_tensor_model_parallel_rank", lambda: 0
-    )
+    monkeypatch.setattr(gguf_params_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         gguf_params_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
@@ -293,9 +292,7 @@ def test_gguf_row_parallel_weight_loader_v2_omits_empty_shard_id(monkeypatch):
         disable_tp=True,
     )
 
-    layer.qweight.weight_loader(
-        layer.qweight, torch.ones((8, 4), dtype=torch.uint8)
-    )
+    layer.qweight.weight_loader(layer.qweight, torch.ones((8, 4), dtype=torch.uint8))
 
     assert torch.equal(layer.qweight.data, torch.ones((8, 4), dtype=torch.uint8))
 
@@ -399,6 +396,8 @@ def test_gemma4_mtp_gguf_mappings():
     assert mapping["nextn.pre_projection.weight"] == "model.pre_projection.weight"
     assert mapping["nextn.post_projection.weight"] == "model.post_projection.weight"
     assert mapping["blk.1.attn_q.weight"] == ("model.layers.1.self_attn.q_proj.weight")
+    assert "blk.1.attn_k.weight" not in mapping
+    assert "blk.1.attn_v.weight" not in mapping
     assert mapping["blk.1.ffn_gate.weight"] == ("model.layers.1.mlp.gate_proj.weight")
     assert mapping["blk.1.layer_output_scale.weight"] == "model.layers.1.layer_scalar"
 
@@ -529,6 +528,7 @@ def test_build_gemma4_mm_config_from_gguf_metadata(tmp_path, monkeypatch):
             "gemma4.block_count": 4,
             "gemma4.context_length": 262144,
             "gemma4.embedding_length": 2816,
+            "gemma4.embedding_length_per_layer_input": 0,
             "gemma4.feed_forward_length": 8192,
             "gemma4.rope.freq_base": 1000000.0,
             "gemma4.rope.freq_base_swa": 10000.0,
@@ -567,6 +567,8 @@ def test_build_gemma4_mm_config_from_gguf_metadata(tmp_path, monkeypatch):
     assert config is not None
     assert config.model_type == "gemma4"
     assert config.architectures == ["Gemma4ForConditionalGeneration"]
+    assert config.text_config.hidden_size_per_layer_input == 0
+    assert config.text_config.attention_k_eq_v is True
     assert config.vision_config is not None
     assert config.vision_config.hidden_size == 1152
     assert config.vision_config.num_hidden_layers == 27
@@ -597,6 +599,7 @@ def test_build_gemma4_assistant_config_from_gguf_metadata(tmp_path, monkeypatch)
             "gemma4-assistant.block_count": 4,
             "gemma4-assistant.context_length": 262144,
             "gemma4-assistant.embedding_length": 1024,
+            "gemma4-assistant.embedding_length_per_layer_input": 0,
             "gemma4-assistant.embedding_length_out": 2816,
             "gemma4-assistant.feed_forward_length": 8192,
             "gemma4-assistant.nextn_predict_layers": 4,
@@ -616,7 +619,10 @@ def test_build_gemma4_assistant_config_from_gguf_metadata(tmp_path, monkeypatch)
     assert config.model_type == "gemma4_assistant"
     assert config.architectures == ["Gemma4MTPModel"]
     assert config.hidden_size == 1024
+    assert config.hidden_size_per_layer_input == 0
+    assert config.attention_k_eq_v is True
     assert config.backbone_hidden_size == 2816
+    assert config.n_predict == 1
     assert config.num_key_value_heads == 8
     assert config.num_global_key_value_heads == 2
     assert config.layer_types == [
@@ -635,10 +641,23 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     mmproj_path = tmp_path / "mmproj.gguf"
     gguf_path.write_bytes(b"GGUF")
     mmproj_path.write_bytes(b"GGUF")
+    qwen_mm_tokens = [
+        "<|vision_start|>",
+        "<|vision_end|>",
+        "<|vision_pad|>",
+        "<|image_pad|>",
+        "<|video_pad|>",
+    ]
     main_reader = _FakeGGUFReader(
         {
             "general.architecture": "qwen35moe",
-            "tokenizer.ggml.tokens": ["<pad>", "<bos>", "<eos>", "hello"],
+            "tokenizer.ggml.tokens": [
+                "<pad>",
+                "<bos>",
+                "<eos>",
+                "hello",
+                *qwen_mm_tokens,
+            ],
             "tokenizer.ggml.model": "gpt2",
             "tokenizer.ggml.merges": ["h ello"],
             "tokenizer.ggml.bos_token_id": 1,
@@ -711,18 +730,28 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
         (tokenizer_cache / "preprocessor_config.json").read_text(encoding="utf-8")
     )
     video_config = json.loads(
-        (tokenizer_cache / "video_preprocessor_config.json").read_text(
-            encoding="utf-8"
-        )
+        (tokenizer_cache / "video_preprocessor_config.json").read_text(encoding="utf-8")
     )
     assert processor_config["processor_class"] == "Qwen3VLProcessor"
     assert processor_config["image_processor"]["patch_size"] == 16
     assert preprocessor_config["image_processor_type"] == "Qwen2VLImageProcessor"
     assert preprocessor_config["merge_size"] == 2
     assert video_config["video_processor_type"] == "Qwen3VLVideoProcessor"
+    tokenizer_config = json.loads(
+        (tokenizer_cache / "tokenizer_config.json").read_text(encoding="utf-8")
+    )
+    assert tokenizer_config["additional_special_tokens"] == qwen_mm_tokens
+    assert tokenizer_config["image_token"] == "<|image_pad|>"
+    assert tokenizer_config["video_token"] == "<|video_pad|>"
     assert calls[0][0] == "convert"
     assert calls[0][1] == "qwen3_moe"
-    assert calls[0][2]["tokens"] == ["<pad>", "<bos>", "<eos>", "hello"]
+    assert calls[0][2]["tokens"] == [
+        "<pad>",
+        "<bos>",
+        "<eos>",
+        "hello",
+        *qwen_mm_tokens,
+    ]
     assert calls[1][1]["bos_token"] == "<bos>"
     assert calls[1][1]["eos_token"] == "<eos>"
     assert calls[1][1]["pad_token"] == "<pad>"
@@ -738,6 +767,30 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     (tokenizer_cache / "preprocessor_config.json").unlink()
     assert build_tokenizer_from_gguf(gguf_path) == tokenizer_path
     assert (tokenizer_cache / "preprocessor_config.json").is_file()
+
+
+def test_build_tokenizer_from_gguf_returns_none_when_cache_key_stat_fails(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "missing.gguf"
+
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "check_gguf_file",
+        lambda model: True,
+    )
+
+    def fail_reader(*args, **kwargs):
+        raise AssertionError("stat failure must return before reading GGUF")
+
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module.gguf,
+        "GGUFReader",
+        fail_reader,
+    )
+
+    assert build_tokenizer_from_gguf(gguf_path) is None
 
 
 def test_build_tokenizer_from_gguf_copies_local_sidecars_first(
@@ -796,9 +849,7 @@ def test_build_tokenizer_from_gguf_copies_local_sidecars_first(
 
     assert tokenizer_path is not None
     copied = json.loads(
-        (Path(tokenizer_path) / "preprocessor_config.json").read_text(
-            encoding="utf-8"
-        )
+        (Path(tokenizer_path) / "preprocessor_config.json").read_text(encoding="utf-8")
     )
     assert copied == local_preprocessor
 
@@ -865,9 +916,7 @@ def test_build_tokenizer_from_gguf_patches_gemma4_special_tokens(
 
     assert tokenizer_path is not None
     tokenizer_config = json.loads(
-        (Path(tokenizer_path) / "tokenizer_config.json").read_text(
-            encoding="utf-8"
-        )
+        (Path(tokenizer_path) / "tokenizer_config.json").read_text(encoding="utf-8")
     )
     assert tokenizer_config["processor_class"] == "Gemma4Processor"
     assert tokenizer_config["model_specific_special_tokens"]["image_token"] == (
@@ -1029,7 +1078,7 @@ def test_qwen3_5_mtp_gguf_mappings():
     config = PretrainedConfig(
         model_type="qwen3_5_moe",
         num_hidden_layers=40,
-        mtp_num_hidden_layers=1,
+        mtp_num_hidden_layers=2,
     )
     mapping: dict[str, str] = {}
     sideload_params = []
@@ -1038,6 +1087,7 @@ def test_qwen3_5_mtp_gguf_mappings():
 
     assert mapping["blk.40.attn_q.weight"] == ("mtp.layers.0.self_attn.q_proj.weight")
     assert mapping["blk.40.attn_k.weight"] == ("mtp.layers.0.self_attn.k_proj.weight")
+    assert mapping["blk.41.attn_q.weight"] == ("mtp.layers.1.self_attn.q_proj.weight")
     assert mapping["blk.40.ffn_gate_inp.weight"] == "mtp.layers.0.mlp.gate.weight"
     assert mapping["blk.40.ffn_gate_inp_shexp.weight"] == (
         "mtp.layers.0.mlp.shared_expert_gate.weight"
@@ -1047,6 +1097,7 @@ def test_qwen3_5_mtp_gguf_mappings():
     )
     assert mapping["blk.40.nextn.eh_proj.weight"] == "mtp.fc.weight"
     assert mapping["blk.40.nextn.shared_head_norm.weight"] == "mtp.norm.weight"
+    assert "blk.41.nextn.eh_proj.weight" not in mapping
     assert sideload_params[0].fullmatch("mtp.layers.0.mlp.experts.15.gate_proj.weight")
 
 
@@ -1536,7 +1587,7 @@ def test_gguf_qkv_shards_are_padded_in_qkv_order(monkeypatch):
 
 def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
     if not torch.cuda.is_available():
-        return
+        pytest.skip("CUDA is required for device placement test")
 
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
@@ -1683,3 +1734,114 @@ def test_gguf_iq4_xs_batched_moe_uses_mmq_v2(monkeypatch):
         (torch.Size([65, 4]), torch.Size([4, 8, 4]), 8, 2, 65),
         (torch.Size([130, 4]), torch.Size([4, 4, 4]), 4, 1, 130),
     ]
+
+
+def _make_iq4_xs_weight(
+    num_rows: int,
+    seed: int,
+    device: torch.device,
+) -> torch.Tensor:
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(seed)
+    weight = torch.randint(0, 256, (num_rows, 136), dtype=torch.uint8, generator=gen)
+    # block_iq4_xs layout:
+    #   half d, uint16 scales_h, uint8 scales_l[4], uint8 qs[128].
+    # Use d=1 and 6-bit sub-block scale 33, which decodes to a small positive
+    # scale while still exercising the IQ4_XS scale unpacking path.
+    weight[:, 0:2] = torch.tensor([0x00, 0x3C], dtype=torch.uint8)
+    weight[:, 2:4] = torch.tensor([0xAA, 0xAA], dtype=torch.uint8)
+    weight[:, 4:8] = 0x11
+    return weight.to(device=device)
+
+
+def test_gguf_iq4_xs_batched_moe_matches_slow_reference_cuda():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for GGUF MoE kernel comparison")
+    if not (
+        hasattr(torch.ops, "_C_gguf")
+        and hasattr(torch.ops._C_gguf, "ggml_moe_a8_iq4_xs_mmq_v2")
+        and hasattr(torch.ops._C_gguf, "ggml_mul_mat_vec_a8")
+    ):
+        pytest.skip("GGUF CUDA extension with IQ4_XS MoE v2 is not available")
+
+    from vllm.model_executor.layers.fused_moe.activation import (
+        MoEActivation,
+        apply_moe_activation,
+    )
+
+    from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
+    from vllm_gguf_plugin.quantization.linear import _fused_mul_mat_gguf
+
+    device = torch.device("cuda")
+    dtype = torch.float16
+    num_tokens = 65
+    hidden_size = 256
+    intermediate_size = 8
+    num_experts = 4
+    top_k = 2
+    torch.manual_seed(0)
+
+    x = torch.randn((num_tokens, hidden_size), dtype=dtype, device=device) * 0.05
+    w1 = torch.stack(
+        [
+            _make_iq4_xs_weight(intermediate_size * 2, 100 + expert, device)
+            for expert in range(num_experts)
+        ]
+    )
+    w2 = torch.stack(
+        [
+            _make_iq4_xs_weight(hidden_size, 200 + expert, device)
+            for expert in range(num_experts)
+        ]
+    )
+    topk_ids = torch.tensor(
+        [
+            [token % num_experts, (token + 1) % num_experts]
+            for token in range(num_tokens)
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    topk_weights = torch.tensor([0.65, 0.35], dtype=dtype, device=device).repeat(
+        num_tokens,
+        1,
+    )
+
+    out = _fused_moe_gguf(
+        x,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        WeightType.IQ4_XS,
+        WeightType.IQ4_XS,
+        "silu",
+    )
+
+    activation_enum = MoEActivation.from_str("silu")
+    ref = torch.empty_like(out)
+    for token_idx in range(num_tokens):
+        token_out = None
+        token_x = x[token_idx : token_idx + 1]
+        for route_idx in range(top_k):
+            expert_idx = int(topk_ids[token_idx, route_idx].item())
+            hidden = _fused_mul_mat_gguf(
+                token_x,
+                w1[expert_idx],
+                WeightType.IQ4_XS,
+            )
+            activated = torch.empty(
+                (1, intermediate_size),
+                dtype=hidden.dtype,
+                device=device,
+            )
+            apply_moe_activation(activation_enum, activated, hidden)
+            projected = _fused_mul_mat_gguf(
+                activated,
+                w2[expert_idx],
+                WeightType.IQ4_XS,
+            ).mul(topk_weights[token_idx, route_idx])
+            token_out = projected if token_out is None else token_out + projected
+        ref[token_idx] = token_out
+
+    torch.testing.assert_close(out, ref, atol=5e-1, rtol=5e-2)

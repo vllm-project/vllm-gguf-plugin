@@ -5,6 +5,7 @@ from pathlib import Path
 from transformers import PretrainedConfig
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import HFConfigParser
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.repo_utils import file_or_path_exists
@@ -19,6 +20,8 @@ from .gguf_utils import (
     resolve_gguf_config_source,
     split_remote_gguf,
 )
+
+logger = init_logger(__name__)
 
 
 class GGUFConfigParser(ConfigParserBase):
@@ -57,6 +60,13 @@ class GGUFConfigParser(ConfigParserBase):
                 )
                 gguf_repo = gguf_path.parent
                 if resolved_model != gguf_repo:
+                    logger.warning_once(
+                        "Disabling `trust_remote_code` because GGUF metadata "
+                        "redirected config loading from %s to %s. Pass an "
+                        "explicit `--hf-config-path` to opt in.",
+                        gguf_repo,
+                        resolved_model,
+                    )
                     trust_remote_code = False
                     revision = None
                 elif not file_or_path_exists(
@@ -68,6 +78,13 @@ class GGUFConfigParser(ConfigParserBase):
             elif is_remote_gguf(model):
                 repo_id, quant_type = split_remote_gguf(model)
                 if resolved_model != repo_id:
+                    logger.warning_once(
+                        "Disabling `trust_remote_code` because GGUF metadata "
+                        "redirected config loading from %s to %s. Pass an "
+                        "explicit `--hf-config-path` to opt in.",
+                        repo_id,
+                        resolved_model,
+                    )
                     trust_remote_code = False
                     revision = None
                 elif not file_or_path_exists(
