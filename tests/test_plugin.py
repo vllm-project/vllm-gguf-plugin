@@ -936,6 +936,12 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
         "<|image_pad|>",
         "<|video_pad|>",
     ]
+    qwen_control_tokens = [
+        "<tool_call>",
+        "</tool_call>",
+        "<think>",
+        "</think>",
+    ]
     main_reader = _FakeGGUFReader(
         {
             "general.architecture": "qwen35moe",
@@ -945,6 +951,17 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
                 "<eos>",
                 "hello",
                 *qwen_mm_tokens,
+                *qwen_control_tokens,
+                "[PAD000]",
+            ],
+            "tokenizer.ggml.token_type": [
+                3,
+                3,
+                3,
+                1,
+                *([3] * len(qwen_mm_tokens)),
+                *([4] * len(qwen_control_tokens)),
+                5,
             ],
             "tokenizer.ggml.model": "gpt2",
             "tokenizer.ggml.merges": ["h ello"],
@@ -1028,7 +1045,10 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     tokenizer_config = json.loads(
         (tokenizer_cache / "tokenizer_config.json").read_text(encoding="utf-8")
     )
-    assert tokenizer_config["additional_special_tokens"] == qwen_mm_tokens
+    assert tokenizer_config["additional_special_tokens"] == [
+        *qwen_mm_tokens,
+        *qwen_control_tokens,
+    ]
     assert tokenizer_config["image_token"] == "<|image_pad|>"
     assert tokenizer_config["video_token"] == "<|video_pad|>"
     assert calls[0][0] == "convert"
@@ -1039,6 +1059,17 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
         "<eos>",
         "hello",
         *qwen_mm_tokens,
+        *qwen_control_tokens,
+        "[PAD000]",
+    ]
+    assert calls[0][2]["token_type"] == [
+        3,
+        3,
+        3,
+        1,
+        *([3] * len(qwen_mm_tokens)),
+        *([4] * len(qwen_control_tokens)),
+        5,
     ]
     assert calls[1][1]["bos_token"] == "<bos>"
     assert calls[1][1]["eos_token"] == "<eos>"
@@ -1052,9 +1083,17 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
         "convert_gguf_tokenizer",
         fail_convert,
     )
+    (tokenizer_cache / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     (tokenizer_cache / "preprocessor_config.json").unlink()
     assert build_tokenizer_from_gguf(gguf_path) == tokenizer_path
     assert (tokenizer_cache / "preprocessor_config.json").is_file()
+    cached_tokenizer_config = json.loads(
+        (tokenizer_cache / "tokenizer_config.json").read_text(encoding="utf-8")
+    )
+    assert cached_tokenizer_config["additional_special_tokens"] == [
+        *qwen_mm_tokens,
+        *qwen_control_tokens,
+    ]
 
 
 def test_build_tokenizer_from_qwen35_gguf_uses_dense_arch_alias(

@@ -101,6 +101,9 @@ def _extract_tokenizer_dict(reader: gguf.GGUFReader) -> dict[str, Any]:
         value = _gguf_reader_value(reader, f"tokenizer.{gguf_suffix}")
         if value is not None:
             tokenizer_dict[hf_name] = _decode_sequence(value)
+    token_type_value = _gguf_reader_value(reader, "tokenizer.ggml.token_type")
+    if token_type_value is not None:
+        tokenizer_dict["token_type"] = _decode_sequence(token_type_value)
     return tokenizer_dict
 
 
@@ -228,6 +231,30 @@ def _append_additional_special_tokens(
     return changed
 
 
+_GGUF_SPECIAL_TOKEN_TYPES = {
+    int(gguf.TokenType.CONTROL),
+    int(gguf.TokenType.USER_DEFINED),
+}
+
+
+def _gguf_special_control_tokens(tokenizer_dict: dict[str, Any]) -> list[str]:
+    """Restore GGUF control/user-defined tokens as HF special tokens."""
+    tokens = tokenizer_dict.get("tokens")
+    token_types = tokenizer_dict.get("token_type")
+    if not isinstance(tokens, list) or not isinstance(token_types, list):
+        return []
+
+    named_special_tokens = set(_special_token_kwargs(tokenizer_dict).values())
+    special_tokens: list[str] = []
+    for token, token_type in zip(tokens, token_types, strict=False):
+        if not isinstance(token, str) or token in named_special_tokens:
+            continue
+        with suppress(TypeError, ValueError):
+            if int(token_type) in _GGUF_SPECIAL_TOKEN_TYPES:
+                special_tokens.append(token)
+    return special_tokens
+
+
 def _patch_tokenizer_config_from_gguf(
     cache_dir: Path,
     architecture: str,
@@ -244,6 +271,11 @@ def _patch_tokenizer_config_from_gguf(
         return
 
     changed = False
+    changed |= _append_additional_special_tokens(
+        tokenizer_config,
+        _gguf_special_control_tokens(tokenizer_dict),
+    )
+
     if architecture in {"gemma4", "gemma4-assistant", "gemma4_assistant"}:
         model_specific_tokens = _gemma4_model_specific_special_tokens(tokenizer_dict)
         if model_specific_tokens:
