@@ -231,8 +231,12 @@ def _add_gemma4_gguf_mappings(
     sideload_params: list[re.Pattern],
 ) -> None:
     text_config = config.get_text_config()
+    uses_multimodal_layout = _uses_multimodal_weight_layout(config)
+    layer_prefix_base = (
+        "model.language_model.layers" if uses_multimodal_layout else "model.layers"
+    )
     for idx in range(text_config.num_hidden_layers):
-        layer_prefix = f"model.language_model.layers.{idx}"
+        layer_prefix = f"{layer_prefix_base}.{idx}"
         gguf_to_hf_name_map[f"blk.{idx}.layer_output_scale.weight"] = (
             f"{layer_prefix}.layer_scalar"
         )
@@ -263,75 +267,74 @@ def _add_gemma4_gguf_mappings(
         sideload_params.extend(
             [
                 regex.compile(
-                    f"model\\.language_model\\.layers\\.{idx}"
-                    r"\.experts\.(gate_up_proj|down_proj)(\.weight)?"
-                ),
-                regex.compile(
-                    f"model\\.layers\\.{idx}"
+                    f"{re.escape(layer_prefix_base)}\\.{idx}"
                     r"\.experts\.(gate_up_proj|down_proj)(\.weight)?"
                 ),
             ]
         )
 
-    gguf_to_hf_name_map.update(
-        {
-            "v.std_bias": "model.vision_tower.std_bias",
-            "v.std_scale": "model.vision_tower.std_scale",
-            "v.patch_embd.weight": (
-                "model.vision_tower.patch_embedder.input_proj.weight"
-            ),
-            "v.position_embd.weight": (
-                "model.vision_tower.patch_embedder.position_embedding_table"
-            ),
-            "mm.input_projection.weight": (
-                "model.embed_vision.embedding_projection.weight"
-            ),
-        }
-    )
-
-    for idx in range(_get_vision_num_layers(config)):
-        vision_prefix = f"model.vision_tower.encoder.layers.{idx}"
+    if uses_multimodal_layout:
         gguf_to_hf_name_map.update(
             {
-                f"v.blk.{idx}.attn_q.weight": (
-                    f"{vision_prefix}.self_attn.q_proj.linear.weight"
+                "v.std_bias": "model.vision_tower.std_bias",
+                "v.std_scale": "model.vision_tower.std_scale",
+                "v.patch_embd.weight": (
+                    "model.vision_tower.patch_embedder.input_proj.weight"
                 ),
-                f"v.blk.{idx}.attn_k.weight": (
-                    f"{vision_prefix}.self_attn.k_proj.linear.weight"
+                "v.position_embd.weight": (
+                    "model.vision_tower.patch_embedder.position_embedding_table"
                 ),
-                f"v.blk.{idx}.attn_v.weight": (
-                    f"{vision_prefix}.self_attn.v_proj.linear.weight"
-                ),
-                f"v.blk.{idx}.attn_out.weight": (
-                    f"{vision_prefix}.self_attn.o_proj.linear.weight"
-                ),
-                f"v.blk.{idx}.attn_q_norm.weight": (
-                    f"{vision_prefix}.self_attn.q_norm.weight"
-                ),
-                f"v.blk.{idx}.attn_k_norm.weight": (
-                    f"{vision_prefix}.self_attn.k_norm.weight"
-                ),
-                f"v.blk.{idx}.ffn_gate.weight": (
-                    f"{vision_prefix}.mlp.gate_proj.linear.weight"
-                ),
-                f"v.blk.{idx}.ffn_up.weight": (
-                    f"{vision_prefix}.mlp.up_proj.linear.weight"
-                ),
-                f"v.blk.{idx}.ffn_down.weight": (
-                    f"{vision_prefix}.mlp.down_proj.linear.weight"
-                ),
-                f"v.blk.{idx}.ln1.weight": (f"{vision_prefix}.input_layernorm.weight"),
-                f"v.blk.{idx}.attn_post_norm.weight": (
-                    f"{vision_prefix}.post_attention_layernorm.weight"
-                ),
-                f"v.blk.{idx}.ln2.weight": (
-                    f"{vision_prefix}.pre_feedforward_layernorm.weight"
-                ),
-                f"v.blk.{idx}.ffn_post_norm.weight": (
-                    f"{vision_prefix}.post_feedforward_layernorm.weight"
+                "mm.input_projection.weight": (
+                    "model.embed_vision.embedding_projection.weight"
                 ),
             }
         )
+
+        for idx in range(_get_vision_num_layers(config)):
+            vision_prefix = f"model.vision_tower.encoder.layers.{idx}"
+            gguf_to_hf_name_map.update(
+                {
+                    f"v.blk.{idx}.attn_q.weight": (
+                        f"{vision_prefix}.self_attn.q_proj.linear.weight"
+                    ),
+                    f"v.blk.{idx}.attn_k.weight": (
+                        f"{vision_prefix}.self_attn.k_proj.linear.weight"
+                    ),
+                    f"v.blk.{idx}.attn_v.weight": (
+                        f"{vision_prefix}.self_attn.v_proj.linear.weight"
+                    ),
+                    f"v.blk.{idx}.attn_out.weight": (
+                        f"{vision_prefix}.self_attn.o_proj.linear.weight"
+                    ),
+                    f"v.blk.{idx}.attn_q_norm.weight": (
+                        f"{vision_prefix}.self_attn.q_norm.weight"
+                    ),
+                    f"v.blk.{idx}.attn_k_norm.weight": (
+                        f"{vision_prefix}.self_attn.k_norm.weight"
+                    ),
+                    f"v.blk.{idx}.ffn_gate.weight": (
+                        f"{vision_prefix}.mlp.gate_proj.linear.weight"
+                    ),
+                    f"v.blk.{idx}.ffn_up.weight": (
+                        f"{vision_prefix}.mlp.up_proj.linear.weight"
+                    ),
+                    f"v.blk.{idx}.ffn_down.weight": (
+                        f"{vision_prefix}.mlp.down_proj.linear.weight"
+                    ),
+                    f"v.blk.{idx}.ln1.weight": (
+                        f"{vision_prefix}.input_layernorm.weight"
+                    ),
+                    f"v.blk.{idx}.attn_post_norm.weight": (
+                        f"{vision_prefix}.post_attention_layernorm.weight"
+                    ),
+                    f"v.blk.{idx}.ln2.weight": (
+                        f"{vision_prefix}.pre_feedforward_layernorm.weight"
+                    ),
+                    f"v.blk.{idx}.ffn_post_norm.weight": (
+                        f"{vision_prefix}.post_feedforward_layernorm.weight"
+                    ),
+                }
+            )
 
 
 class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
@@ -427,6 +430,8 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             gguf_to_hf_name_map.update(
                 {
                     "v.patch_embd.weight.1": ("model.visual.patch_embed.proj.weight.1"),
+                    "v.post_ln.weight": "model.visual.merger.norm.weight",
+                    "v.post_ln.bias": "model.visual.merger.norm.bias",
                     "mm.0.weight": "model.visual.merger.linear_fc1.weight",
                     "mm.0.bias": "model.visual.merger.linear_fc1.bias",
                     "mm.2.weight": "model.visual.merger.linear_fc2.weight",

@@ -445,6 +445,48 @@ def test_gemma4_gguf_mappings_match_current_hf_names():
     )
 
 
+def test_gemma4_text_only_does_not_add_vision_projector_mappings():
+    config = PretrainedConfig(
+        architectures=["Gemma4ForCausalLM"],
+        model_type="gemma4",
+        num_hidden_layers=2,
+    )
+    mapping: dict[str, str] = {}
+    sideload_params = []
+
+    _add_gemma4_gguf_mappings(config, mapping, sideload_params)
+
+    assert mapping["blk.1.ffn_gate_inp.scale"] == (
+        "model.layers.1.router.scale"
+    )
+    assert mapping["blk.1.ffn_gate_up_exps.weight"] == (
+        "model.layers.1.experts.gate_up_proj.weight"
+    )
+    assert "v.std_bias" not in mapping
+    assert "v.patch_embd.weight" not in mapping
+    assert "mm.input_projection.weight" not in mapping
+    assert "v.blk.1.ln1.weight" not in mapping
+
+
+def test_gemma4_causal_lm_with_vision_config_uses_text_layout():
+    config = PretrainedConfig(
+        architectures=["Gemma4ForCausalLM"],
+        model_type="gemma4",
+        num_hidden_layers=2,
+    )
+    config.vision_config = PretrainedConfig(num_hidden_layers=2)
+    mapping: dict[str, str] = {}
+    sideload_params = []
+
+    _add_gemma4_gguf_mappings(config, mapping, sideload_params)
+
+    assert mapping["blk.1.ffn_gate_inp.scale"] == (
+        "model.layers.1.router.scale"
+    )
+    assert "v.std_bias" not in mapping
+    assert "v.patch_embd.weight" not in mapping
+
+
 def test_gemma4_adapter_flattens_patch_embed_weight():
     adapter = Gemma4GGUFAdapter(PretrainedConfig(model_type="gemma4"))
     weight = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
@@ -1390,6 +1432,8 @@ def test_qwen3_5_dense_multimodal_maps_visual_merger(monkeypatch):
     assert mapping["v.patch_embd.weight.1"] == (
         "model.visual.patch_embed.proj.weight.1"
     )
+    assert mapping["v.post_ln.weight"] == "model.visual.merger.norm.weight"
+    assert mapping["v.post_ln.bias"] == "model.visual.merger.norm.bias"
     assert mapping["mm.0.weight"] == "model.visual.merger.linear_fc1.weight"
     assert mapping["mm.0.bias"] == "model.visual.merger.linear_fc1.bias"
     assert mapping["mm.2.weight"] == "model.visual.merger.linear_fc2.weight"
@@ -1406,6 +1450,7 @@ def test_qwen3_5_text_only_does_not_add_visual_merger_mappings(monkeypatch):
     mapping = _build_qwen3_5_test_name_map(monkeypatch, config, [])
 
     assert "v.patch_embd.weight.1" not in mapping
+    assert "v.post_ln.weight" not in mapping
     assert "mm.0.weight" not in mapping
     assert "mm.2.weight" not in mapping
 
