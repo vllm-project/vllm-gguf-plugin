@@ -28,11 +28,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
-from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
-from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
-import vllm_gguf_plugin.gguf_config_builder as gguf_config_builder_module
 import vllm_gguf_plugin.gguf_tokenizer_builder as gguf_tokenizer_builder_module
 import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 import vllm_gguf_plugin.plugin as gguf_plugin_module
@@ -41,7 +38,6 @@ import vllm_gguf_plugin.quantization.params as gguf_params_module
 import vllm_gguf_plugin.weights_adapter.default as default_adapter_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
-from vllm_gguf_plugin.gguf_config_builder import build_config_from_gguf
 from vllm_gguf_plugin.gguf_tokenizer_builder import build_tokenizer_from_gguf
 from vllm_gguf_plugin.gguf_utils import (
     _gguf_sequence_edge,
@@ -561,396 +557,6 @@ class _FakeGGUFReader:
 
     def get_field(self, key):
         return self.fields.get(key)
-
-
-def test_build_qwen35moe_config_from_gguf_metadata(tmp_path, monkeypatch):
-    gguf_path = tmp_path / "model.gguf"
-    mmproj_path = tmp_path / "mmproj.gguf"
-    gguf_path.write_bytes(b"GGUF")
-    mmproj_path.write_bytes(b"GGUF")
-    main_reader = _FakeGGUFReader(
-        {
-            "general.architecture": "qwen35moe",
-            "tokenizer.ggml.tokens": ["a", "b", "c"],
-            "tokenizer.ggml.bos_token_id": 1,
-            "tokenizer.ggml.eos_token_id": 2,
-            "tokenizer.ggml.padding_token_id": 0,
-            "qwen35moe.attention.head_count": 16,
-            "qwen35moe.attention.head_count_kv": 2,
-            "qwen35moe.attention.key_length": 256,
-            "qwen35moe.attention.layer_norm_rms_epsilon": 1e-6,
-            "qwen35moe.block_count": 40,
-            "qwen35moe.context_length": 262144,
-            "qwen35moe.embedding_length": 2048,
-            "qwen35moe.expert_count": 256,
-            "qwen35moe.expert_feed_forward_length": 512,
-            "qwen35moe.expert_shared_feed_forward_length": 512,
-            "qwen35moe.expert_used_count": 8,
-            "qwen35moe.full_attention_interval": 4,
-            "qwen35moe.rope.dimension_count": 64,
-            "qwen35moe.rope.dimension_sections": [11, 11, 10, 0],
-            "qwen35moe.rope.freq_base": 10000000.0,
-        }
-    )
-    mmproj_reader = _FakeGGUFReader(
-        {
-            "general.architecture": "clip",
-            "general.type": "mmproj",
-            "clip.vision.projection_dim": 2048,
-            "clip.vision.image_size": 768,
-            "clip.vision.patch_size": 16,
-            "clip.vision.embedding_length": 1152,
-            "clip.vision.feed_forward_length": 4304,
-            "clip.vision.block_count": 27,
-            "clip.vision.attention.head_count": 16,
-            "clip.vision.spatial_merge_size": 2,
-        }
-    )
-
-    def fake_gguf_reader(path):
-        return mmproj_reader if Path(path) == mmproj_path else main_reader
-
-    monkeypatch.setattr(
-        gguf_config_builder_module.gguf,
-        "GGUFReader",
-        fake_gguf_reader,
-    )
-    monkeypatch.setattr(
-        gguf_config_builder_module,
-        "detect_gguf_multimodal",
-        lambda model: mmproj_path,
-    )
-
-    config = build_config_from_gguf(gguf_path)
-
-    assert config is not None
-    assert isinstance(config, Qwen3_5MoeConfig)
-    assert config.model_type == "qwen3_5_moe"
-    assert config.architectures == ["Qwen3_5MoeForConditionalGeneration"]
-    text_config = config.get_text_config()
-    assert text_config.model_type == "qwen3_5_moe_text"
-    assert text_config.hidden_size == 2048
-    assert text_config.num_hidden_layers == 40
-    assert text_config.num_key_value_heads == 2
-    assert text_config.layer_types[3] == "full_attention"
-    assert text_config.layer_types[0] == "linear_attention"
-    assert text_config.full_attention_interval == 4
-    assert text_config.rope_parameters["mrope_section"] == [11, 11, 10]
-    assert text_config.rope_parameters["mrope_interleaved"] is True
-    assert config.vision_config.hidden_size == 1152
-    assert config.vision_config.out_hidden_size == 2048
-    assert config.vision_config.num_position_embeddings == 2304
-
-
-def test_build_qwen35_config_from_gguf_metadata(tmp_path, monkeypatch):
-    gguf_path = tmp_path / "model.gguf"
-    mmproj_path = tmp_path / "mmproj-BF16.gguf"
-    gguf_path.write_bytes(b"GGUF")
-    mmproj_path.write_bytes(b"GGUF")
-    main_reader = _FakeGGUFReader(
-        {
-            "general.architecture": "qwen35",
-            "tokenizer.ggml.tokens": ["a", "b", "c"],
-            "tokenizer.ggml.bos_token_id": 1,
-            "tokenizer.ggml.eos_token_id": 2,
-            "tokenizer.ggml.padding_token_id": 0,
-            "qwen35.attention.head_count": 24,
-            "qwen35.attention.head_count_kv": 4,
-            "qwen35.attention.key_length": 256,
-            "qwen35.attention.layer_norm_rms_epsilon": 1e-6,
-            "qwen35.attention.value_length": 256,
-            "qwen35.block_count": 64,
-            "qwen35.context_length": 262144,
-            "qwen35.embedding_length": 5120,
-            "qwen35.feed_forward_length": 17408,
-            "qwen35.full_attention_interval": 4,
-            "qwen35.rope.dimension_count": 64,
-            "qwen35.rope.dimension_sections": [11, 11, 10, 0],
-            "qwen35.rope.freq_base": 10000000.0,
-            "qwen35.ssm.conv_kernel": 4,
-            "qwen35.ssm.group_count": 16,
-            "qwen35.ssm.inner_size": 6144,
-            "qwen35.ssm.state_size": 128,
-        }
-    )
-    mmproj_reader = _FakeGGUFReader(
-        {
-            "general.architecture": "clip",
-            "general.type": "mmproj",
-            "clip.vision.projection_dim": 5120,
-            "clip.vision.image_size": 768,
-            "clip.vision.patch_size": 16,
-            "clip.vision.embedding_length": 1152,
-            "clip.vision.feed_forward_length": 4304,
-            "clip.vision.block_count": 27,
-            "clip.vision.attention.head_count": 16,
-            "clip.vision.spatial_merge_size": 2,
-        }
-    )
-
-    def fake_gguf_reader(path):
-        return mmproj_reader if Path(path) == mmproj_path else main_reader
-
-    monkeypatch.setattr(
-        gguf_config_builder_module.gguf,
-        "GGUFReader",
-        fake_gguf_reader,
-    )
-    monkeypatch.setattr(
-        gguf_config_builder_module,
-        "detect_gguf_multimodal",
-        lambda model: mmproj_path,
-    )
-
-    config = build_config_from_gguf(gguf_path)
-
-    assert config is not None
-    assert isinstance(config, Qwen3_5Config)
-    assert config.model_type == "qwen3_5"
-    assert config.architectures == ["Qwen3_5ForConditionalGeneration"]
-    text_config = config.get_text_config()
-    assert text_config.model_type == "qwen3_5_text"
-    assert text_config.hidden_size == 5120
-    assert text_config.num_hidden_layers == 64
-    assert text_config.num_attention_heads == 24
-    assert text_config.num_key_value_heads == 4
-    assert text_config.linear_num_key_heads == 16
-    assert text_config.linear_key_head_dim == 128
-    assert text_config.linear_num_value_heads == 48
-    assert text_config.linear_value_head_dim == 128
-    assert text_config.layer_types[3] == "full_attention"
-    assert text_config.layer_types[0] == "linear_attention"
-    assert text_config.full_attention_interval == 4
-    assert text_config.rope_parameters["mrope_section"] == [11, 11, 10]
-    assert text_config.rope_parameters["mrope_interleaved"] is True
-    assert config.vision_config.hidden_size == 1152
-    assert config.vision_config.out_hidden_size == 5120
-
-
-def test_build_qwen35_config_subtracts_nextn_layers(tmp_path, monkeypatch):
-    gguf_path = tmp_path / "model.gguf"
-    gguf_path.write_bytes(b"GGUF")
-    main_reader = _FakeGGUFReader(
-        {
-            "general.architecture": "qwen35",
-            "tokenizer.ggml.tokens": ["a", "b", "c"],
-            "qwen35.attention.head_count": 24,
-            "qwen35.attention.head_count_kv": 4,
-            "qwen35.attention.key_length": 256,
-            "qwen35.attention.layer_norm_rms_epsilon": 1e-6,
-            "qwen35.block_count": 65,
-            "qwen35.context_length": 262144,
-            "qwen35.embedding_length": 5120,
-            "qwen35.feed_forward_length": 17408,
-            "qwen35.full_attention_interval": 4,
-            "qwen35.nextn_predict_layers": 1,
-            "qwen35.rope.dimension_count": 64,
-            "qwen35.rope.dimension_sections": [11, 11, 10, 0],
-            "qwen35.rope.freq_base": 10000000.0,
-            "qwen35.ssm.conv_kernel": 4,
-            "qwen35.ssm.group_count": 16,
-            "qwen35.ssm.inner_size": 6144,
-            "qwen35.ssm.state_size": 128,
-        }
-    )
-
-    monkeypatch.setattr(
-        gguf_config_builder_module.gguf,
-        "GGUFReader",
-        lambda path: main_reader,
-    )
-    monkeypatch.setattr(
-        gguf_config_builder_module,
-        "detect_gguf_multimodal",
-        lambda model: None,
-    )
-
-    config = build_config_from_gguf(gguf_path)
-
-    assert config is not None
-    assert config.architectures == ["Qwen3_5ForCausalLM"]
-    text_config = config.get_text_config()
-    assert text_config.num_hidden_layers == 64
-    assert text_config.mtp_num_hidden_layers == 1
-    assert text_config.num_nextn_predict_layers == 1
-    assert text_config.layer_types[63] == "full_attention"
-    assert text_config.rope_parameters["mrope_section"] == [11, 11, 10]
-
-
-def test_build_qwen35_config_without_mmproj_uses_causal_lm_architecture(
-    tmp_path, monkeypatch
-):
-    gguf_path = tmp_path / "model.gguf"
-    gguf_path.write_bytes(b"GGUF")
-    main_reader = _FakeGGUFReader(
-        {
-            "general.architecture": "qwen35",
-            "tokenizer.ggml.tokens": ["a", "b", "c"],
-            "qwen35.attention.head_count": 24,
-            "qwen35.attention.head_count_kv": 4,
-            "qwen35.attention.key_length": 256,
-            "qwen35.attention.layer_norm_rms_epsilon": 1e-6,
-            "qwen35.block_count": 64,
-            "qwen35.context_length": 262144,
-            "qwen35.embedding_length": 5120,
-            "qwen35.feed_forward_length": 17408,
-            "qwen35.full_attention_interval": 4,
-            "qwen35.rope.dimension_count": 64,
-            "qwen35.rope.dimension_sections": [11, 11, 10, 0],
-            "qwen35.rope.freq_base": 10000000.0,
-            "qwen35.ssm.conv_kernel": 4,
-            "qwen35.ssm.group_count": 16,
-            "qwen35.ssm.inner_size": 6144,
-            "qwen35.ssm.state_size": 128,
-        }
-    )
-
-    monkeypatch.setattr(
-        gguf_config_builder_module.gguf,
-        "GGUFReader",
-        lambda path: main_reader,
-    )
-    monkeypatch.setattr(
-        gguf_config_builder_module,
-        "detect_gguf_multimodal",
-        lambda model: None,
-    )
-
-    config = build_config_from_gguf(gguf_path)
-
-    assert config is not None
-    assert config.architectures == ["Qwen3_5ForCausalLM"]
-    assert default_adapter_module._uses_multimodal_weight_layout(config) is False
-
-
-def test_build_gemma4_mm_config_from_gguf_metadata(tmp_path, monkeypatch):
-    gguf_path = tmp_path / "model.gguf"
-    mmproj_path = tmp_path / "mmproj-BF16.gguf"
-    gguf_path.write_bytes(b"GGUF")
-    mmproj_path.write_bytes(b"GGUF")
-    main_reader = _FakeGGUFReader(
-        {
-            "general.architecture": "gemma4",
-            "tokenizer.ggml.tokens": ["a", "b", "c"],
-            "gemma4.attention.head_count": 16,
-            "gemma4.attention.head_count_kv": [8, 8, 8, 2],
-            "gemma4.attention.key_length": 512,
-            "gemma4.attention.key_length_swa": 256,
-            "gemma4.attention.layer_norm_rms_epsilon": 1e-6,
-            "gemma4.attention.shared_kv_layers": 4,
-            "gemma4.attention.sliding_window": 1024,
-            "gemma4.attention.sliding_window_pattern": [
-                True,
-                True,
-                True,
-                False,
-            ],
-            "gemma4.block_count": 4,
-            "gemma4.context_length": 262144,
-            "gemma4.embedding_length": 2816,
-            "gemma4.embedding_length_per_layer_input": 0,
-            "gemma4.feed_forward_length": 8192,
-            "gemma4.rope.freq_base": 1000000.0,
-            "gemma4.rope.freq_base_swa": 10000.0,
-        }
-    )
-    mmproj_reader = _FakeGGUFReader(
-        {
-            "general.architecture": "clip",
-            "general.type": "mmproj",
-            "clip.vision.projection_dim": 2816,
-            "clip.vision.patch_size": 16,
-            "clip.vision.embedding_length": 1152,
-            "clip.vision.feed_forward_length": 4304,
-            "clip.vision.block_count": 27,
-            "clip.vision.attention.head_count": 16,
-            "clip.vision.attention.layer_norm_epsilon": 1e-6,
-        }
-    )
-
-    def fake_gguf_reader(path):
-        return mmproj_reader if Path(path) == mmproj_path else main_reader
-
-    monkeypatch.setattr(
-        gguf_config_builder_module.gguf,
-        "GGUFReader",
-        fake_gguf_reader,
-    )
-    monkeypatch.setattr(
-        gguf_config_builder_module,
-        "detect_gguf_multimodal",
-        lambda model: mmproj_path,
-    )
-
-    config = build_config_from_gguf(gguf_path)
-
-    assert config is not None
-    assert config.model_type == "gemma4"
-    assert config.architectures == ["Gemma4ForConditionalGeneration"]
-    assert config.text_config.hidden_size_per_layer_input == 0
-    assert config.text_config.attention_k_eq_v is True
-    assert config.vision_config is not None
-    assert config.vision_config.hidden_size == 1152
-    assert config.vision_config.num_hidden_layers == 27
-    assert config.vision_config.head_dim == 72
-    assert config.vision_config.default_output_length == 280
-
-
-def test_build_gemma4_assistant_config_from_gguf_metadata(tmp_path, monkeypatch):
-    gguf_path = tmp_path / "draft.gguf"
-    gguf_path.write_bytes(b"GGUF")
-    fake_reader = _FakeGGUFReader(
-        {
-            "general.architecture": "gemma4-assistant",
-            "tokenizer.ggml.tokens": ["a", "b", "c"],
-            "gemma4-assistant.attention.head_count": 16,
-            "gemma4-assistant.attention.head_count_kv": [8, 8, 8, 2],
-            "gemma4-assistant.attention.key_length": 512,
-            "gemma4-assistant.attention.key_length_swa": 256,
-            "gemma4-assistant.attention.layer_norm_rms_epsilon": 1e-6,
-            "gemma4-assistant.attention.shared_kv_layers": 4,
-            "gemma4-assistant.attention.sliding_window": 1024,
-            "gemma4-assistant.attention.sliding_window_pattern": [
-                True,
-                True,
-                True,
-                False,
-            ],
-            "gemma4-assistant.block_count": 4,
-            "gemma4-assistant.context_length": 262144,
-            "gemma4-assistant.embedding_length": 1024,
-            "gemma4-assistant.embedding_length_per_layer_input": 0,
-            "gemma4-assistant.embedding_length_out": 2816,
-            "gemma4-assistant.feed_forward_length": 8192,
-            "gemma4-assistant.nextn_predict_layers": 4,
-            "gemma4-assistant.rope.freq_base": 1000000.0,
-            "gemma4-assistant.rope.freq_base_swa": 10000.0,
-        }
-    )
-    monkeypatch.setattr(
-        gguf_config_builder_module.gguf,
-        "GGUFReader",
-        lambda path: fake_reader,
-    )
-
-    config = build_config_from_gguf(gguf_path)
-
-    assert config is not None
-    assert config.model_type == "gemma4_assistant"
-    assert config.architectures == ["Gemma4MTPModel"]
-    assert config.hidden_size == 1024
-    assert config.hidden_size_per_layer_input == 0
-    assert config.attention_k_eq_v is True
-    assert config.backbone_hidden_size == 2816
-    assert config.n_predict == 1
-    assert config.num_key_value_heads == 8
-    assert config.num_global_key_value_heads == 2
-    assert config.layer_types == [
-        "sliding_attention",
-        "sliding_attention",
-        "sliding_attention",
-        "full_attention",
-    ]
 
 
 def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
@@ -1816,41 +1422,7 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     assert config.architectures == ["Qwen3MoeForCausalLM"]
 
 
-def test_gguf_config_parser_prefers_native_gguf_config(tmp_path, monkeypatch):
-    gguf_path = tmp_path / "model.gguf"
-    gguf_path.write_bytes(b"GGUF")
-    native_config = PretrainedConfig(
-        model_type="qwen3_5_moe",
-        architectures=["Qwen3_5MoeForCausalLM"],
-    )
-
-    monkeypatch.setattr(
-        gguf_config_parser_module,
-        "build_config_from_gguf",
-        lambda model: native_config,
-    )
-
-    def fail_parse(*args, **kwargs):
-        raise AssertionError("native GGUF config should skip HF parser fallback")
-
-    monkeypatch.setattr(
-        gguf_config_parser_module.HFConfigParser,
-        "parse",
-        fail_parse,
-    )
-    monkeypatch.setattr(
-        gguf_config_parser_module,
-        "maybe_patch_hf_config_from_gguf",
-        lambda model, config: config,
-    )
-
-    config_dict, config = GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
-
-    assert config is native_config
-    assert config_dict["architectures"] == ["Qwen3_5MoeForCausalLM"]
-
-
-def test_gguf_config_parser_prefers_sidecar_config_over_native_builder(
+def test_gguf_config_parser_prefers_sidecar_config(
     tmp_path,
     monkeypatch,
 ):
@@ -1858,9 +1430,6 @@ def test_gguf_config_parser_prefers_sidecar_config_over_native_builder(
     gguf_path.write_bytes(b"GGUF")
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
     calls = {}
-
-    def fail_build_config(model):
-        raise AssertionError("sidecar config.json must be used before GGUF builder")
 
     def fake_parse(
         self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
@@ -1872,11 +1441,6 @@ def test_gguf_config_parser_prefers_sidecar_config_over_native_builder(
             architectures=["Qwen3_5MoeForCausalLM"],
         )
 
-    monkeypatch.setattr(
-        gguf_config_parser_module,
-        "build_config_from_gguf",
-        fail_build_config,
-    )
     monkeypatch.setattr(
         gguf_config_parser_module.HFConfigParser,
         "parse",
@@ -2166,50 +1730,7 @@ def test_register_skips_speculator_probe_for_gguf():
     assert speculative_config == {"foo": "bar"}
 
 
-def test_register_speculator_probe_prefers_native_gguf_config(
-    tmp_path,
-    monkeypatch,
-):
-    register()
-    gguf_path = tmp_path / "model.gguf"
-    gguf_path.write_bytes(b"GGUF")
-    native_config = PretrainedConfig(
-        model_type="qwen3_5",
-        architectures=["Qwen3_5ForConditionalGeneration"],
-    )
-
-    monkeypatch.setattr(
-        gguf_plugin_module,
-        "build_config_from_gguf",
-        lambda model: native_config,
-    )
-
-    def fail_get_config_dict(*args, **kwargs):
-        raise AssertionError("native GGUF config should skip HF GGUF parser")
-
-    monkeypatch.setattr(
-        gguf_plugin_module.PretrainedConfig,
-        "get_config_dict",
-        fail_get_config_dict,
-    )
-
-    model, tokenizer, speculative_config = (
-        config_module.maybe_override_with_speculators(
-            model=str(gguf_path),
-            tokenizer="/tmp/tokenizer",
-            trust_remote_code=False,
-            revision=None,
-            vllm_speculative_config=None,
-            hf_token=None,
-        )
-    )
-
-    assert model == str(gguf_path)
-    assert tokenizer == "/tmp/tokenizer"
-    assert speculative_config is None
-
-
-def test_register_speculator_probe_prefers_sidecar_config_over_native_builder(
+def test_register_speculator_probe_prefers_sidecar_config(
     tmp_path,
     monkeypatch,
 ):
@@ -2219,19 +1740,11 @@ def test_register_speculator_probe_prefers_sidecar_config_over_native_builder(
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
     calls = {}
 
-    def fail_build_config(model):
-        raise AssertionError("sidecar config.json must be used before GGUF builder")
-
     def fake_get_config_dict(config_source, **kwargs):
         calls["config_source"] = config_source
         calls["gguf_file"] = kwargs.get("gguf_file")
         return {"model_type": "qwen3_5"}, {}
 
-    monkeypatch.setattr(
-        gguf_plugin_module,
-        "build_config_from_gguf",
-        fail_build_config,
-    )
     monkeypatch.setattr(
         gguf_plugin_module.PretrainedConfig,
         "get_config_dict",

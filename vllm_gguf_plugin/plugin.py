@@ -26,7 +26,6 @@ from vllm.transformers_utils.repo_utils import file_or_path_exists
 from vllm.transformers_utils.utils import without_trust_remote_code
 
 from .config_parser import GGUFConfigParser
-from .gguf_config_builder import build_config_from_gguf
 from .gguf_tokenizer_builder import build_tokenizer_from_gguf
 from .gguf_utils import (
     check_gguf_file,
@@ -189,27 +188,6 @@ def _patch_speculator_probe() -> None:
                     HF_CONFIG_NAME,
                     revision=revision,
                 ):
-                    native_config = build_config_from_gguf(model)
-                    if native_config is not None:
-                        config_dict = native_config.to_dict()
-                        speculators_config = config_dict.get("speculators_config")
-                        if speculators_config is None:
-                            return model, tokenizer, vllm_speculative_config
-
-                        from vllm.transformers_utils.configs.speculators.base import (
-                            SpeculatorsConfig,
-                        )
-
-                        speculative_config = (
-                            SpeculatorsConfig.extract_vllm_speculative_config(
-                                config_dict=config_dict
-                            )
-                        )
-                        speculative_config["model"] = model
-
-                        verifier_model = speculators_config["verifier"]["name_or_path"]
-                        return verifier_model, verifier_model, speculative_config
-
                     kwargs["gguf_file"] = Path(model).name
             else:
                 gguf_model_repo = Path(model).parent

@@ -10,7 +10,6 @@ from vllm.transformers_utils.config import HFConfigParser
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.repo_utils import file_or_path_exists
 
-from .gguf_config_builder import build_config_from_gguf
 from .gguf_utils import (
     check_gguf_file,
     get_gguf_file_path_from_hf,
@@ -41,87 +40,67 @@ class GGUFConfigParser(ConfigParserBase):
                 original_model = candidate
                 gguf_path = candidate
 
-        native_config = None
+        resolved_model = self._resolve_config_source(model, revision=revision)
+
         if gguf_path is not None or check_gguf_file(model):
-            local_gguf_path = gguf_path or Path(model)
-            gguf_repo = local_gguf_path.parent
+            gguf_path = gguf_path or Path(model)
             resolved_model = self._resolve_config_source(
-                local_gguf_path,
+                gguf_path,
                 revision=revision,
             )
-            if resolved_model == gguf_repo and not file_or_path_exists(
+            gguf_repo = gguf_path.parent
+            if resolved_model != gguf_repo:
+                logger.warning_once(
+                    "Disabling `trust_remote_code` because GGUF metadata "
+                    "redirected config loading from %s to %s. Pass an "
+                    "explicit `--hf-config-path` to opt in.",
+                    gguf_repo,
+                    resolved_model,
+                )
+                trust_remote_code = False
+                revision = None
+            elif not file_or_path_exists(
                 gguf_repo,
                 HF_CONFIG_NAME,
                 revision=revision,
             ):
-                native_config = build_config_from_gguf(local_gguf_path)
-
-        if native_config is not None:
-            config = native_config
-            config_dict = config.to_dict()
-        else:
-            resolved_model = self._resolve_config_source(model, revision=revision)
-
-        if native_config is None:
-            if gguf_path is not None or check_gguf_file(model):
-                gguf_path = gguf_path or Path(model)
-                resolved_model = self._resolve_config_source(
-                    gguf_path,
+                kwargs["gguf_file"] = gguf_path.name
+        elif is_remote_gguf(model):
+            repo_id, quant_type = split_remote_gguf(model)
+            if resolved_model != repo_id:
+                logger.warning_once(
+                    "Disabling `trust_remote_code` because GGUF metadata "
+                    "redirected config loading from %s to %s. Pass an "
+                    "explicit `--hf-config-path` to opt in.",
+                    repo_id,
+                    resolved_model,
+                )
+                trust_remote_code = False
+                revision = None
+            elif not file_or_path_exists(
+                repo_id,
+                HF_CONFIG_NAME,
+                revision=revision,
+            ):
+                kwargs["gguf_file"] = get_gguf_file_path_from_hf(
+                    repo_id,
+                    quant_type,
                     revision=revision,
                 )
-                gguf_repo = gguf_path.parent
-                if resolved_model != gguf_repo:
-                    logger.warning_once(
-                        "Disabling `trust_remote_code` because GGUF metadata "
-                        "redirected config loading from %s to %s. Pass an "
-                        "explicit `--hf-config-path` to opt in.",
-                        gguf_repo,
-                        resolved_model,
-                    )
-                    trust_remote_code = False
-                    revision = None
-                elif not file_or_path_exists(
-                    gguf_repo,
-                    HF_CONFIG_NAME,
-                    revision=revision,
-                ):
-                    kwargs["gguf_file"] = gguf_path.name
-            elif is_remote_gguf(model):
-                repo_id, quant_type = split_remote_gguf(model)
-                if resolved_model != repo_id:
-                    logger.warning_once(
-                        "Disabling `trust_remote_code` because GGUF metadata "
-                        "redirected config loading from %s to %s. Pass an "
-                        "explicit `--hf-config-path` to opt in.",
-                        repo_id,
-                        resolved_model,
-                    )
-                    trust_remote_code = False
-                    revision = None
-                elif not file_or_path_exists(
-                    repo_id,
-                    HF_CONFIG_NAME,
-                    revision=revision,
-                ):
-                    kwargs["gguf_file"] = get_gguf_file_path_from_hf(
-                        repo_id,
-                        quant_type,
-                        revision=revision,
-                    )
 
-            config_dict, config = HFConfigParser().parse(
-                resolved_model,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                code_revision=code_revision,
-                **kwargs,
-            )
+        config_dict, config = HFConfigParser().parse(
+            resolved_model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision,
+            **kwargs,
+        )
 
         if config.model_type == "qwen3_moe" and "norm_topk_prob" not in config_dict:
             config_dict["norm_topk_prob"] = True
             config.update({"norm_topk_prob": True})
 
-        if native_config is None and is_gguf(original_model):
+        if is_gguf(original_model):
             config = maybe_patch_hf_config_from_gguf(str(original_model), config)
 
         if config.model_type in ("gemma4_assistant", "gemma4_mtp"):
