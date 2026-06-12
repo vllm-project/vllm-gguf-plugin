@@ -133,6 +133,27 @@ def test_oot_config_reuses_in_tree_behavior():
     assert repr(quant_config) == "GGUFConfig()"
 
 
+def test_gguf_override_quantization_method_accepts_hf_config_keyword():
+    register()
+
+    # hf_config keyword matches core QuantizationConfig.override_quantization_method
+    # signature.
+    # This was added to fix a TypeError when ModelConfig._verify_quantization() calls
+    # override_quantization_method(hf_quant_cfg, user_quant, hf_config=hf_config).
+    result_explicit = OOTGGUFConfig.override_quantization_method(
+        {}, "gguf", hf_config=object()
+    )
+    assert result_explicit == "gguf"
+
+    result_non_gguf = OOTGGUFConfig.override_quantization_method(
+        {}, "awq", hf_config=object()
+    )
+    assert result_non_gguf is None
+
+    result_none = OOTGGUFConfig.override_quantization_method({}, None)
+    assert result_none is None
+
+
 def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
