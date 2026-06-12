@@ -248,6 +248,120 @@ def _gguf_sequence_edge(value: Any, *, first: bool) -> Any:
         return value
 
 
+def _gguf_int_value(reader: gguf.GGUFReader, key: str) -> int | None:
+    value = _gguf_scalar_value(_gguf_reader_value(reader, key))
+    if value is None:
+        return None
+    with suppress(TypeError, ValueError):
+        return int(value)
+    return None
+
+
+def _gguf_float_value(reader: gguf.GGUFReader, key: str) -> float | None:
+    value = _gguf_scalar_value(_gguf_reader_value(reader, key))
+    if value is None:
+        return None
+    with suppress(TypeError, ValueError):
+        return float(value)
+    return None
+
+
+def _gguf_string_value(reader: gguf.GGUFReader, key: str) -> str | None:
+    value = _gguf_scalar_value(_gguf_reader_value(reader, key))
+    if isinstance(value, bytes):
+        with suppress(UnicodeDecodeError):
+            return value.decode("utf-8")
+        return None
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return None
+    return str(value)
+
+
+def _gguf_int_list_value(reader: gguf.GGUFReader, key: str) -> list[int] | None:
+    value = _gguf_reader_value(reader, key)
+    if value is None or isinstance(value, (str, bytes)):
+        return None
+    with suppress(AttributeError):
+        value = value.tolist()
+    if isinstance(value, tuple):
+        value = list(value)
+    if not isinstance(value, list):
+        return None
+
+    values: list[int] = []
+    for item in value:
+        scalar = _gguf_scalar_value(item)
+        with suppress(TypeError, ValueError):
+            values.append(int(scalar))
+            continue
+        return None
+    return values
+
+
+def _qwen35_rope_parameters_from_gguf(
+    reader: gguf.GGUFReader,
+    prefix: str,
+    partial_rotary_factor: float | None,
+) -> dict[str, Any]:
+    rope_parameters: dict[str, Any] = {
+        "rope_type": "default",
+        "rope_theta": _gguf_float_value(reader, f"{prefix}.rope.freq_base"),
+        "partial_rotary_factor": partial_rotary_factor,
+    }
+
+    mrope_section = _gguf_int_list_value(
+        reader,
+        f"{prefix}.rope.dimension_sections",
+    )
+    if mrope_section:
+        mrope_section = list(mrope_section)
+        while mrope_section and mrope_section[-1] == 0:
+            mrope_section.pop()
+        if mrope_section:
+            rope_parameters["mrope_section"] = mrope_section
+            rope_parameters["mrope_interleaved"] = True
+
+    return {key: value for key, value in rope_parameters.items() if value is not None}
+
+
+def _qwen35_text_config_updates_from_gguf(
+    reader: gguf.GGUFReader,
+    prefix: str,
+) -> dict[str, Any]:
+    head_dim = _gguf_int_value(reader, f"{prefix}.attention.key_length")
+    rope_dim = _gguf_int_value(reader, f"{prefix}.rope.dimension_count")
+    partial_rotary_factor = None
+    if head_dim and rope_dim:
+        partial_rotary_factor = rope_dim / head_dim
+
+    rope_parameters = _qwen35_rope_parameters_from_gguf(
+        reader,
+        prefix,
+        partial_rotary_factor,
+    )
+    updates: dict[str, Any] = {
+        # These are Qwen3.5 HF/vLLM config defaults. Current GGUF metadata does
+        # not carry them, while llama.cpp handles the same behavior in model
+        # code. Keep the defaults explicit so the GGUF-derived config preserves
+        # the base model contract.
+        "attn_output_gate": True,
+        "mamba_ssm_dtype": "float32",
+        "mtp_use_dedicated_embeddings": False,
+        "partial_rotary_factor": partial_rotary_factor,
+        "rope_theta": _gguf_float_value(reader, f"{prefix}.rope.freq_base"),
+        "full_attention_interval": _gguf_int_value(
+            reader,
+            f"{prefix}.full_attention_interval",
+        ),
+        "output_gate_type": _gguf_string_value(reader, f"{prefix}.output_gate_type"),
+    }
+    if "mrope_section" in rope_parameters:
+        updates["rope_parameters"] = rope_parameters
+    return updates
+
+
 @cache
 def _get_local_gguf_base_model_ids(model: str | Path) -> tuple[str, ...]:
     try:
@@ -581,6 +695,10 @@ def maybe_patch_hf_config_from_gguf(
                             "model_type": "qwen3_5_text",
                         },
                     )
+                _update_config(
+                    text_config,
+                    _qwen35_text_config_updates_from_gguf(reader, "qwen35"),
+                )
                 nextn_layers = _gguf_reader_value(
                     reader, "qwen35.nextn_predict_layers"
                 )
@@ -620,6 +738,10 @@ def maybe_patch_hf_config_from_gguf(
                             "model_type": "qwen3_5_moe_text",
                         },
                     )
+                _update_config(
+                    text_config,
+                    _qwen35_text_config_updates_from_gguf(reader, "qwen35moe"),
+                )
                 nextn_layers = _gguf_reader_value(
                     reader, "qwen35moe.nextn_predict_layers"
                 )

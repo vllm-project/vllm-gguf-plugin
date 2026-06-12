@@ -177,27 +177,6 @@ def _patch_speculator_probe() -> None:
 
         if check_gguf_file(model):
             if hf_config_path is None:
-                native_config = build_config_from_gguf(model)
-                if native_config is not None:
-                    config_dict = native_config.to_dict()
-                    speculators_config = config_dict.get("speculators_config")
-                    if speculators_config is None:
-                        return model, tokenizer, vllm_speculative_config
-
-                    from vllm.transformers_utils.configs.speculators.base import (
-                        SpeculatorsConfig,
-                    )
-
-                    speculative_config = (
-                        SpeculatorsConfig.extract_vllm_speculative_config(
-                            config_dict=config_dict
-                        )
-                    )
-                    speculative_config["model"] = model
-
-                    verifier_model = speculators_config["verifier"]["name_or_path"]
-                    return verifier_model, verifier_model, speculative_config
-
                 gguf_repo = Path(model).parent
                 gguf_model_repo = resolve_gguf_config_source(
                     model,
@@ -210,6 +189,27 @@ def _patch_speculator_probe() -> None:
                     HF_CONFIG_NAME,
                     revision=revision,
                 ):
+                    native_config = build_config_from_gguf(model)
+                    if native_config is not None:
+                        config_dict = native_config.to_dict()
+                        speculators_config = config_dict.get("speculators_config")
+                        if speculators_config is None:
+                            return model, tokenizer, vllm_speculative_config
+
+                        from vllm.transformers_utils.configs.speculators.base import (
+                            SpeculatorsConfig,
+                        )
+
+                        speculative_config = (
+                            SpeculatorsConfig.extract_vllm_speculative_config(
+                                config_dict=config_dict
+                            )
+                        )
+                        speculative_config["model"] = model
+
+                        verifier_model = speculators_config["verifier"]["name_or_path"]
+                        return verifier_model, verifier_model, speculative_config
+
                     kwargs["gguf_file"] = Path(model).name
             else:
                 gguf_model_repo = Path(model).parent

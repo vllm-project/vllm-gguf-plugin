@@ -43,7 +43,18 @@ class GGUFConfigParser(ConfigParserBase):
 
         native_config = None
         if gguf_path is not None or check_gguf_file(model):
-            native_config = build_config_from_gguf(gguf_path or model)
+            local_gguf_path = gguf_path or Path(model)
+            gguf_repo = local_gguf_path.parent
+            resolved_model = self._resolve_config_source(
+                local_gguf_path,
+                revision=revision,
+            )
+            if resolved_model == gguf_repo and not file_or_path_exists(
+                gguf_repo,
+                HF_CONFIG_NAME,
+                revision=revision,
+            ):
+                native_config = build_config_from_gguf(local_gguf_path)
 
         if native_config is not None:
             config = native_config

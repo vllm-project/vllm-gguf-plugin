@@ -23,6 +23,7 @@ from .gguf_utils import (
     _gguf_reader_value,
     _gguf_scalar_value,
     _gguf_sequence_edge,
+    _qwen35_text_config_updates_from_gguf,
     check_gguf_file,
     detect_gguf_multimodal,
 )
@@ -308,11 +309,6 @@ def _build_qwen35moe_config(
         num_layers = max(block_count - nextn_layers, 0)
 
     head_dim = _read_int(reader, f"{prefix}.attention.key_length")
-    rope_dim = _read_int(reader, f"{prefix}.rope.dimension_count")
-    partial_rotary_factor = None
-    if head_dim and rope_dim:
-        partial_rotary_factor = rope_dim / head_dim
-
     full_attention_interval = _read_int(reader, f"{prefix}.full_attention_interval")
     tie_word_embeddings = not has_lm_head
     text_config = _non_none(
@@ -341,18 +337,12 @@ def _build_qwen35moe_config(
             "shared_expert_intermediate_size": _read_int(
                 reader, f"{prefix}.expert_shared_feed_forward_length"
             ),
-            "partial_rotary_factor": partial_rotary_factor,
-            "rope_theta": _read_float(reader, f"{prefix}.rope.freq_base"),
-            "rope_parameters": {
-                "rope_type": "default",
-                "rope_theta": _read_float(reader, f"{prefix}.rope.freq_base"),
-                "partial_rotary_factor": partial_rotary_factor,
-            },
             "layer_types": _qwen35_layer_types(
                 full_attention_interval,
                 num_layers=num_layers,
             ),
             "tie_word_embeddings": tie_word_embeddings,
+            **_qwen35_text_config_updates_from_gguf(reader, prefix),
             **_token_id_fields(reader),
         }
     )
@@ -385,11 +375,6 @@ def _build_qwen35_config(
     if block_count is not None:
         num_layers = max(block_count - nextn_layers, 0)
     head_dim = _read_int(reader, f"{prefix}.attention.key_length")
-    rope_dim = _read_int(reader, f"{prefix}.rope.dimension_count")
-    partial_rotary_factor = None
-    if head_dim and rope_dim:
-        partial_rotary_factor = rope_dim / head_dim
-
     full_attention_interval = _read_int(reader, f"{prefix}.full_attention_interval")
     tie_word_embeddings = not has_lm_head
     text_config = _non_none(
@@ -415,18 +400,12 @@ def _build_qwen35_config(
             "linear_value_head_dim": _read_int(reader, f"{prefix}.ssm.state_size"),
             "linear_num_key_heads": _read_int(reader, f"{prefix}.ssm.group_count"),
             "linear_num_value_heads": _qwen35_ssm_value_heads(reader, prefix),
-            "partial_rotary_factor": partial_rotary_factor,
-            "rope_theta": _read_float(reader, f"{prefix}.rope.freq_base"),
-            "rope_parameters": {
-                "rope_type": "default",
-                "rope_theta": _read_float(reader, f"{prefix}.rope.freq_base"),
-                "partial_rotary_factor": partial_rotary_factor,
-            },
             "layer_types": _qwen35_layer_types(
                 full_attention_interval,
                 num_layers=num_layers,
             ),
             "tie_word_embeddings": tie_word_embeddings,
+            **_qwen35_text_config_updates_from_gguf(reader, prefix),
             **_token_id_fields(reader),
         }
     )

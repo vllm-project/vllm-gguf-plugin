@@ -588,6 +588,7 @@ def test_build_qwen35moe_config_from_gguf_metadata(tmp_path, monkeypatch):
             "qwen35moe.expert_used_count": 8,
             "qwen35moe.full_attention_interval": 4,
             "qwen35moe.rope.dimension_count": 64,
+            "qwen35moe.rope.dimension_sections": [11, 11, 10, 0],
             "qwen35moe.rope.freq_base": 10000000.0,
         }
     )
@@ -633,6 +634,9 @@ def test_build_qwen35moe_config_from_gguf_metadata(tmp_path, monkeypatch):
     assert text_config.num_key_value_heads == 2
     assert text_config.layer_types[3] == "full_attention"
     assert text_config.layer_types[0] == "linear_attention"
+    assert text_config.full_attention_interval == 4
+    assert text_config.rope_parameters["mrope_section"] == [11, 11, 10]
+    assert text_config.rope_parameters["mrope_interleaved"] is True
     assert config.vision_config.hidden_size == 1152
     assert config.vision_config.out_hidden_size == 2048
     assert config.vision_config.num_position_embeddings == 2304
@@ -661,6 +665,7 @@ def test_build_qwen35_config_from_gguf_metadata(tmp_path, monkeypatch):
             "qwen35.feed_forward_length": 17408,
             "qwen35.full_attention_interval": 4,
             "qwen35.rope.dimension_count": 64,
+            "qwen35.rope.dimension_sections": [11, 11, 10, 0],
             "qwen35.rope.freq_base": 10000000.0,
             "qwen35.ssm.conv_kernel": 4,
             "qwen35.ssm.group_count": 16,
@@ -715,6 +720,9 @@ def test_build_qwen35_config_from_gguf_metadata(tmp_path, monkeypatch):
     assert text_config.linear_value_head_dim == 128
     assert text_config.layer_types[3] == "full_attention"
     assert text_config.layer_types[0] == "linear_attention"
+    assert text_config.full_attention_interval == 4
+    assert text_config.rope_parameters["mrope_section"] == [11, 11, 10]
+    assert text_config.rope_parameters["mrope_interleaved"] is True
     assert config.vision_config.hidden_size == 1152
     assert config.vision_config.out_hidden_size == 5120
 
@@ -737,6 +745,7 @@ def test_build_qwen35_config_subtracts_nextn_layers(tmp_path, monkeypatch):
             "qwen35.full_attention_interval": 4,
             "qwen35.nextn_predict_layers": 1,
             "qwen35.rope.dimension_count": 64,
+            "qwen35.rope.dimension_sections": [11, 11, 10, 0],
             "qwen35.rope.freq_base": 10000000.0,
             "qwen35.ssm.conv_kernel": 4,
             "qwen35.ssm.group_count": 16,
@@ -765,6 +774,7 @@ def test_build_qwen35_config_subtracts_nextn_layers(tmp_path, monkeypatch):
     assert text_config.mtp_num_hidden_layers == 1
     assert text_config.num_nextn_predict_layers == 1
     assert text_config.layer_types[63] == "full_attention"
+    assert text_config.rope_parameters["mrope_section"] == [11, 11, 10]
 
 
 def test_build_qwen35_config_without_mmproj_uses_causal_lm_architecture(
@@ -786,6 +796,7 @@ def test_build_qwen35_config_without_mmproj_uses_causal_lm_architecture(
             "qwen35.feed_forward_length": 17408,
             "qwen35.full_attention_interval": 4,
             "qwen35.rope.dimension_count": 64,
+            "qwen35.rope.dimension_sections": [11, 11, 10, 0],
             "qwen35.rope.freq_base": 10000000.0,
             "qwen35.ssm.conv_kernel": 4,
             "qwen35.ssm.group_count": 16,
@@ -1383,8 +1394,13 @@ def test_qwen35moe_gguf_config_is_normalized_for_mm(monkeypatch):
     fake_reader = _FakeGGUFReader(
         {
             "general.architecture": "qwen35moe",
+            "qwen35moe.attention.key_length": 256,
+            "qwen35moe.full_attention_interval": 4,
             "qwen35moe.nextn_predict_layers": 1,
             "qwen35moe.block_count": 41,
+            "qwen35moe.rope.dimension_count": 64,
+            "qwen35moe.rope.dimension_sections": [11, 11, 10, 0],
+            "qwen35moe.rope.freq_base": 10000000.0,
         }
     )
     monkeypatch.setattr(gguf_utils_module, "check_gguf_file", lambda model: True)
@@ -1419,14 +1435,22 @@ def test_qwen35moe_gguf_config_is_normalized_for_mm(monkeypatch):
     assert config.mtp_num_hidden_layers == 1
     assert config.num_nextn_predict_layers == 1
     assert config.num_hidden_layers == 40
+    assert config.full_attention_interval == 4
+    assert config.rope_parameters["mrope_section"] == [11, 11, 10]
+    assert config.rope_parameters["mrope_interleaved"] is True
 
 
 def test_qwen35_gguf_config_subtracts_nextn_layers(monkeypatch):
     fake_reader = _FakeGGUFReader(
         {
             "general.architecture": "qwen35",
+            "qwen35.attention.key_length": 256,
+            "qwen35.full_attention_interval": 4,
             "qwen35.nextn_predict_layers": 1,
             "qwen35.block_count": 65,
+            "qwen35.rope.dimension_count": 64,
+            "qwen35.rope.dimension_sections": [11, 11, 10, 0],
+            "qwen35.rope.freq_base": 10000000.0,
         }
     )
     monkeypatch.setattr(gguf_utils_module, "check_gguf_file", lambda model: True)
@@ -1461,6 +1485,9 @@ def test_qwen35_gguf_config_subtracts_nextn_layers(monkeypatch):
     assert config.mtp_num_hidden_layers == 1
     assert config.num_nextn_predict_layers == 1
     assert config.num_hidden_layers == 64
+    assert config.full_attention_interval == 4
+    assert config.rope_parameters["mrope_section"] == [11, 11, 10]
+    assert config.rope_parameters["mrope_interleaved"] is True
 
 
 def test_default_adapter_adds_mmproj_for_multimodal_config(tmp_path, monkeypatch):
@@ -1823,6 +1850,52 @@ def test_gguf_config_parser_prefers_native_gguf_config(tmp_path, monkeypatch):
     assert config_dict["architectures"] == ["Qwen3_5MoeForCausalLM"]
 
 
+def test_gguf_config_parser_prefers_sidecar_config_over_native_builder(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    calls = {}
+
+    def fail_build_config(model):
+        raise AssertionError("sidecar config.json must be used before GGUF builder")
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {}, PretrainedConfig(
+            model_type="qwen3_5_moe",
+            architectures=["Qwen3_5MoeForCausalLM"],
+        )
+
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "build_config_from_gguf",
+        fail_build_config,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+
+    config_dict, config = GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
+
+    assert calls["model"] == gguf_path.parent
+    assert calls["gguf_file"] is None
+    assert config.model_type == "qwen3_5_moe"
+    assert config_dict["architectures"] == ["Qwen3_5MoeForCausalLM"]
+
+
 def test_gguf_config_parser_uses_gguf_file_when_parent_has_no_config(
     tmp_path, monkeypatch
 ):
@@ -2131,6 +2204,53 @@ def test_register_speculator_probe_prefers_native_gguf_config(
         )
     )
 
+    assert model == str(gguf_path)
+    assert tokenizer == "/tmp/tokenizer"
+    assert speculative_config is None
+
+
+def test_register_speculator_probe_prefers_sidecar_config_over_native_builder(
+    tmp_path,
+    monkeypatch,
+):
+    register()
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    calls = {}
+
+    def fail_build_config(model):
+        raise AssertionError("sidecar config.json must be used before GGUF builder")
+
+    def fake_get_config_dict(config_source, **kwargs):
+        calls["config_source"] = config_source
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {"model_type": "qwen3_5"}, {}
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "build_config_from_gguf",
+        fail_build_config,
+    )
+    monkeypatch.setattr(
+        gguf_plugin_module.PretrainedConfig,
+        "get_config_dict",
+        fake_get_config_dict,
+    )
+
+    model, tokenizer, speculative_config = (
+        config_module.maybe_override_with_speculators(
+            model=str(gguf_path),
+            tokenizer="/tmp/tokenizer",
+            trust_remote_code=False,
+            revision=None,
+            vllm_speculative_config=None,
+            hf_token=None,
+        )
+    )
+
+    assert calls["config_source"] == gguf_path.parent
+    assert calls["gguf_file"] is None
     assert model == str(gguf_path)
     assert tokenizer == "/tmp/tokenizer"
     assert speculative_config is None
