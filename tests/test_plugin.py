@@ -1478,7 +1478,9 @@ def _build_qwen3_5_test_name_map(
             )
 
     monkeypatch.setattr(
-        default_adapter_module.gguf, "MODEL_ARCH_NAMES", {object(): "qwen35"}
+        default_adapter_module.gguf,
+        "MODEL_ARCH_NAMES",
+        {object(): "qwen35", object(): "qwen35moe"},
     )
     monkeypatch.setattr(
         default_adapter_module.gguf,
@@ -1503,11 +1505,13 @@ def _build_qwen3_5_test_name_map(
 def test_qwen3_5_dense_multimodal_maps_visual_merger(monkeypatch):
     config = PretrainedConfig(
         model_type="qwen3_5",
+        architectures=["Qwen3_5ForConditionalGeneration"],
         num_hidden_layers=1,
         layer_types=["linear_attention"],
     )
     config.vision_config = PretrainedConfig(num_hidden_layers=1)
     state_names = [
+        "model.language_model.embed_tokens.weight",
         "model.visual.patch_embed.proj.weight.1",
         "model.visual.merger.linear_fc1.weight",
         "model.visual.merger.linear_fc1.bias",
@@ -1519,6 +1523,9 @@ def test_qwen3_5_dense_multimodal_maps_visual_merger(monkeypatch):
 
     mapping = _build_qwen3_5_test_name_map(monkeypatch, config, state_names)
 
+    assert mapping["token_embd.weight"] == (
+        "model.language_model.embed_tokens.weight"
+    )
     assert mapping["v.patch_embd.weight.1"] == (
         "model.visual.patch_embed.proj.weight.1"
     )
@@ -1528,6 +1535,26 @@ def test_qwen3_5_dense_multimodal_maps_visual_merger(monkeypatch):
     assert mapping["mm.0.bias"] == "model.visual.merger.linear_fc1.bias"
     assert mapping["mm.2.weight"] == "model.visual.merger.linear_fc2.weight"
     assert mapping["mm.2.bias"] == "model.visual.merger.linear_fc2.bias"
+
+
+def test_qwen3_5_moe_multimodal_maps_token_embd_to_language_model(monkeypatch):
+    config = PretrainedConfig(
+        model_type="qwen3_5_moe",
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+        num_hidden_layers=1,
+        layer_types=["linear_attention"],
+    )
+    config.vision_config = PretrainedConfig(num_hidden_layers=1)
+
+    mapping = _build_qwen3_5_test_name_map(
+        monkeypatch,
+        config,
+        ["model.language_model.embed_tokens.weight"],
+    )
+
+    assert mapping["token_embd.weight"] == (
+        "model.language_model.embed_tokens.weight"
+    )
 
 
 def test_qwen3_5_text_only_does_not_add_visual_merger_mappings(monkeypatch):

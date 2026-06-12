@@ -438,6 +438,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         if orig_model_type in ("qwen3_5", "qwen3_5_moe") and is_multimodal:
             gguf_to_hf_name_map.update(
                 {
+                    "token_embd.weight": (
+                        "model.language_model.embed_tokens.weight"
+                    ),
                     "v.patch_embd.weight.1": ("model.visual.patch_embed.proj.weight.1"),
                     "v.post_ln.weight": "model.visual.merger.norm.weight",
                     "v.post_ln.bias": "model.visual.merger.norm.bias",
