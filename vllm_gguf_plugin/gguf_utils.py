@@ -557,7 +557,46 @@ def maybe_patch_hf_config_from_gguf(
             logger.debug("Failed to inspect GGUF metadata for %s: %s", model, e)
         else:
             architecture = _gguf_reader_value(reader, "general.architecture")
-            if architecture == "qwen35moe":
+            if architecture == "qwen35":
+                text_config = hf_config.get_text_config()
+                is_multimodal = (
+                    detect_gguf_multimodal(model) is not None
+                    or getattr(hf_config, "vision_config", None) is not None
+                )
+                _update_config(
+                    hf_config,
+                    {
+                        "model_type": "qwen3_5",
+                        "architectures": [
+                            "Qwen3_5ForConditionalGeneration"
+                            if is_multimodal
+                            else "Qwen3_5ForCausalLM"
+                        ],
+                    },
+                )
+                if text_config is not hf_config:
+                    _update_config(
+                        text_config,
+                        {
+                            "model_type": "qwen3_5_text",
+                        },
+                    )
+                nextn_layers = _gguf_reader_value(
+                    reader, "qwen35.nextn_predict_layers"
+                )
+                block_count = _gguf_reader_value(reader, "qwen35.block_count")
+                if nextn_layers:
+                    updates: dict[str, Any] = {
+                        "mtp_num_hidden_layers": int(nextn_layers),
+                        "num_nextn_predict_layers": int(nextn_layers),
+                    }
+                    if block_count is not None:
+                        updates["num_hidden_layers"] = max(
+                            int(block_count) - int(nextn_layers),
+                            0,
+                        )
+                    _update_config(text_config, updates)
+            elif architecture == "qwen35moe":
                 text_config = hf_config.get_text_config()
                 is_multimodal = (
                     detect_gguf_multimodal(model) is not None

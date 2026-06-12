@@ -698,6 +698,54 @@ def test_build_qwen35_config_from_gguf_metadata(tmp_path, monkeypatch):
     assert config.vision_config.out_hidden_size == 5120
 
 
+def test_build_qwen35_config_subtracts_nextn_layers(tmp_path, monkeypatch):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    main_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "qwen35",
+            "tokenizer.ggml.tokens": ["a", "b", "c"],
+            "qwen35.attention.head_count": 24,
+            "qwen35.attention.head_count_kv": 4,
+            "qwen35.attention.key_length": 256,
+            "qwen35.attention.layer_norm_rms_epsilon": 1e-6,
+            "qwen35.block_count": 65,
+            "qwen35.context_length": 262144,
+            "qwen35.embedding_length": 5120,
+            "qwen35.feed_forward_length": 17408,
+            "qwen35.full_attention_interval": 4,
+            "qwen35.nextn_predict_layers": 1,
+            "qwen35.rope.dimension_count": 64,
+            "qwen35.rope.freq_base": 10000000.0,
+            "qwen35.ssm.conv_kernel": 4,
+            "qwen35.ssm.group_count": 16,
+            "qwen35.ssm.inner_size": 6144,
+            "qwen35.ssm.state_size": 128,
+        }
+    )
+
+    monkeypatch.setattr(
+        gguf_config_builder_module.gguf,
+        "GGUFReader",
+        lambda path: main_reader,
+    )
+    monkeypatch.setattr(
+        gguf_config_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: None,
+    )
+
+    config = build_config_from_gguf(gguf_path)
+
+    assert config is not None
+    assert config.architectures == ["Qwen3_5ForCausalLM"]
+    text_config = config.get_text_config()
+    assert text_config.num_hidden_layers == 64
+    assert text_config.mtp_num_hidden_layers == 1
+    assert text_config.num_nextn_predict_layers == 1
+    assert text_config.layer_types[63] == "full_attention"
+
+
 def test_build_qwen35_config_without_mmproj_uses_causal_lm_architecture(
     tmp_path, monkeypatch
 ):
@@ -1313,6 +1361,48 @@ def test_qwen35moe_gguf_config_is_normalized_for_mm(monkeypatch):
     assert config.num_hidden_layers == 40
 
 
+def test_qwen35_gguf_config_subtracts_nextn_layers(monkeypatch):
+    fake_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "qwen35",
+            "qwen35.nextn_predict_layers": 1,
+            "qwen35.block_count": 65,
+        }
+    )
+    monkeypatch.setattr(gguf_utils_module, "check_gguf_file", lambda model: True)
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "extract_vocab_size_from_gguf",
+        lambda model: None,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "extract_lm_head_from_gguf",
+        lambda model: None,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "detect_gguf_multimodal",
+        lambda model: None,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module.gguf,
+        "GGUFReader",
+        lambda path: fake_reader,
+    )
+
+    config = maybe_patch_hf_config_from_gguf(
+        "model.gguf",
+        PretrainedConfig(model_type="qwen35"),
+    )
+
+    assert config.model_type == "qwen3_5"
+    assert config.architectures == ["Qwen3_5ForCausalLM"]
+    assert config.mtp_num_hidden_layers == 1
+    assert config.num_nextn_predict_layers == 1
+    assert config.num_hidden_layers == 64
+
+
 def test_default_adapter_adds_mmproj_for_multimodal_config(tmp_path, monkeypatch):
     main_path = tmp_path / "model.gguf"
     mmproj_path = tmp_path / "mmproj-BF16.gguf"
@@ -1550,6 +1640,28 @@ def test_qwen3_5_mtp_gguf_mappings():
     assert mapping["blk.40.nextn.shared_head_norm.weight"] == "mtp.norm.weight"
     assert "blk.41.nextn.eh_proj.weight" not in mapping
     assert sideload_params[0].fullmatch("mtp.layers.0.mlp.experts.15.gate_proj.weight")
+
+
+def test_qwen3_5_dense_mtp_gguf_mappings_use_trunk_layer_count():
+    config = PretrainedConfig(
+        model_type="qwen3_5",
+        num_hidden_layers=64,
+        mtp_num_hidden_layers=1,
+    )
+    mapping: dict[str, str] = {}
+    sideload_params = []
+
+    _add_qwen3_5_mtp_gguf_mappings(config, mapping, sideload_params)
+
+    assert mapping["blk.64.attn_q.weight"] == ("mtp.layers.0.self_attn.q_proj.weight")
+    assert mapping["blk.64.attn_k.weight"] == ("mtp.layers.0.self_attn.k_proj.weight")
+    assert mapping["blk.64.attn_v.weight"] == ("mtp.layers.0.self_attn.v_proj.weight")
+    assert mapping["blk.64.ffn_gate.weight"] == "mtp.layers.0.mlp.gate_proj.weight"
+    assert mapping["blk.64.ffn_up.weight"] == "mtp.layers.0.mlp.up_proj.weight"
+    assert mapping["blk.64.ffn_down.weight"] == "mtp.layers.0.mlp.down_proj.weight"
+    assert mapping["blk.64.nextn.eh_proj.weight"] == "mtp.fc.weight"
+    assert mapping["blk.64.nextn.shared_head_norm.weight"] == "mtp.norm.weight"
+    assert "blk.65.attn_q.weight" not in mapping
 
 
 def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch):

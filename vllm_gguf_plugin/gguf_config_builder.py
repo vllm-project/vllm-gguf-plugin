@@ -379,7 +379,11 @@ def _build_qwen35_config(
     has_lm_head: bool,
 ) -> PretrainedConfig:
     prefix = "qwen35"
-    num_layers = _read_int(reader, f"{prefix}.block_count")
+    block_count = _read_int(reader, f"{prefix}.block_count")
+    nextn_layers = _read_int(reader, f"{prefix}.nextn_predict_layers") or 0
+    num_layers = None
+    if block_count is not None:
+        num_layers = max(block_count - nextn_layers, 0)
     head_dim = _read_int(reader, f"{prefix}.attention.key_length")
     rope_dim = _read_int(reader, f"{prefix}.rope.dimension_count")
     partial_rotary_factor = None
@@ -395,6 +399,8 @@ def _build_qwen35_config(
             "hidden_size": _read_int(reader, f"{prefix}.embedding_length"),
             "intermediate_size": _read_int(reader, f"{prefix}.feed_forward_length"),
             "num_hidden_layers": num_layers,
+            "mtp_num_hidden_layers": nextn_layers or None,
+            "num_nextn_predict_layers": nextn_layers or None,
             "num_attention_heads": _read_int(reader, f"{prefix}.attention.head_count"),
             "num_key_value_heads": _read_int(
                 reader, f"{prefix}.attention.head_count_kv"

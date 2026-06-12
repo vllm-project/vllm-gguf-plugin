@@ -191,6 +191,15 @@ def _add_qwen3_5_mtp_gguf_mappings(
                 f"blk.{gguf_idx}.attn_k_norm.weight": (
                     f"{layer_prefix}.self_attn.k_norm.weight"
                 ),
+                f"blk.{gguf_idx}.ffn_gate.weight": (
+                    f"{layer_prefix}.mlp.gate_proj.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_up.weight": (
+                    f"{layer_prefix}.mlp.up_proj.weight"
+                ),
+                f"blk.{gguf_idx}.ffn_down.weight": (
+                    f"{layer_prefix}.mlp.down_proj.weight"
+                ),
                 f"blk.{gguf_idx}.ffn_gate_inp.weight": (
                     f"{layer_prefix}.mlp.gate.weight"
                 ),
