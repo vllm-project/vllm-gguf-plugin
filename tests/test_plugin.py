@@ -969,6 +969,109 @@ def test_build_tokenizer_from_gguf_patches_gemma4_special_tokens(
     assert tokenizer_config["extra_special_tokens"]["eoi_token"] == "<image|>"
 
 
+def test_build_tokenizer_from_gguf_prefers_local_config_special_token_ids(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "eos_token_id": 4,
+                "pad_token_id": 0,
+                "text_config": {
+                    "bos_token_id": 1,
+                    "eos_token_id": 2,
+                    "pad_token_id": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "gemma4",
+            "tokenizer.ggml.tokens": [
+                "<pad>",
+                "<bos>",
+                "<eos>",
+                "hello",
+                "<turn|>",
+            ],
+            "tokenizer.ggml.token_type": [3, 3, 3, 1, 3],
+            "tokenizer.ggml.model": "gpt2",
+            "tokenizer.ggml.merges": ["h ello"],
+            "tokenizer.ggml.bos_token_id": 1,
+            "tokenizer.ggml.eos_token_id": 2,
+            "tokenizer.ggml.padding_token_id": 0,
+        }
+    )
+    calls = []
+
+    class FakeTokenizer:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs)
+
+        def save_pretrained(self, path):
+            (path / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (path / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv(
+        "VLLM_GGUF_TOKENIZER_CACHE",
+        str(tmp_path / "tokenizer-cache"),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module.gguf,
+        "GGUFReader",
+        lambda path: fake_reader,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "convert_gguf_tokenizer",
+        lambda architecture, tokenizer_dict: (object(), {}),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "PreTrainedTokenizerFast",
+        FakeTokenizer,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: None,
+    )
+
+    tokenizer_path = build_tokenizer_from_gguf(gguf_path)
+
+    assert tokenizer_path is not None
+    assert calls[0]["bos_token"] == "<bos>"
+    assert calls[0]["eos_token"] == "<turn|>"
+    assert calls[0]["pad_token"] == "<pad>"
+    tokenizer_config_path = Path(tokenizer_path) / "tokenizer_config.json"
+    tokenizer_config = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
+    assert tokenizer_config["eos_token"] == "<turn|>"
+    assert "<turn|>" not in tokenizer_config.get("additional_special_tokens", [])
+
+    tokenizer_config_path.write_text(
+        json.dumps({"additional_special_tokens": ["<turn|>", "<|think|>"]}),
+        encoding="utf-8",
+    )
+    assert build_tokenizer_from_gguf(gguf_path) == tokenizer_path
+    cached_tokenizer_config = json.loads(
+        tokenizer_config_path.read_text(encoding="utf-8")
+    )
+    assert cached_tokenizer_config["eos_token"] == "<turn|>"
+    assert "<turn|>" not in cached_tokenizer_config.get(
+        "additional_special_tokens",
+        [],
+    )
+    assert "<|think|>" in cached_tokenizer_config.get(
+        "additional_special_tokens",
+        [],
+    )
+
+
 def test_extract_vision_config_accepts_single_value_metadata(monkeypatch):
     fake_reader = _FakeGGUFReader(
         {

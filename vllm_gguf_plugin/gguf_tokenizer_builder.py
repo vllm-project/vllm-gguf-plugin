@@ -120,6 +120,10 @@ def _extract_tokenizer_config(reader: gguf.GGUFReader) -> dict[str, Any]:
 def _token_by_id(tokens: list[Any], token_id: Any) -> str | None:
     if token_id is None:
         return None
+    if isinstance(token_id, (list, tuple)):
+        if not token_id:
+            return None
+        token_id = token_id[0]
     with suppress(TypeError, ValueError, IndexError):
         token = tokens[int(token_id)]
         if isinstance(token, str):
@@ -140,6 +144,62 @@ def _special_token_kwargs(tokenizer_dict: dict[str, Any]) -> dict[str, str]:
     return {
         key: token
         for key, token_id in special_ids.items()
+        if (token := _token_by_id(tokens, token_id)) is not None
+    }
+
+
+def _local_config_path(model_path: Path) -> Path | None:
+    """Return the nearest local HF config next to a GGUF file, if present."""
+    for candidate in (model_path.parent, model_path.parent.parent):
+        config_path = candidate / "config.json"
+        if config_path.is_file():
+            return config_path
+    return None
+
+
+def _read_special_token_ids_from_config(config: dict[str, Any]) -> dict[str, Any]:
+    text_config = config.get("text_config")
+    if not isinstance(text_config, dict):
+        text_config = {}
+
+    special_ids: dict[str, Any] = {}
+    for token_name, config_key in {
+        "bos_token": "bos_token_id",
+        "eos_token": "eos_token_id",
+        "pad_token": "pad_token_id",
+        "unk_token": "unk_token_id",
+    }.items():
+        token_id = config.get(config_key)
+        if token_id is None:
+            token_id = text_config.get(config_key)
+        if token_id is not None:
+            special_ids[token_name] = token_id
+    return special_ids
+
+
+def _local_config_special_token_kwargs(
+    model_path: Path,
+    tokenizer_dict: dict[str, Any],
+) -> dict[str, str]:
+    tokens = tokenizer_dict.get("tokens")
+    if not isinstance(tokens, list):
+        return {}
+
+    config_path = _local_config_path(model_path)
+    if config_path is None:
+        return {}
+
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.debug("Failed to read local GGUF config %s: %s", config_path, e)
+        return {}
+
+    return {
+        token_name: token
+        for token_name, token_id in _read_special_token_ids_from_config(
+            config,
+        ).items()
         if (token := _token_by_id(tokens, token_id)) is not None
     }
 
@@ -231,13 +291,46 @@ def _append_additional_special_tokens(
     return changed
 
 
+def _remove_additional_special_tokens(
+    tokenizer_config: dict[str, Any],
+    tokens: set[str],
+) -> bool:
+    if not tokens:
+        return False
+
+    existing = tokenizer_config.get("additional_special_tokens")
+    if existing is None:
+        return False
+    additional_tokens = list(existing) if isinstance(existing, list) else [existing]
+
+    filtered_tokens: list[Any] = []
+    changed = False
+    for item in additional_tokens:
+        token = None
+        if isinstance(item, str):
+            token = item
+        elif isinstance(item, dict) and isinstance(item.get("content"), str):
+            token = item["content"]
+        if token in tokens:
+            changed = True
+            continue
+        filtered_tokens.append(item)
+
+    if changed:
+        tokenizer_config["additional_special_tokens"] = filtered_tokens
+    return changed
+
+
 _GGUF_SPECIAL_TOKEN_TYPES = {
     int(gguf.TokenType.CONTROL),
     int(gguf.TokenType.USER_DEFINED),
 }
 
 
-def _gguf_special_control_tokens(tokenizer_dict: dict[str, Any]) -> list[str]:
+def _gguf_special_control_tokens(
+    tokenizer_dict: dict[str, Any],
+    special_token_kwargs: dict[str, str] | None = None,
+) -> list[str]:
     """Restore GGUF control/user-defined tokens as HF special tokens."""
     tokens = tokenizer_dict.get("tokens")
     token_types = tokenizer_dict.get("token_type")
@@ -245,6 +338,8 @@ def _gguf_special_control_tokens(tokenizer_dict: dict[str, Any]) -> list[str]:
         return []
 
     named_special_tokens = set(_special_token_kwargs(tokenizer_dict).values())
+    if special_token_kwargs:
+        named_special_tokens.update(special_token_kwargs.values())
     special_tokens: list[str] = []
     for token, token_type in zip(tokens, token_types, strict=False):
         if not isinstance(token, str) or token in named_special_tokens:
@@ -259,6 +354,7 @@ def _patch_tokenizer_config_from_gguf(
     cache_dir: Path,
     architecture: str,
     tokenizer_dict: dict[str, Any],
+    model_path: Path,
 ) -> None:
     tokenizer_config_path = cache_dir / "tokenizer_config.json"
     if not tokenizer_config_path.is_file():
@@ -271,9 +367,22 @@ def _patch_tokenizer_config_from_gguf(
         return
 
     changed = False
+    special_token_kwargs = _local_config_special_token_kwargs(
+        model_path,
+        tokenizer_dict,
+    )
+    for token_name, token in special_token_kwargs.items():
+        if tokenizer_config.get(token_name) != token:
+            tokenizer_config[token_name] = token
+            changed = True
+    changed |= _remove_additional_special_tokens(
+        tokenizer_config,
+        set(special_token_kwargs.values()),
+    )
+
     changed |= _append_additional_special_tokens(
         tokenizer_config,
-        _gguf_special_control_tokens(tokenizer_dict),
+        _gguf_special_control_tokens(tokenizer_dict, special_token_kwargs),
     )
 
     if architecture in {"gemma4", "gemma4-assistant", "gemma4_assistant"}:
@@ -549,7 +658,12 @@ def _patch_cached_tokenizer_from_gguf(
         )
         return None
 
-    _patch_tokenizer_config_from_gguf(cache_dir, architecture, tokenizer_dict)
+    _patch_tokenizer_config_from_gguf(
+        cache_dir,
+        architecture,
+        tokenizer_dict,
+        model_path,
+    )
     _materialize_processor_sidecars(model_path, cache_dir, architecture)
     return architecture
 
@@ -588,10 +702,14 @@ def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
             tokenizer_architecture,
             tokenizer_dict,
         )
+        special_token_kwargs = _special_token_kwargs(tokenizer_dict)
+        special_token_kwargs.update(
+            _local_config_special_token_kwargs(model_path, tokenizer_dict)
+        )
         tokenizer = PreTrainedTokenizerFast(
             tokenizer_object=backend_tokenizer,
             **additional_kwargs,
-            **_special_token_kwargs(tokenizer_dict),
+            **special_token_kwargs,
         )
         if chat_template := tokenizer_config.get("chat_template"):
             tokenizer.chat_template = chat_template
@@ -601,6 +719,11 @@ def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(cache_dir)
-    _patch_tokenizer_config_from_gguf(cache_dir, architecture, tokenizer_dict)
+    _patch_tokenizer_config_from_gguf(
+        cache_dir,
+        architecture,
+        tokenizer_dict,
+        model_path,
+    )
     _materialize_processor_sidecars(model_path, cache_dir, architecture)
     return str(cache_dir)
