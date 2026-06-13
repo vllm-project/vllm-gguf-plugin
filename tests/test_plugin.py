@@ -36,6 +36,7 @@ import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 import vllm_gguf_plugin.quantization.params as gguf_params_module
 import vllm_gguf_plugin.weights_adapter.default as default_adapter_module
+import vllm_gguf_plugin.weights_adapter.qwen3_5 as qwen3_5_adapter_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
 from vllm_gguf_plugin.gguf_tokenizer_builder import build_tokenizer_from_gguf
@@ -1382,6 +1383,200 @@ def test_qwen3_5_dense_mtp_gguf_mappings_use_trunk_layer_count():
     assert mapping["blk.64.nextn.eh_proj.weight"] == "mtp.fc.weight"
     assert mapping["blk.64.nextn.shared_head_norm.weight"] == "mtp.norm.weight"
     assert "blk.65.attn_q.weight" not in mapping
+
+
+def _qwen3_5_linear_attn_test_config():
+    return PretrainedConfig(
+        model_type="qwen3_5_moe",
+        linear_num_key_heads=2,
+        linear_num_value_heads=6,
+        linear_key_head_dim=2,
+        linear_value_head_dim=2,
+    )
+
+
+def _grouped_to_tiled_v_heads_for_test(
+    tensor: torch.Tensor,
+    dim: int,
+    *,
+    num_k_heads: int = 2,
+    num_v_per_k: int = 3,
+    head_dim: int = 2,
+) -> torch.Tensor:
+    shape = list(tensor.shape)
+    if dim < 0:
+        dim += len(shape)
+    tensor = tensor.reshape(
+        *shape[:dim], num_k_heads, num_v_per_k, head_dim, *shape[dim + 1 :]
+    )
+    perm = list(range(tensor.dim()))
+    perm[dim], perm[dim + 1] = perm[dim + 1], perm[dim]
+    return tensor.permute(*perm).contiguous().reshape(*shape)
+
+
+def test_qwen3_5_adapter_restores_gdn_layout():
+    torch.manual_seed(2)
+    adapter = Qwen3_5GGUFAdapter(_qwen3_5_linear_attn_test_config())
+    key_dim = 4
+    value_dim = 12
+    hidden = 5
+
+    qkv = torch.randn(2 * key_dim + value_dim, hidden)
+    stored_qkv = torch.cat(
+        (
+            qkv[: 2 * key_dim],
+            _grouped_to_tiled_v_heads_for_test(qkv[2 * key_dim :], 0),
+        ),
+        dim=0,
+    )
+    assert torch.allclose(
+        adapter.transform_weight(
+            "model.layers.0.linear_attn.in_proj_qkv.weight", stored_qkv
+        ),
+        qkv,
+    )
+
+    z = torch.randn(value_dim, hidden)
+    stored_z = _grouped_to_tiled_v_heads_for_test(z, 0)
+    assert torch.allclose(
+        adapter.transform_weight(
+            "model.layers.0.linear_attn.in_proj_z.weight", stored_z
+        ),
+        z,
+    )
+
+    beta = torch.randn(6, hidden)
+    stored_beta = _grouped_to_tiled_v_heads_for_test(beta, 0, head_dim=1)
+    assert torch.allclose(
+        adapter.transform_weight(
+            "model.layers.0.linear_attn.in_proj_b.weight", stored_beta
+        ),
+        beta,
+    )
+
+    dt_bias = torch.randn(6)
+    stored_dt_bias = _grouped_to_tiled_v_heads_for_test(
+        dt_bias.unsqueeze(-1), 0, head_dim=1
+    ).squeeze(-1)
+    assert torch.allclose(
+        adapter.transform_weight("model.layers.0.linear_attn.dt_bias", stored_dt_bias),
+        dt_bias,
+    )
+
+    a_log = torch.rand(6) + 0.1
+    stored_a_log = _grouped_to_tiled_v_heads_for_test(
+        (-torch.exp(a_log)).unsqueeze(-1), 0, head_dim=1
+    ).squeeze(-1)
+    assert torch.allclose(
+        adapter.transform_weight("model.layers.0.linear_attn.A_log", stored_a_log),
+        a_log,
+        atol=1e-6,
+    )
+
+    conv = torch.randn(2 * key_dim + value_dim, 3)
+    stored_conv = torch.cat(
+        (
+            conv[: 2 * key_dim],
+            _grouped_to_tiled_v_heads_for_test(conv[2 * key_dim :], 0),
+        ),
+        dim=0,
+    )
+    restored_conv = adapter.transform_weight(
+        "model.layers.0.linear_attn.conv1d.weight", stored_conv
+    )
+    assert restored_conv.shape == (2 * key_dim + value_dim, 1, 3)
+    assert torch.allclose(restored_conv[:, 0, :], conv)
+
+    out_proj = torch.randn(hidden, value_dim)
+    stored_out_proj = _grouped_to_tiled_v_heads_for_test(out_proj, 1)
+    assert torch.allclose(
+        adapter.transform_weight(
+            "model.layers.0.linear_attn.out_proj.weight", stored_out_proj
+        ),
+        out_proj,
+    )
+
+
+def test_qwen3_5_adapter_restores_text_norm_weights():
+    adapter = Qwen3_5GGUFAdapter(_qwen3_5_linear_attn_test_config())
+    weight = torch.tensor([1.25, 2.5, 0.75])
+
+    assert torch.allclose(
+        adapter.transform_weight("model.layers.0.input_layernorm.weight", weight),
+        weight - 1,
+    )
+    assert torch.allclose(
+        adapter.transform_weight(
+            "model.language_model.layers.0.post_attention_layernorm.weight",
+            weight,
+        ),
+        weight - 1,
+    )
+    assert torch.allclose(
+        adapter.transform_weight("model.norm.weight", weight),
+        weight - 1,
+    )
+
+    assert torch.equal(
+        adapter.transform_weight("model.layers.0.linear_attn.norm.weight", weight),
+        weight,
+    )
+    assert torch.equal(
+        adapter.transform_weight("model.visual.merger.norm.weight", weight),
+        weight,
+    )
+
+
+def test_qwen3_5_adapter_forwards_quantized_gdn_weights():
+    adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5_moe"))
+    qweight_type = torch.tensor(int(WeightType.Q5_K))
+    qweight = torch.randn(2, 3)
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                ("model.layers.0.linear_attn.in_proj_a.qweight_type", qweight_type),
+                ("model.layers.0.linear_attn.in_proj_a.qweight", qweight),
+            ]
+        )
+    )
+
+    assert mapped == [
+        ("model.layers.0.linear_attn.in_proj_a.qweight_type", qweight_type),
+        ("model.layers.0.linear_attn.in_proj_a.qweight", qweight),
+    ]
+    assert adapter._qweight_types["model.layers.0.linear_attn.in_proj_a"] == (
+        WeightType.Q5_K
+    )
+
+
+def test_qwen3_5_adapter_dequantizes_forced_out_proj(monkeypatch):
+    adapter = Qwen3_5GGUFAdapter(_qwen3_5_linear_attn_test_config())
+    module_name = "model.layers.0.linear_attn.out_proj"
+    adapter._forced_dequantized_modules.add(module_name)
+    dense = torch.randn(5, 12)
+    stored_dense = _grouped_to_tiled_v_heads_for_test(dense, 1)
+
+    def fake_dequantize(weight, qweight_type):
+        assert qweight_type == WeightType.Q5_K
+        return stored_dense.numpy()
+
+    monkeypatch.setattr(
+        qwen3_5_adapter_module.gguf.quants, "dequantize", fake_dequantize
+    )
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{module_name}.qweight_type", torch.tensor(int(WeightType.Q5_K))),
+                (f"{module_name}.qweight", torch.zeros(1)),
+            ]
+        )
+    )
+
+    assert len(mapped) == 1
+    assert mapped[0][0] == f"{module_name}.weight"
+    assert torch.allclose(mapped[0][1], dense)
 
 
 def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch):
