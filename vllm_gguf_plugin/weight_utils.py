@@ -10,7 +10,7 @@ from pathlib import Path
 import gguf
 import numpy as np
 import torch
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import hf_hub_download, list_repo_files, snapshot_download
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -85,6 +85,57 @@ def _download_candidate_sort_key(path: str) -> tuple[bool, int, str, int, str]:
     return (True, normalized.count("-"), normalized, int(match.group(1)), path)
 
 
+def _mmproj_quant_tokens(quant_type: str) -> tuple[str, ...]:
+    quant_type = quant_type.upper()
+    tokens = [quant_type]
+    if "-" in quant_type:
+        tokens.append(quant_type.rsplit("-", 1)[1])
+    return tuple(dict.fromkeys(tokens))
+
+
+def _mmproj_candidate_sort_key(filename: str, quant_type: str) -> tuple[int, str]:
+    basename = Path(filename).name
+    name = basename.upper()
+    if basename.lower() == "mmproj.gguf":
+        priority = 0
+    elif any(token in name for token in _mmproj_quant_tokens(quant_type)):
+        priority = 1
+    elif "BF16" not in name and "F16" in name:
+        priority = 2
+    elif "BF16" in name:
+        priority = 3
+    elif "F32" in name:
+        priority = 4
+    else:
+        priority = 5
+    return priority, filename
+
+
+def _select_remote_mmproj_filename(
+    repo_id: str,
+    quant_type: str,
+    revision: str | None,
+) -> str | None:
+    try:
+        files = list_repo_files(repo_id, revision=revision)
+    except Exception as e:
+        logger.debug("Failed to inspect GGUF repo sidecars for %s: %s", repo_id, e)
+        return None
+
+    mmproj_files = [
+        filename
+        for filename in files
+        if filename.lower().endswith(".gguf")
+        and "mmproj" in Path(filename).name.lower()
+    ]
+    if not mmproj_files:
+        return None
+    return sorted(
+        mmproj_files,
+        key=lambda name: _mmproj_candidate_sort_key(name, quant_type),
+    )[0]
+
+
 def download_gguf(
     repo_id: str,
     quant_type: str,
@@ -104,6 +155,12 @@ def download_gguf(
             (pattern, f"*/{pattern}") for pattern in base_patterns
         )
     )
+    if mmproj_filename := _select_remote_mmproj_filename(
+        repo_id,
+        quant_type,
+        revision,
+    ):
+        allow_patterns.append(mmproj_filename)
 
     folder = snapshot_download(
         repo_id=repo_id,
@@ -116,6 +173,11 @@ def download_gguf(
     local_files: list[str] = []
     for pattern in allow_patterns:
         local_files.extend(glob.glob(os.path.join(folder, pattern)))
+    local_files = [
+        filename
+        for filename in local_files
+        if "mmproj" not in Path(filename).name.lower()
+    ]
 
     if not local_files:
         raise ValueError(

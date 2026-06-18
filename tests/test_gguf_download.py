@@ -66,8 +66,9 @@ class TestRemoteGGUFFileRefs:
 class TestGGUFDownload:
     """Test GGUF model downloading functionality."""
 
+    @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    def test_download_gguf_single_file(self, mock_download):
+    def test_download_gguf_single_file(self, mock_download, mock_list_repo_files):
         """Test downloading a single GGUF file."""
         mock_folder = "/tmp/mock_cache"
         mock_download.return_value = mock_folder
@@ -105,9 +106,115 @@ class TestGGUFDownload:
             )
 
             assert result == f"{mock_folder}/model-IQ1_S.gguf"
+            mock_list_repo_files.assert_called_once_with(
+                "unsloth/Qwen3-0.6B-GGUF",
+                revision=None,
+            )
 
+    @patch(
+        "vllm_gguf_plugin.weight_utils.list_repo_files",
+        return_value=[
+            "Qwen3.5-0.8B-Q4_K_M.gguf",
+            "mmproj-BF16.gguf",
+            "mmproj-F16.gguf",
+            "mmproj-F32.gguf",
+        ],
+    )
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    def test_download_gguf_sharded_files(self, mock_download, tmp_path):
+    def test_download_gguf_downloads_preferred_f16_mmproj(
+        self,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
+    ):
+        mock_download.return_value = str(tmp_path)
+        (tmp_path / "Qwen3.5-0.8B-Q4_K_M.gguf").touch()
+        (tmp_path / "mmproj-F16.gguf").touch()
+
+        result = download_gguf("unsloth/Qwen3.5-0.8B-GGUF", "Q4_K_M")
+
+        assert result == str(tmp_path / "Qwen3.5-0.8B-Q4_K_M.gguf")
+        assert "mmproj-F16.gguf" in mock_download.call_args.kwargs["allow_patterns"]
+        assert (
+            "mmproj-BF16.gguf" not in mock_download.call_args.kwargs["allow_patterns"]
+        )
+        mock_list_repo_files.assert_called_once_with(
+            "unsloth/Qwen3.5-0.8B-GGUF",
+            revision=None,
+        )
+
+    @patch(
+        "vllm_gguf_plugin.weight_utils.list_repo_files",
+        return_value=[
+            "gemma-4-E2B-it-Q8_0.gguf",
+            "mmproj-gemma-4-E2B-it-Q8_0.gguf",
+            "mmproj-gemma-4-E2B-it-bf16.gguf",
+        ],
+    )
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_prefers_quant_matched_mmproj(
+        self,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
+    ):
+        mock_download.return_value = str(tmp_path)
+        (tmp_path / "gemma-4-E2B-it-Q8_0.gguf").touch()
+        (tmp_path / "mmproj-gemma-4-E2B-it-Q8_0.gguf").touch()
+
+        result = download_gguf("ggml-org/gemma-4-E2B-it-GGUF", "Q8_0")
+
+        assert result == str(tmp_path / "gemma-4-E2B-it-Q8_0.gguf")
+        assert (
+            "mmproj-gemma-4-E2B-it-Q8_0.gguf"
+            in mock_download.call_args.kwargs["allow_patterns"]
+        )
+        assert (
+            "mmproj-gemma-4-E2B-it-bf16.gguf"
+            not in mock_download.call_args.kwargs["allow_patterns"]
+        )
+        mock_list_repo_files.assert_called_once_with(
+            "ggml-org/gemma-4-E2B-it-GGUF",
+            revision=None,
+        )
+
+    @patch(
+        "vllm_gguf_plugin.weight_utils.list_repo_files",
+        return_value=[
+            "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf",
+            "mmproj-Q4_K_XL.gguf",
+            "mmproj-F16.gguf",
+        ],
+    )
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_matches_mmproj_for_prefixed_quant_type(
+        self,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
+    ):
+        mock_download.return_value = str(tmp_path)
+        (tmp_path / "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf").touch()
+        (tmp_path / "mmproj-Q4_K_XL.gguf").touch()
+
+        result = download_gguf("unsloth/Qwen3.5-35B-A3B-GGUF", "UD-Q4_K_XL")
+
+        assert result == str(tmp_path / "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf")
+        assert "mmproj-Q4_K_XL.gguf" in mock_download.call_args.kwargs["allow_patterns"]
+        assert "mmproj-F16.gguf" not in mock_download.call_args.kwargs["allow_patterns"]
+        mock_list_repo_files.assert_called_once_with(
+            "unsloth/Qwen3.5-35B-A3B-GGUF",
+            revision=None,
+        )
+
+    @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_sharded_files(
+        self,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
+    ):
         """Test downloading sharded GGUF files."""
         mock_folder = str(tmp_path)
         mock_download.return_value = mock_folder
@@ -117,9 +224,14 @@ class TestGGUFDownload:
         result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
 
         assert result == f"{mock_folder}/model-Q2_K-00001-of-00002.gguf"
+        mock_list_repo_files.assert_called_once_with(
+            "unsloth/gpt-oss-120b-GGUF",
+            revision=None,
+        )
 
+    @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    def test_download_gguf_subdir(self, mock_download, tmp_path):
+    def test_download_gguf_subdir(self, mock_download, mock_list_repo_files, tmp_path):
         """Test downloading GGUF files from subdirectory."""
         mock_folder = str(tmp_path)
         mock_download.return_value = mock_folder
@@ -129,16 +241,30 @@ class TestGGUFDownload:
         result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
 
         assert result == f"{mock_folder}/Q2_K/model-Q2_K.gguf"
+        mock_list_repo_files.assert_called_once_with(
+            "unsloth/gpt-oss-120b-GGUF",
+            revision=None,
+        )
 
+    @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
     @patch("glob.glob", return_value=[])
-    def test_download_gguf_no_files_found(self, mock_glob, mock_download):
+    def test_download_gguf_no_files_found(
+        self,
+        mock_glob,
+        mock_download,
+        mock_list_repo_files,
+    ):
         """Test error when no GGUF files are found."""
         mock_folder = "/tmp/mock_cache"
         mock_download.return_value = mock_folder
 
         with pytest.raises(ValueError, match="Downloaded GGUF files not found"):
             download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
+        mock_list_repo_files.assert_called_once_with(
+            "unsloth/Qwen3-0.6B-GGUF",
+            revision=None,
+        )
 
     @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
     def test_download_gguf_file_single_exact_file(self, mock_hf_download):
