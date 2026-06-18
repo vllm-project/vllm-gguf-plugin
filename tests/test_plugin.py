@@ -71,6 +71,7 @@ from vllm_gguf_plugin.weights_adapter.default import (
     _add_nvfp4_sidecar_mappings,
     _add_qwen3_5_mtp_gguf_mappings,
 )
+from vllm_gguf_plugin.weights_adapter.gemma3 import Gemma3GGUFAdapter
 from vllm_gguf_plugin.weights_adapter.gemma4 import Gemma4GGUFAdapter
 from vllm_gguf_plugin.weights_adapter.qwen3_5 import Qwen3_5GGUFAdapter
 
@@ -110,7 +111,7 @@ def test_oot_config_reuses_in_tree_behavior():
     assert repr(quant_config) == "GGUFConfig()"
 
 
-def test_adapter_registry_selects_qwen35_and_gemma4():
+def test_adapter_registry_selects_qwen35_gemma3_and_gemma4():
     assert isinstance(
         get_weights_adapter(PretrainedConfig(model_type="qwen3_5")),
         Qwen3_5GGUFAdapter,
@@ -120,6 +121,10 @@ def test_adapter_registry_selects_qwen35_and_gemma4():
         Qwen3_5GGUFAdapter,
     )
     assert isinstance(
+        get_weights_adapter(PretrainedConfig(model_type="gemma3")),
+        Gemma3GGUFAdapter,
+    )
+    assert isinstance(
         get_weights_adapter(PretrainedConfig(model_type="gemma4")),
         Gemma4GGUFAdapter,
     )
@@ -127,6 +132,63 @@ def test_adapter_registry_selects_qwen35_and_gemma4():
         get_weights_adapter(PretrainedConfig(model_type="gemma4_assistant")),
         Gemma4GGUFAdapter,
     )
+
+
+def test_gemma3_adapter_requires_mmproj_for_multimodal_layout(tmp_path, monkeypatch):
+    main_path = tmp_path / "model.gguf"
+    main_path.touch()
+    adapter = Gemma3GGUFAdapter(PretrainedConfig(model_type="gemma3"))
+    multimodal_config = PretrainedConfig(
+        model_type="gemma3",
+        architectures=["Gemma3ForConditionalGeneration"],
+    )
+    multimodal_config.vision_config = PretrainedConfig()
+    model_config = SimpleNamespace(
+        hf_config=multimodal_config,
+        language_model_only=False,
+    )
+
+    monkeypatch.setattr(adapter, "patch_hf_config", lambda model, config: config)
+    monkeypatch.setattr(
+        "vllm_gguf_plugin.weights_adapter.gemma3.detect_gguf_multimodal",
+        lambda model: None,
+    )
+
+    with pytest.raises(ValueError, match="requires an mmproj sidecar"):
+        adapter.prepare_loading(str(main_path), model_config)
+
+
+def test_gemma3_adapter_allows_language_model_only_without_mmproj(
+    tmp_path, monkeypatch
+):
+    main_path = tmp_path / "model.gguf"
+    main_path.touch()
+    adapter = Gemma3GGUFAdapter(PretrainedConfig(model_type="gemma3"))
+    multimodal_config = PretrainedConfig(
+        model_type="gemma3",
+        architectures=["Gemma3ForConditionalGeneration"],
+    )
+    multimodal_config.vision_config = PretrainedConfig()
+    model_config = SimpleNamespace(
+        hf_config=multimodal_config,
+        language_model_only=True,
+    )
+
+    monkeypatch.setattr(adapter, "patch_hf_config", lambda model, config: config)
+    monkeypatch.setattr(
+        "vllm_gguf_plugin.weights_adapter.gemma3.detect_gguf_multimodal",
+        lambda model: None,
+    )
+    monkeypatch.setattr(
+        "vllm_gguf_plugin.weights_adapter.gemma3.get_gguf_unquantized_params",
+        lambda gguf_files: [],
+    )
+
+    load_spec = adapter.prepare_loading(str(main_path), model_config)
+
+    assert load_spec is adapter.load_spec
+    assert load_spec.weights_source == [str(main_path)]
+    assert load_spec.unquantized_modules == []
 
 
 def test_gemma4_adapter_transforms_quantized_moe_names():

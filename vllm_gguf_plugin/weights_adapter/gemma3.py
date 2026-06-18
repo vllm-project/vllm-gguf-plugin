@@ -69,6 +69,16 @@ def build_gemma3_mapper(is_multimodal: bool) -> WeightsMapper:
     )
 
 
+def _uses_gemma3_multimodal_weight_layout(config) -> bool:
+    if not hasattr(config, "vision_config") or config.vision_config is None:
+        return False
+
+    architectures = getattr(config, "architectures", None)
+    if not architectures:
+        return True
+    return any("ConditionalGeneration" in arch for arch in architectures)
+
+
 class Gemma3GGUFAdapter(BaseGGUFWeightsAdapter):
     """Adapter for Gemma3 GGUF models."""
 
@@ -99,8 +109,21 @@ class Gemma3GGUFAdapter(BaseGGUFWeightsAdapter):
         )
         gguf_files = resolve_gguf_file_set(model_path)
         mm_proj_path = detect_gguf_multimodal(model_path)
+        uses_multimodal_weight_layout = _uses_gemma3_multimodal_weight_layout(
+            model_config.hf_config
+        )
         if mm_proj_path:
             gguf_files.extend(resolve_gguf_file_set(mm_proj_path))
+        elif uses_multimodal_weight_layout and not getattr(
+            model_config, "language_model_only", False
+        ):
+            raise ValueError(
+                "Multimodal Gemma3 GGUF loading requires an mmproj sidecar next "
+                f"to {model_path}. Place the projector GGUF next to the model, "
+                "use a remote GGUF repo reference so sidecars can be downloaded "
+                "with the model, or pass language_model_only=True for text-only "
+                "inference."
+            )
         self.mapper = build_gemma3_mapper(is_multimodal=mm_proj_path is not None)
         unquantized_params = get_gguf_unquantized_params(gguf_files)
         unquantized_modules = list(
@@ -113,6 +136,7 @@ class Gemma3GGUFAdapter(BaseGGUFWeightsAdapter):
             weights_source=gguf_files,
             unquantized_modules=unquantized_modules,
         )
+        return self.load_spec
 
     def transform_weight(
         self,
