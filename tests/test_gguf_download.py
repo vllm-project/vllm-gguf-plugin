@@ -136,17 +136,11 @@ class TestGGUFDownload:
         result = download_gguf("unsloth/Qwen3.5-0.8B-GGUF", "Q4_K_M")
 
         assert result == str(tmp_path / "Qwen3.5-0.8B-Q4_K_M.gguf")
-        assert "mmproj-F16.gguf" in mock_download.call_args.kwargs["allow_patterns"]
-        assert (
-            "processor_config.json" in mock_download.call_args.kwargs["allow_patterns"]
-        )
-        assert (
-            "*/processor_config.json"
-            in mock_download.call_args.kwargs["allow_patterns"]
-        )
-        assert (
-            "mmproj-BF16.gguf" not in mock_download.call_args.kwargs["allow_patterns"]
-        )
+        assert mock_download.call_args.kwargs["allow_patterns"] == [
+            "Qwen3.5-0.8B-Q4_K_M.gguf",
+            "mmproj-F16.gguf",
+            "processor_config.json",
+        ]
         mock_list_repo_files.assert_called_once_with(
             "unsloth/Qwen3.5-0.8B-GGUF",
             revision=None,
@@ -216,7 +210,47 @@ class TestGGUFDownload:
             revision=None,
         )
 
-    @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
+    @patch(
+        "vllm_gguf_plugin.weight_utils.list_repo_files",
+        return_value=[
+            "Q4_K_M/model-Q4_K_M.gguf",
+            "unrelated/mmproj-Q4_K_M.gguf",
+            "mmproj-F16.gguf",
+            "Q4_K_M/mmproj-F16.gguf",
+            "Q4_K_M/processor_config.json",
+            "unrelated/processor_config.json",
+        ],
+    )
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_ignores_unrelated_mmproj_sidecars(
+        self,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
+    ):
+        mock_download.return_value = str(tmp_path)
+        (tmp_path / "Q4_K_M").mkdir()
+        (tmp_path / "Q4_K_M" / "model-Q4_K_M.gguf").touch()
+        (tmp_path / "Q4_K_M" / "mmproj-F16.gguf").touch()
+        (tmp_path / "Q4_K_M" / "processor_config.json").touch()
+
+        result = download_gguf("org/repo", "Q4_K_M")
+
+        assert result == str(tmp_path / "Q4_K_M" / "model-Q4_K_M.gguf")
+        assert mock_download.call_args.kwargs["allow_patterns"] == [
+            "Q4_K_M/model-Q4_K_M.gguf",
+            "Q4_K_M/mmproj-F16.gguf",
+            "Q4_K_M/processor_config.json",
+        ]
+        mock_list_repo_files.assert_called_once_with("org/repo", revision=None)
+
+    @patch(
+        "vllm_gguf_plugin.weight_utils.list_repo_files",
+        return_value=[
+            "model-Q2_K-00001-of-00002.gguf",
+            "model-Q2_K-00002-of-00002.gguf",
+        ],
+    )
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
     def test_download_gguf_sharded_files(
         self,
@@ -233,6 +267,10 @@ class TestGGUFDownload:
         result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
 
         assert result == f"{mock_folder}/model-Q2_K-00001-of-00002.gguf"
+        assert mock_download.call_args.kwargs["allow_patterns"] == [
+            "model-Q2_K-00001-of-00002.gguf",
+            "model-Q2_K-00002-of-00002.gguf",
+        ]
         mock_list_repo_files.assert_called_once_with(
             "unsloth/gpt-oss-120b-GGUF",
             revision=None,
@@ -555,12 +593,13 @@ class TestGGUFModelLoader:
             revision=None,
         )
 
+    @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
     @patch("glob.glob")
     @patch("os.path.isdir", return_value=False)
     @patch("os.path.isfile", return_value=False)
     def test_prepare_weights_remote_repo_quant_type(
-        self, mock_isfile, mock_isdir, mock_glob, mock_download
+        self, mock_isfile, mock_isdir, mock_glob, mock_download, mock_list_repo_files
     ):
         """Test _prepare_weights with remote repo_id:quant_type format."""
         mock_folder = "/tmp/mock_cache"
@@ -580,6 +619,10 @@ class TestGGUFModelLoader:
         result = loader._prepare_weights(model_config)
         assert result == f"{mock_folder}/model-IQ1_S.gguf"
         mock_download.assert_called_once()
+        mock_list_repo_files.assert_called_once_with(
+            "unsloth/Qwen3-0.6B-GGUF",
+            revision=None,
+        )
 
     @patch("os.path.isfile", return_value=False)
     def test_prepare_weights_invalid_format(self, mock_isfile):

@@ -5,6 +5,7 @@ import itertools
 import os
 import re
 from collections.abc import Generator
+from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 
 import gguf
@@ -170,15 +171,6 @@ def _select_mmproj_filename_from_files(
     return filename
 
 
-def _select_remote_mmproj_filename(
-    repo_id: str,
-    quant_type: str,
-    revision: str | None,
-) -> str | None:
-    files = _list_remote_sidecar_files(repo_id, revision)
-    return _select_mmproj_filename_from_files(files, quant_type)
-
-
 def _select_remote_mmproj_for_gguf_file(
     repo_id: str,
     filename: str,
@@ -252,30 +244,34 @@ def remote_gguf_quant_allow_patterns(quant_type: str) -> list[str]:
     )
 
 
-def download_gguf(
-    repo_id: str,
-    quant_type: str,
-    cache_dir: str | None = None,
-    revision: str | None = None,
-    ignore_patterns: str | list[str] | None = None,
-) -> str:
-    allow_patterns = remote_gguf_quant_allow_patterns(quant_type)
-    if mmproj_filename := _select_remote_mmproj_filename(
-        repo_id,
-        quant_type,
-        revision,
-    ):
-        allow_patterns.append(mmproj_filename)
-        allow_patterns.extend(_remote_processor_sidecar_patterns())
-
-    folder = snapshot_download(
-        repo_id=repo_id,
-        cache_dir=cache_dir,
-        allow_patterns=allow_patterns,
-        revision=revision,
-        ignore_patterns=ignore_patterns,
+def _matches_remote_gguf_quant(filename: str, quant_type: str) -> bool:
+    return any(
+        fnmatch(filename, pattern)
+        for pattern in remote_gguf_quant_allow_patterns(quant_type)
     )
 
+
+def _select_remote_gguf_filename(
+    files: list[str],
+    quant_type: str,
+) -> str | None:
+    gguf_files = [
+        filename
+        for filename in files
+        if filename.lower().endswith(".gguf")
+        and "mmproj" not in Path(filename).name.lower()
+        and _matches_remote_gguf_quant(filename, quant_type)
+    ]
+    if not gguf_files:
+        return None
+    return sorted(set(gguf_files), key=_download_candidate_sort_key)[0]
+
+
+def _resolve_downloaded_gguf_from_patterns(
+    folder: str,
+    allow_patterns: list[str],
+    quant_type: str,
+) -> str:
     local_files: list[str] = []
     for pattern in allow_patterns:
         local_files.extend(glob.glob(os.path.join(folder, pattern)))
@@ -293,6 +289,60 @@ def download_gguf(
 
     local_files = sorted(set(local_files), key=_download_candidate_sort_key)
     return resolve_gguf_file_set(local_files[0])[0]
+
+
+def download_gguf(
+    repo_id: str,
+    quant_type: str,
+    cache_dir: str | None = None,
+    revision: str | None = None,
+    ignore_patterns: str | list[str] | None = None,
+) -> str:
+    sidecar_files = _list_remote_sidecar_files(repo_id, revision)
+    selected_filename = _select_remote_gguf_filename(sidecar_files, quant_type)
+    if selected_filename is None:
+        allow_patterns = remote_gguf_quant_allow_patterns(quant_type)
+        if mmproj_filename := _select_mmproj_filename_from_files(
+            sidecar_files,
+            quant_type,
+        ):
+            allow_patterns.append(mmproj_filename)
+            allow_patterns.extend(_remote_processor_sidecar_patterns())
+
+        folder = snapshot_download(
+            repo_id=repo_id,
+            cache_dir=cache_dir,
+            allow_patterns=allow_patterns,
+            revision=revision,
+            ignore_patterns=ignore_patterns,
+        )
+        return _resolve_downloaded_gguf_from_patterns(
+            folder,
+            allow_patterns,
+            quant_type,
+        )
+
+    allow_patterns = expand_split_gguf_filenames(selected_filename)
+    mmproj_filename = _select_remote_mmproj_for_gguf_file(
+        repo_id,
+        selected_filename,
+        revision,
+        files=sidecar_files,
+    )
+    if mmproj_filename is not None:
+        allow_patterns.append(mmproj_filename)
+        allow_patterns.extend(
+            _select_remote_processor_sidecars(sidecar_files, selected_filename)
+        )
+
+    folder = snapshot_download(
+        repo_id=repo_id,
+        cache_dir=cache_dir,
+        allow_patterns=allow_patterns,
+        revision=revision,
+        ignore_patterns=ignore_patterns,
+    )
+    return resolve_gguf_file_set(os.path.join(folder, selected_filename))[0]
 
 
 def download_gguf_file(
