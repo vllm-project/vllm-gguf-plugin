@@ -428,6 +428,31 @@ def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     assert layer.qweight_type.shard_weight_type == {0: 3, 1: 4}
 
 
+def test_gguf_weight_type_loader_stores_tuple_shards(monkeypatch):
+    register()
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    quant_config = OOTGGUFConfig.from_config({})
+    layer = MergedColumnParallelLinear(
+        input_size=4,
+        output_sizes=[4, 4],
+        bias=False,
+        quant_config=quant_config,
+        disable_tp=True,
+    )
+
+    layer.qweight_type.weight_loader(
+        layer.qweight_type,
+        torch.tensor(3, dtype=torch.uint8),
+        (0, 1),
+    )
+
+    assert layer.qweight_type.shard_weight_type == {0: 3, 1: 3}
+    assert layer.qweight_type.weight_type == 3
+
+
 def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
     monkeypatch.setattr(
         vocab_embedding_module, "get_tensor_model_parallel_rank", lambda: 0

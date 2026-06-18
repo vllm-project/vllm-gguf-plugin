@@ -7,6 +7,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+
 try:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
 except ImportError:
@@ -42,8 +43,12 @@ def _resolve_gguf_weight_type_loader(
         return fallback_weight_loader
 
     def _gguf_weight_type_loader_v2(param, loaded_weight, loaded_shard_id=None):
-        if loaded_shard_id is None and hasattr(param, "_store"):
-            param._store(loaded_weight)
+        if hasattr(param, "_store"):
+            if isinstance(loaded_shard_id, tuple):
+                for shard_id in loaded_shard_id:
+                    param._store(loaded_weight, shard_id=shard_id)
+            else:
+                param._store(loaded_weight, shard_id=loaded_shard_id)
             return
         base_loader(param, loaded_weight, loaded_shard_id)
 
