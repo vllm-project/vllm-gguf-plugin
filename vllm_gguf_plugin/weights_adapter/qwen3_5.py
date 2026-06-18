@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 _QWEN3_5_PATCH_EMBED_WEIGHT = "model.visual.patch_embed.proj.weight"
 _QWEN3_5_PATCH_EMBED_WEIGHT_1 = f"{_QWEN3_5_PATCH_EMBED_WEIGHT}.1"
+_QWEN3_5_TOKEN_EMBD_WEIGHT = "token_embd.weight"
 _QWEIGHT_SUFFIX = ".qweight"
 _QWEIGHT_TYPE_SUFFIX = ".qweight_type"
 
@@ -180,6 +181,53 @@ def _dequantize_gguf_weight(
     return torch.from_numpy(dense.copy())
 
 
+def _force_dequantized_gguf_weight(
+    load_spec,
+    forced_dequantized_modules: set[str],
+    gguf_name: str,
+) -> None:
+    if load_spec.gguf_to_hf_name_map is None:
+        return
+    hf_name = load_spec.gguf_to_hf_name_map.get(gguf_name)
+    if hf_name is None or not hf_name.endswith(".weight"):
+        return
+
+    module_name = hf_name.removesuffix(".weight")
+    forced_dequantized_modules.add(module_name)
+    if module_name not in load_spec.unquantized_modules:
+        load_spec.unquantized_modules.append(module_name)
+
+
+def _qwen3_5_embed_tokens_uses_quant_config() -> bool:
+    import inspect
+
+    try:
+        from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
+    except ImportError:
+        return False
+
+    init = Qwen3_5Model.__init__
+    init_candidates = [init, inspect.unwrap(init)]
+    for cell in getattr(init, "__closure__", ()) or ():
+        try:
+            cell_value = cell.cell_contents
+        except ValueError:
+            continue
+        if inspect.isfunction(cell_value):
+            init_candidates.append(inspect.unwrap(cell_value))
+
+    for init_candidate in init_candidates:
+        init_code = getattr(init_candidate, "__code__", None)
+        if init_code is None:
+            continue
+        if "VocabParallelEmbedding" in init_code.co_names and (
+            "quant_config" in init_code.co_names
+            or "quant_config" in init_code.co_varnames
+        ):
+            return True
+    return False
+
+
 class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
     """Adapter for Qwen3.5 GGUF models."""
 
@@ -199,6 +247,15 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
     ):
         load_spec = super().prepare_loading(model_path, model_config)
         self._forced_dequantized_modules.clear()
+        # Older vLLM builds construct Qwen3.5 embed_tokens without quant_config,
+        # so they need a dense compatibility fallback. Newer builds can keep
+        # the GGUF token embedding packed and run it through GGUFEmbeddingMethod.
+        if not _qwen3_5_embed_tokens_uses_quant_config():
+            _force_dequantized_gguf_weight(
+                load_spec,
+                self._forced_dequantized_modules,
+                _QWEN3_5_TOKEN_EMBD_WEIGHT,
+            )
         if _qwen3_5_linear_attention_dims(self.config) is None:
             return load_spec
         if load_spec.gguf_to_hf_name_map is None:

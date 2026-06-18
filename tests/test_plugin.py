@@ -391,6 +391,111 @@ def test_qwen35_adapter_dequantizes_forced_out_proj(monkeypatch):
     assert torch.equal(mapped[0][1], torch.ones((2, 2), dtype=torch.float32))
 
 
+def test_qwen35_prepare_loading_forces_token_embedding_dequant_without_vllm_support(
+    monkeypatch,
+):
+    adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5"))
+    load_spec = type(
+        "LoadSpec",
+        (),
+        {
+            "gguf_to_hf_name_map": {
+                "token_embd.weight": "model.embed_tokens.weight",
+            },
+            "unquantized_modules": [],
+        },
+    )()
+
+    monkeypatch.setattr(
+        GGUFWeightsAdapter,
+        "prepare_loading",
+        lambda self, model_path, model_config: load_spec,
+    )
+    monkeypatch.setattr(
+        qwen3_5_adapter_module,
+        "_qwen3_5_embed_tokens_uses_quant_config",
+        lambda: False,
+    )
+
+    result = adapter.prepare_loading(
+        "model.gguf",
+        type("ModelConfig", (), {})(),
+    )
+
+    assert result is load_spec
+    assert "model.embed_tokens" in adapter._forced_dequantized_modules
+    assert load_spec.unquantized_modules == ["model.embed_tokens"]
+
+
+def test_qwen35_prepare_loading_keeps_token_embedding_quantized_with_vllm_support(
+    monkeypatch,
+):
+    adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5"))
+    load_spec = type(
+        "LoadSpec",
+        (),
+        {
+            "gguf_to_hf_name_map": {
+                "token_embd.weight": "model.embed_tokens.weight",
+            },
+            "unquantized_modules": [],
+        },
+    )()
+
+    monkeypatch.setattr(
+        GGUFWeightsAdapter,
+        "prepare_loading",
+        lambda self, model_path, model_config: load_spec,
+    )
+    monkeypatch.setattr(
+        qwen3_5_adapter_module,
+        "_qwen3_5_embed_tokens_uses_quant_config",
+        lambda: True,
+    )
+
+    result = adapter.prepare_loading(
+        "model.gguf",
+        type("ModelConfig", (), {})(),
+    )
+
+    assert result is load_spec
+    assert "model.embed_tokens" not in adapter._forced_dequantized_modules
+    assert load_spec.unquantized_modules == []
+
+
+def test_qwen35_adapter_dequantizes_forced_token_embedding(monkeypatch):
+    adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5"))
+    module_name = "model.embed_tokens"
+    adapter._forced_dequantized_modules.add(module_name)
+    qweight_type = torch.tensor(
+        int(qwen3_5_adapter_module.gguf.GGMLQuantizationType.Q6_K)
+    )
+    qweight = torch.ones((2, 2), dtype=torch.uint8)
+
+    def fake_dequantize(weight, weight_type):
+        assert weight_type == qwen3_5_adapter_module.gguf.GGMLQuantizationType.Q6_K
+        return torch.full((2, 2), 3.0, dtype=torch.float32).numpy()
+
+    monkeypatch.setattr(
+        qwen3_5_adapter_module.gguf.quants,
+        "dequantize",
+        fake_dequantize,
+    )
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{module_name}.qweight_type", qweight_type),
+                (f"{module_name}.qweight", qweight),
+            ]
+        )
+    )
+
+    assert len(mapped) == 1
+    assert mapped[0][0] == f"{module_name}.weight"
+    assert torch.equal(mapped[0][1], torch.full((2, 2), 3.0, dtype=torch.float32))
+
+
 def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
