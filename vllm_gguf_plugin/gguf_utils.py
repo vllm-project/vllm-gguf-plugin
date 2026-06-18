@@ -263,11 +263,8 @@ def _source_has_any_file(
     return any(file_or_path_exists(model, filename, revision) for filename in filenames)
 
 
-def _local_gguf_source_candidates(source: Path) -> tuple[Path, ...]:
-    parent = source.parent
-    if parent == source:
-        return (source,)
-    return (source, parent)
+def _local_gguf_source_candidates(model_path: Path) -> tuple[Path, ...]:
+    return tuple(gguf_sidecar_search_dirs(model_path)) or (model_path.parent,)
 
 
 def _resolve_gguf_hf_source(
@@ -285,8 +282,9 @@ def _resolve_gguf_hf_source(
         source, _ = remote_file_ref
         is_remote_source = True
     elif check_gguf_file(model):
-        source = Path(model).parent
-        local_sources = _local_gguf_source_candidates(source)
+        model_path = Path(model)
+        source = model_path.parent
+        local_sources = _local_gguf_source_candidates(model_path)
         is_remote_source = False
     else:
         return model

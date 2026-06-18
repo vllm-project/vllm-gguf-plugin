@@ -275,6 +275,41 @@ class TestDetectGGUFMultimodal:
 
 
 class TestResolveGGUFConfigSource:
+    def test_local_file_uses_hf_snapshot_root_config(self, tmp_path, monkeypatch):
+        snapshot = tmp_path / "models--org--repo" / "snapshots" / "abc123"
+        model_dir = snapshot / "Q8_0" / "nested"
+        model_dir.mkdir(parents=True)
+        model = model_dir / "model.gguf"
+        model.touch()
+        calls = []
+
+        def fake_file_or_path_exists(source, filename, revision):
+            calls.append((Path(source), filename, revision))
+            return Path(source) == snapshot and filename == "config.json"
+
+        def fail_base_model_lookup(model_path):
+            raise AssertionError(
+                "base model lookup should not run when snapshot root has config"
+            )
+
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "_get_local_gguf_base_model_ids",
+            fail_base_model_lookup,
+        )
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "file_or_path_exists",
+            fake_file_or_path_exists,
+        )
+
+        assert resolve_gguf_config_source(model) == snapshot
+        assert calls == [
+            (model_dir, "config.json", None),
+            (snapshot / "Q8_0", "config.json", None),
+            (snapshot, "config.json", None),
+        ]
+
     def test_exact_remote_file_uses_repo_config(self, monkeypatch):
         calls = []
 
