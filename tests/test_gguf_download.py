@@ -118,6 +118,7 @@ class TestGGUFDownload:
             "mmproj-BF16.gguf",
             "mmproj-F16.gguf",
             "mmproj-F32.gguf",
+            "processor_config.json",
         ],
     )
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
@@ -130,11 +131,19 @@ class TestGGUFDownload:
         mock_download.return_value = str(tmp_path)
         (tmp_path / "Qwen3.5-0.8B-Q4_K_M.gguf").touch()
         (tmp_path / "mmproj-F16.gguf").touch()
+        (tmp_path / "processor_config.json").touch()
 
         result = download_gguf("unsloth/Qwen3.5-0.8B-GGUF", "Q4_K_M")
 
         assert result == str(tmp_path / "Qwen3.5-0.8B-Q4_K_M.gguf")
         assert "mmproj-F16.gguf" in mock_download.call_args.kwargs["allow_patterns"]
+        assert (
+            "processor_config.json" in mock_download.call_args.kwargs["allow_patterns"]
+        )
+        assert (
+            "*/processor_config.json"
+            in mock_download.call_args.kwargs["allow_patterns"]
+        )
         assert (
             "mmproj-BF16.gguf" not in mock_download.call_args.kwargs["allow_patterns"]
         )
@@ -299,6 +308,8 @@ class TestGGUFDownload:
         return_value=[
             "Qwen3.6-35B-A3B-NVFP4.gguf",
             "mmproj-BF16.gguf",
+            "processor_config.json",
+            "preprocessor_config.json",
         ],
     )
     @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
@@ -329,6 +340,49 @@ class TestGGUFDownload:
         ] == [
             "Qwen3.6-35B-A3B-NVFP4.gguf",
             "mmproj-BF16.gguf",
+            "processor_config.json",
+            "preprocessor_config.json",
+        ]
+
+    @patch(
+        "vllm_gguf_plugin.weight_utils.list_repo_files",
+        return_value=[
+            "Q8_0/nested/model.gguf",
+            "mmproj-BF16.gguf",
+            "Q8_0/nested/processor_config.json",
+            "Q8_0/preprocessor_config.json",
+            "video_preprocessor_config.json",
+            "unrelated/processor_config.json",
+        ],
+    )
+    @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
+    def test_download_gguf_file_downloads_relevant_processor_sidecars(
+        self,
+        mock_hf_download,
+        mock_list_repo_files,
+    ):
+        def fake_hf_download(**kwargs):
+            return f"/downloaded/{kwargs['filename']}"
+
+        mock_hf_download.side_effect = fake_hf_download
+
+        result = download_gguf_file(
+            "org/repo",
+            "Q8_0/nested/model.gguf",
+            cache_dir="/cache",
+            revision="abc123",
+        )
+
+        assert result == "/downloaded/Q8_0/nested/model.gguf"
+        mock_list_repo_files.assert_called_once_with("org/repo", revision="abc123")
+        assert [
+            call.kwargs["filename"] for call in mock_hf_download.call_args_list
+        ] == [
+            "Q8_0/nested/model.gguf",
+            "mmproj-BF16.gguf",
+            "Q8_0/nested/processor_config.json",
+            "Q8_0/preprocessor_config.json",
+            "video_preprocessor_config.json",
         ]
 
     @patch(
@@ -338,6 +392,7 @@ class TestGGUFDownload:
             "Qwen-Q4_K_M-00002-of-00002.gguf",
             "mmproj-Q4_K_M.gguf",
             "mmproj-F16.gguf",
+            "processor_config.json",
         ],
     )
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
@@ -351,6 +406,7 @@ class TestGGUFDownload:
         (tmp_path / "Qwen-Q4_K_M-00001-of-00002.gguf").touch()
         (tmp_path / "Qwen-Q4_K_M-00002-of-00002.gguf").touch()
         (tmp_path / "mmproj-Q4_K_M.gguf").touch()
+        (tmp_path / "processor_config.json").touch()
 
         result = download_gguf_file(
             "org/repo",
@@ -367,6 +423,7 @@ class TestGGUFDownload:
                 "Qwen-Q4_K_M-00001-of-00002.gguf",
                 "Qwen-Q4_K_M-00002-of-00002.gguf",
                 "mmproj-Q4_K_M.gguf",
+                "processor_config.json",
             ],
             revision="abc123",
         )

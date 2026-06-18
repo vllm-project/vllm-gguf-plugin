@@ -5,7 +5,7 @@ import itertools
 import os
 import re
 from collections.abc import Generator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import gguf
 import numpy as np
@@ -18,6 +18,12 @@ logger = init_logger(__name__)
 
 _SPLIT_GGUF_RE = re.compile(r"-(\d+)-of-(\d+)\.gguf$")
 _HF_REPO_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_PROCESSOR_SIDECAR_FILES = (
+    "processor_config.json",
+    "preprocessor_config.json",
+    "video_preprocessor_config.json",
+    "image_processor_config.json",
+)
 
 
 def _split_gguf_match(path: str | Path) -> re.Match[str] | None:
@@ -111,17 +117,18 @@ def _mmproj_candidate_sort_key(filename: str, quant_type: str) -> tuple[int, str
     return priority, filename
 
 
-def _select_remote_mmproj_filename(
-    repo_id: str,
-    quant_type: str,
-    revision: str | None,
-) -> str | None:
+def _list_remote_sidecar_files(repo_id: str, revision: str | None) -> list[str]:
     try:
-        files = list_repo_files(repo_id, revision=revision)
+        return list_repo_files(repo_id, revision=revision)
     except Exception as e:
         logger.debug("Failed to inspect GGUF repo sidecars for %s: %s", repo_id, e)
-        return None
+        return []
 
+
+def _select_mmproj_filename_from_files(
+    files: list[str],
+    quant_type: str,
+) -> str | None:
     mmproj_files = [
         filename
         for filename in files
@@ -136,17 +143,70 @@ def _select_remote_mmproj_filename(
     )[0]
 
 
+def _select_remote_mmproj_filename(
+    repo_id: str,
+    quant_type: str,
+    revision: str | None,
+) -> str | None:
+    files = _list_remote_sidecar_files(repo_id, revision)
+    return _select_mmproj_filename_from_files(files, quant_type)
+
+
 def _select_remote_mmproj_for_gguf_file(
     repo_id: str,
     filename: str,
     revision: str | None,
+    files: list[str] | None = None,
 ) -> str | None:
+    if files is None:
+        files = _list_remote_sidecar_files(repo_id, revision)
     quant_hint = Path(_SPLIT_GGUF_RE.sub(".gguf", filename)).stem
-    return _select_remote_mmproj_filename(
-        repo_id,
+    return _select_mmproj_filename_from_files(
+        files,
         quant_hint,
-        revision,
     )
+
+
+def _remote_processor_sidecar_patterns() -> list[str]:
+    return [
+        pattern
+        for filename in _PROCESSOR_SIDECAR_FILES
+        for pattern in (filename, f"*/{filename}")
+    ]
+
+
+def _remote_sidecar_search_dirs(filename: str) -> list[str]:
+    path = PurePosixPath(filename)
+    dirs = [path.parent]
+    if path.parent.parent != path.parent:
+        dirs.append(path.parent.parent)
+    dirs.append(PurePosixPath("."))
+
+    search_dirs: list[str] = []
+    seen = set()
+    for directory in dirs:
+        directory_str = "" if directory == PurePosixPath(".") else directory.as_posix()
+        if directory_str in seen:
+            continue
+        seen.add(directory_str)
+        search_dirs.append(directory_str)
+    return search_dirs
+
+
+def _select_remote_processor_sidecars(
+    files: list[str],
+    filename: str,
+) -> list[str]:
+    available = set(files)
+    sidecars: list[str] = []
+    for directory in _remote_sidecar_search_dirs(filename):
+        for sidecar_filename in _PROCESSOR_SIDECAR_FILES:
+            sidecar = (
+                f"{directory}/{sidecar_filename}" if directory else sidecar_filename
+            )
+            if sidecar in available:
+                sidecars.append(sidecar)
+    return sidecars
 
 
 def download_gguf(
@@ -174,6 +234,7 @@ def download_gguf(
         revision,
     ):
         allow_patterns.append(mmproj_filename)
+        allow_patterns.extend(_remote_processor_sidecar_patterns())
 
     folder = snapshot_download(
         repo_id=repo_id,
@@ -189,7 +250,8 @@ def download_gguf(
     local_files = [
         filename
         for filename in local_files
-        if "mmproj" not in Path(filename).name.lower()
+        if filename.lower().endswith(".gguf")
+        and "mmproj" not in Path(filename).name.lower()
     ]
 
     if not local_files:
@@ -209,11 +271,24 @@ def download_gguf_file(
 ) -> str:
     """Download an exact GGUF file reference, including split shard sets."""
     filenames = expand_split_gguf_filenames(filename)
+    sidecar_files = _list_remote_sidecar_files(repo_id, revision)
     mmproj_filename = _select_remote_mmproj_for_gguf_file(
         repo_id,
         filename,
         revision,
+        files=sidecar_files,
     )
+    processor_sidecars = _select_remote_processor_sidecars(
+        sidecar_files,
+        filename,
+    )
+    if mmproj_filename is None:
+        processor_sidecars = []
+
+    sidecar_filenames = []
+    if mmproj_filename is not None:
+        sidecar_filenames.append(mmproj_filename)
+    sidecar_filenames.extend(processor_sidecars)
     if len(filenames) == 1:
         local_file = hf_hub_download(
             repo_id=repo_id,
@@ -221,18 +296,17 @@ def download_gguf_file(
             cache_dir=cache_dir,
             revision=revision,
         )
-        if mmproj_filename is not None:
+        for sidecar_filename in sidecar_filenames:
             hf_hub_download(
                 repo_id=repo_id,
-                filename=mmproj_filename,
+                filename=sidecar_filename,
                 cache_dir=cache_dir,
                 revision=revision,
             )
         return local_file
 
     allow_patterns = list(filenames)
-    if mmproj_filename is not None:
-        allow_patterns.append(mmproj_filename)
+    allow_patterns.extend(sidecar_filenames)
     folder = snapshot_download(
         repo_id=repo_id,
         cache_dir=cache_dir,
