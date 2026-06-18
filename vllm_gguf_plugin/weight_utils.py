@@ -232,13 +232,7 @@ def _select_remote_processor_sidecars(
     return sidecars
 
 
-def download_gguf(
-    repo_id: str,
-    quant_type: str,
-    cache_dir: str | None = None,
-    revision: str | None = None,
-    ignore_patterns: str | list[str] | None = None,
-) -> str:
+def remote_gguf_quant_allow_patterns(quant_type: str) -> list[str]:
     prefix_list = ["*.", "*-"]
     suffix_list = ["-*", ""]
     base_patterns = [
@@ -246,11 +240,21 @@ def download_gguf(
         for qt in (quant_type.upper(), quant_type.lower())
         for prefix, suffix in itertools.product(prefix_list, suffix_list)
     ]
-    allow_patterns = list(
+    return list(
         itertools.chain.from_iterable(
             (pattern, f"*/{pattern}") for pattern in base_patterns
         )
     )
+
+
+def download_gguf(
+    repo_id: str,
+    quant_type: str,
+    cache_dir: str | None = None,
+    revision: str | None = None,
+    ignore_patterns: str | list[str] | None = None,
+) -> str:
+    allow_patterns = remote_gguf_quant_allow_patterns(quant_type)
     if mmproj_filename := _select_remote_mmproj_filename(
         repo_id,
         quant_type,

@@ -9,6 +9,7 @@ import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 from vllm_gguf_plugin.gguf_utils import (
     detect_gguf_multimodal,
     extract_lm_head_from_gguf,
+    get_gguf_file_path_from_hf,
     is_gguf,
     is_local_gguf_quant,
     is_remote_gguf,
@@ -363,6 +364,53 @@ class TestResolveGGUFConfigSource:
                 revision="main",
             )
             == "base/model"
+        )
+
+
+class TestGetGGUFFilePathFromHF:
+    def test_uses_download_quant_patterns(self, monkeypatch):
+        calls = {}
+
+        def fake_list_filtered_repo_files(repo_id, allow_patterns, revision):
+            calls["repo_id"] = repo_id
+            calls["allow_patterns"] = allow_patterns
+            calls["revision"] = revision
+            return ["Q4_K_M/model.q4_k_m.gguf"]
+
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "list_filtered_repo_files",
+            fake_list_filtered_repo_files,
+        )
+
+        assert (
+            get_gguf_file_path_from_hf(
+                "org/repo",
+                "Q4_K_M",
+                revision="abc123",
+            )
+            == "Q4_K_M/model.q4_k_m.gguf"
+        )
+        assert calls["repo_id"] == "org/repo"
+        assert calls["revision"] == "abc123"
+        assert "*.Q4_K_M.gguf" in calls["allow_patterns"]
+        assert "*/*.Q4_K_M.gguf" in calls["allow_patterns"]
+        assert "*.q4_k_m.gguf" in calls["allow_patterns"]
+        assert "*/*.q4_k_m.gguf" in calls["allow_patterns"]
+
+    def test_uses_download_candidate_order(self, monkeypatch):
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "list_filtered_repo_files",
+            lambda repo_id, allow_patterns, revision: [
+                "model-Q4_K_M-00002-of-00002.gguf",
+                "model-Q4_K_M-00001-of-00002.gguf",
+            ],
+        )
+
+        assert (
+            get_gguf_file_path_from_hf("org/repo", "Q4_K_M")
+            == "model-Q4_K_M-00001-of-00002.gguf"
         )
 
 

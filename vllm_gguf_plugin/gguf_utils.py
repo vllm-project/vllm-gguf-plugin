@@ -21,7 +21,9 @@ from vllm.transformers_utils.repo_utils import (
 )
 
 from .weight_utils import (
+    _download_candidate_sort_key,
     _mmproj_candidate_sort_key,
+    remote_gguf_quant_allow_patterns,
     resolve_gguf_file_set,
     split_remote_gguf_file_ref,
 )
@@ -631,15 +633,9 @@ def get_gguf_file_path_from_hf(
         The path to the GGUF file on HuggingFace Hub (e.g., "filename.gguf"),
     """
     repo_id = str(repo_id)
-    gguf_patterns = [
-        f"*-{quant_type}.gguf",
-        f"*-{quant_type}-*.gguf",
-        f"*/*-{quant_type}.gguf",
-        f"*/*-{quant_type}-*.gguf",
-    ]
     matching_files = list_filtered_repo_files(
         repo_id,
-        allow_patterns=gguf_patterns,
+        allow_patterns=remote_gguf_quant_allow_patterns(quant_type),
         revision=revision,
     )
 
@@ -650,7 +646,6 @@ def get_gguf_file_path_from_hf(
             quant_type,
         )
 
-    # Sort to ensure consistent ordering (prefer non-sharded files)
-    matching_files.sort(key=lambda x: (x.count("-"), x))
+    matching_files.sort(key=_download_candidate_sort_key)
     gguf_filename = matching_files[0]
     return gguf_filename
