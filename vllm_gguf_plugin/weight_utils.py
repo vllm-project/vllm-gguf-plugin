@@ -5,6 +5,7 @@ import os
 import re
 from collections.abc import Generator
 from fnmatch import fnmatch
+from functools import cache
 from pathlib import Path, PurePosixPath
 
 import gguf
@@ -24,6 +25,57 @@ _PROCESSOR_SIDECAR_FILES = (
     "video_preprocessor_config.json",
     "image_processor_config.json",
 )
+_UNQUANTIZED_GGUF_TYPES = ("F32", "BF16", "F16")
+_PLUGIN_SUPPORTED_GGUF_TYPES = frozenset(
+    {
+        *_UNQUANTIZED_GGUF_TYPES,
+        "Q4_0",
+        "Q4_1",
+        "Q5_0",
+        "Q5_1",
+        "Q8_0",
+        "Q8_1",
+        "Q2_K",
+        "Q3_K",
+        "Q4_K",
+        "Q5_K",
+        "Q6_K",
+        "IQ1_M",
+        "IQ1_S",
+        "IQ2_XXS",
+        "IQ2_XS",
+        "IQ2_S",
+        "IQ3_XXS",
+        "IQ3_S",
+        "IQ4_XS",
+        "IQ4_NL",
+        "NVFP4",
+    }
+)
+
+
+@cache
+def gguf_dense_fallback_type_names() -> frozenset[str]:
+    """Return GGUF tensor types that gguf-py can dequantize for dense loading."""
+    traits = getattr(gguf.quants, "_type_traits", {})
+    return frozenset(
+        weight_type.name
+        for weight_type in traits
+        if weight_type.name not in _PLUGIN_SUPPORTED_GGUF_TYPES
+    )
+
+
+def is_gguf_dense_fallback_type_name(weight_type_name: str) -> bool:
+    return weight_type_name in gguf_dense_fallback_type_names()
+
+
+def _is_gguf_dense_fallback_type(weight_type) -> bool:
+    return is_gguf_dense_fallback_type_name(weight_type.name)
+
+
+def _dequantize_gguf_tensor(weight: np.ndarray, weight_type) -> torch.Tensor:
+    dense = gguf.quants.dequantize(weight, weight_type)
+    return torch.from_numpy(dense.copy())
 
 
 def _split_gguf_match(path: str | Path) -> re.Match[str] | None:
@@ -512,8 +564,6 @@ def gguf_quant_weights_iterator_multi(
     afterwards).  When a mapping is provided, tensors not present in the map
     are skipped and names are translated accordingly.
     """
-    _QUANT_TYPES = ("F32", "BF16", "F16")
-
     for gguf_file in gguf_files:
         reader = gguf.GGUFReader(gguf_file)
         for tensor in reader.tensors:
@@ -525,11 +575,15 @@ def gguf_quant_weights_iterator_multi(
                 name = tensor.name
 
             weight_type = tensor.tensor_type
-            if weight_type.name not in _QUANT_TYPES:
+            weight = tensor.data
+            if _is_gguf_dense_fallback_type(weight_type):
+                yield name, _dequantize_gguf_tensor(weight, weight_type)
+                continue
+
+            if weight_type.name not in _UNQUANTIZED_GGUF_TYPES:
                 yield name.replace("weight", "qweight_type"), torch.tensor(weight_type)
                 name = name.replace("weight", "qweight")
 
-            weight = tensor.data
             if weight_type.name == "BF16" and weight.dtype == np.uint8:
                 weight = weight.view(np.uint16)
                 if reader.byte_order == "S":
@@ -541,13 +595,13 @@ def gguf_quant_weights_iterator_multi(
 
 
 def get_gguf_unquantized_params(gguf_files: list[str]) -> list[str]:
-    _QUANT_TYPES = ("F32", "BF16", "F16")
     return list(
         {
             tensor.name
             for gguf_file in gguf_files
             for tensor in gguf.GGUFReader(gguf_file).tensors
-            if tensor.tensor_type.name in _QUANT_TYPES
+            if tensor.tensor_type.name in _UNQUANTIZED_GGUF_TYPES
+            or _is_gguf_dense_fallback_type(tensor.tensor_type)
         }
     )
     # for gguf_file in gguf_files:

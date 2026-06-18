@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import vllm.config.model as model_config_module
@@ -723,6 +724,74 @@ def test_update_tie_word_embeddings_uses_all_split_shards(monkeypatch):
     )
 
     assert config.tie_word_embeddings is False
+
+
+def test_default_adapter_marks_dequantizable_fallback_types_unquantized():
+    modules = GGUFWeightsAdapter.get_unquantized_modules(
+        {
+            "model.layers.0.mlp.down_proj.weight": "MXFP4",
+            "model.layers.0.mlp.up_proj.weight": "TQ1_0",
+            "model.layers.1.mlp.down_proj.weight": "Q4_K",
+        }
+    )
+
+    assert modules == [
+        "model.layers.0.mlp.down_proj",
+        "model.layers.0.mlp.up_proj",
+    ]
+
+
+def test_gguf_iterator_dequantizes_dense_fallback_types(monkeypatch):
+    weight_type = default_adapter_module.gguf.GGMLQuantizationType.MXFP4
+    packed = np.arange(17, dtype=np.uint8).reshape(1, 17)
+
+    class FakeGGUFReader:
+        def __init__(self, path):
+            self.byte_order = "L"
+            self.tensors = [
+                SimpleNamespace(
+                    name="blk.0.ffn_down.weight",
+                    tensor_type=weight_type,
+                    data=packed,
+                )
+            ]
+
+    def fake_dequantize(weight, quant_type):
+        assert weight is packed
+        assert quant_type == weight_type
+        return np.full((2, 3), 7.0, dtype=np.float32)
+
+    monkeypatch.setattr(weight_utils_module.gguf, "GGUFReader", FakeGGUFReader)
+    monkeypatch.setattr(weight_utils_module.gguf.quants, "dequantize", fake_dequantize)
+
+    weights = list(
+        weight_utils_module.gguf_quant_weights_iterator_multi(
+            ["model.gguf"],
+            {"blk.0.ffn_down.weight": "model.layers.0.mlp.down_proj.weight"},
+        )
+    )
+
+    assert [name for name, _ in weights] == ["model.layers.0.mlp.down_proj.weight"]
+    assert torch.equal(weights[0][1], torch.full((2, 3), 7.0))
+
+
+def test_gguf_unquantized_params_include_dense_fallback_types(monkeypatch):
+    weight_type = default_adapter_module.gguf.GGMLQuantizationType.TQ2_0
+
+    class FakeGGUFReader:
+        def __init__(self, path):
+            self.tensors = [
+                SimpleNamespace(
+                    name="blk.0.ffn_down.weight",
+                    tensor_type=weight_type,
+                )
+            ]
+
+    monkeypatch.setattr(weight_utils_module.gguf, "GGUFReader", FakeGGUFReader)
+
+    assert weight_utils_module.get_gguf_unquantized_params(["model.gguf"]) == [
+        "blk.0.ffn_down.weight"
+    ]
 
 
 def test_split_gguf_nvfp4_weight_to_native_tensors():

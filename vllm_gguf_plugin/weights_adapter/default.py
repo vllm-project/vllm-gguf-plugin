@@ -23,6 +23,7 @@ from ..weight_utils import (
     get_gguf_extra_tensor_names_multi,
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator_multi,
+    is_gguf_dense_fallback_type_name,
     resolve_gguf_file_set,
 )
 from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
@@ -766,7 +767,11 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         return [
             name.removesuffix(".weight")
             for name, weight_type in weight_type_map.items()
-            if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
+            if (
+                weight_type in ("F32", "F16", "BF16")
+                or is_gguf_dense_fallback_type_name(weight_type)
+            )
+            and name.endswith(".weight")
         ]
 
     @staticmethod
