@@ -21,6 +21,7 @@ class GGUFLoadSpec:
     gguf_to_hf_name_map: dict[str, str] | None = None
     nvfp4_modules: list[str] = field(default_factory=list)
     nvfp4_moe_modules: list[str] = field(default_factory=list)
+    mxfp4_moe_modules: list[str] = field(default_factory=list)
 
 
 class BaseGGUFWeightsAdapter(ABC):

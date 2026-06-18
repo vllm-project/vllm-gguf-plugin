@@ -14,6 +14,7 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from vllm.logger import init_logger
 
 from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
+from ..quantization.mxfp4 import iter_gguf_mxfp4_native_moe_weights
 from ..quantization.nvfp4 import (
     iter_gguf_nvfp4_native_moe_sidecar_weights,
     iter_gguf_nvfp4_native_moe_weights,
@@ -386,6 +387,8 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         self._native_nvfp4_modules: set[str] = set()
         self._native_nvfp4_moe_modules: set[str] = set()
         self._native_nvfp4_moe_projection_modules: set[str] = set()
+        self._native_mxfp4_moe_modules: set[str] = set()
+        self._native_mxfp4_moe_projection_modules: set[str] = set()
         self._native_nvfp4_sidecar_suffixes: dict[str, set[str]] = {}
 
     @classmethod
@@ -667,11 +670,25 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 if (
                     module_name in self._native_nvfp4_modules
                     or module_name in self._native_nvfp4_moe_projection_modules
+                    or module_name in self._native_mxfp4_moe_projection_modules
                 ):
                     continue
 
             if hf_name.endswith(_QWEIGHT_SUFFIX):
                 module_name = hf_name.removesuffix(_QWEIGHT_SUFFIX)
+                if module_name in self._native_mxfp4_moe_projection_modules:
+                    for (
+                        native_name,
+                        native_weight,
+                    ) in iter_gguf_mxfp4_native_moe_weights(
+                        module_name,
+                        weight,
+                    ):
+                        yield (
+                            native_name,
+                            self.transform_weight(native_name, native_weight),
+                        )
+                    continue
                 if module_name in self._native_nvfp4_moe_projection_modules:
                     default_sidecars = {
                         "weight_scale_2",
@@ -776,9 +793,19 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
     @staticmethod
     def get_native_nvfp4_moe_modules(weight_type_map: dict[str, str]) -> list[str]:
+        return GGUFWeightsAdapter._get_native_moe_modules(weight_type_map, "NVFP4")
+
+    @staticmethod
+    def get_native_mxfp4_moe_modules(weight_type_map: dict[str, str]) -> list[str]:
+        return GGUFWeightsAdapter._get_native_moe_modules(weight_type_map, "MXFP4")
+
+    @staticmethod
+    def _get_native_moe_modules(
+        weight_type_map: dict[str, str], target_weight_type: str
+    ) -> list[str]:
         proj_by_prefix: dict[str, set[str]] = {}
         for name, weight_type in weight_type_map.items():
-            if weight_type != "NVFP4":
+            if weight_type != target_weight_type:
                 continue
             match = _MOE_EXPERT_WEIGHT_RE.match(name)
             if match is None:
@@ -795,9 +822,28 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         weight_type_map: dict[str, str],
         moe_modules: set[str],
     ) -> list[str]:
+        return GGUFWeightsAdapter._get_native_moe_projection_modules(
+            weight_type_map, moe_modules, "NVFP4"
+        )
+
+    @staticmethod
+    def get_native_mxfp4_moe_projection_modules(
+        weight_type_map: dict[str, str],
+        moe_modules: set[str],
+    ) -> list[str]:
+        return GGUFWeightsAdapter._get_native_moe_projection_modules(
+            weight_type_map, moe_modules, "MXFP4"
+        )
+
+    @staticmethod
+    def _get_native_moe_projection_modules(
+        weight_type_map: dict[str, str],
+        moe_modules: set[str],
+        target_weight_type: str,
+    ) -> list[str]:
         projection_modules = []
         for name, weight_type in weight_type_map.items():
-            if weight_type != "NVFP4":
+            if weight_type != target_weight_type:
                 continue
             match = _MOE_EXPERT_WEIGHT_RE.match(name)
             if match is None or match["prefix"] not in moe_modules:
@@ -862,6 +908,14 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 weight_type_map, self._native_nvfp4_moe_modules
             )
         )
+        self._native_mxfp4_moe_modules = set(
+            self.get_native_mxfp4_moe_modules(weight_type_map)
+        )
+        self._native_mxfp4_moe_projection_modules = set(
+            self.get_native_mxfp4_moe_projection_modules(
+                weight_type_map, self._native_mxfp4_moe_modules
+            )
+        )
         self._native_nvfp4_modules = set(self.get_native_nvfp4_modules(weight_type_map))
         self._native_nvfp4_sidecar_suffixes = self.get_native_nvfp4_sidecar_suffixes(
             weight_type_map
@@ -872,6 +926,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             unquantized_modules=self.get_unquantized_modules(weight_type_map),
             nvfp4_modules=sorted(self._native_nvfp4_modules),
             nvfp4_moe_modules=sorted(self._native_nvfp4_moe_modules),
+            mxfp4_moe_modules=sorted(self._native_mxfp4_moe_modules),
         )
         return self.load_spec
 
@@ -883,5 +938,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         weights = gguf_quant_weights_iterator_multi(
             self.load_spec.weights_source,
             self.load_spec.gguf_to_hf_name_map,
+            raw_quant_modules=set(self.load_spec.mxfp4_moe_modules)
+            | self._native_mxfp4_moe_projection_modules,
         )
         yield from self.map_weights(weights)

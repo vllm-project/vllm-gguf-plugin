@@ -107,6 +107,9 @@ class GGUFModelLoader(BaseModelLoader):
         vllm_config.quant_config.nvfp4_moe_modules.extend(
             adapter.load_spec.nvfp4_moe_modules
         )
+        vllm_config.quant_config.mxfp4_moe_modules.extend(
+            adapter.load_spec.mxfp4_moe_modules
+        )
 
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):

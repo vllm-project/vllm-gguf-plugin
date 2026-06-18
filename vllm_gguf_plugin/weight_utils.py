@@ -555,7 +555,9 @@ def gguf_quant_weights_iterator(
 
 
 def gguf_quant_weights_iterator_multi(
-    gguf_files: list[str], gguf_to_hf_name_map: dict[str, str] | None = None
+    gguf_files: list[str],
+    gguf_to_hf_name_map: dict[str, str] | None = None,
+    raw_quant_modules: set[str] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Yield ``(name, tensor)`` for all tensors in *gguf_files*.
 
@@ -576,7 +578,11 @@ def gguf_quant_weights_iterator_multi(
 
             weight_type = tensor.tensor_type
             weight = tensor.data
-            if _is_gguf_dense_fallback_type(weight_type):
+            module_name = name.removesuffix(".weight")
+            keep_raw_quant = raw_quant_modules is not None and (
+                module_name in raw_quant_modules
+            )
+            if _is_gguf_dense_fallback_type(weight_type) and not keep_raw_quant:
                 yield name, _dequantize_gguf_tensor(weight, weight_type)
                 continue
 

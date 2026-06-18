@@ -54,10 +54,16 @@ from vllm_gguf_plugin.config_parser import GGUFConfigParser
 from vllm_gguf_plugin.gguf_tokenizer_builder import build_tokenizer_from_gguf
 from vllm_gguf_plugin.quantization import (
     GGUFModelOptNvFp4FusedMoE,
+    GGUFMxfp4FusedMoE,
     GGUFNvFp4LinearMethod,
     GGUFUninitializedParameter,
     GGUFWeightParameter,
     GGUFWeightTypeParameter,
+)
+from vllm_gguf_plugin.quantization.mxfp4 import (
+    iter_gguf_mxfp4_native_moe_weights,
+    split_gguf_mxfp4_moe_weight,
+    split_gguf_mxfp4_weight,
 )
 from vllm_gguf_plugin.quantization.nvfp4 import (
     iter_gguf_nvfp4_native_moe_sidecar_weights,
@@ -775,6 +781,39 @@ def test_gguf_iterator_dequantizes_dense_fallback_types(monkeypatch):
     assert torch.equal(weights[0][1], torch.full((2, 3), 7.0))
 
 
+def test_gguf_iterator_can_keep_dense_fallback_types_raw(monkeypatch):
+    weight_type = default_adapter_module.gguf.GGMLQuantizationType.MXFP4
+    packed = np.arange(17, dtype=np.uint8).reshape(1, 17)
+
+    class FakeGGUFReader:
+        def __init__(self, path):
+            self.byte_order = "L"
+            self.tensors = [
+                SimpleNamespace(
+                    name="blk.0.ffn_down.weight",
+                    tensor_type=weight_type,
+                    data=packed,
+                )
+            ]
+
+    monkeypatch.setattr(weight_utils_module.gguf, "GGUFReader", FakeGGUFReader)
+
+    weights = list(
+        weight_utils_module.gguf_quant_weights_iterator_multi(
+            ["model.gguf"],
+            {"blk.0.ffn_down.weight": "model.layers.0.mlp.down_proj.weight"},
+            raw_quant_modules={"model.layers.0.mlp.down_proj"},
+        )
+    )
+
+    assert [name for name, _ in weights] == [
+        "model.layers.0.mlp.down_proj.qweight_type",
+        "model.layers.0.mlp.down_proj.qweight",
+    ]
+    assert torch.equal(weights[0][1], torch.tensor(weight_type))
+    assert torch.equal(weights[1][1], torch.tensor(packed))
+
+
 def test_gguf_unquantized_params_include_dense_fallback_types(monkeypatch):
     weight_type = default_adapter_module.gguf.GGMLQuantizationType.TQ2_0
 
@@ -812,6 +851,17 @@ def test_split_gguf_nvfp4_weight_to_native_tensors():
     )
 
 
+def test_split_gguf_mxfp4_weight_to_native_tensors():
+    scale_bytes = torch.tensor([[[0x7F], [0x80]]], dtype=torch.uint8)
+    packed_values = torch.arange(32, dtype=torch.uint8).reshape(1, 2, 16)
+    qweight = torch.cat((scale_bytes, packed_values), dim=-1).reshape(1, 34)
+
+    weight, weight_scale = split_gguf_mxfp4_weight(qweight)
+
+    assert torch.equal(weight, packed_values.reshape(1, 32))
+    assert torch.equal(weight_scale, torch.tensor([[0x7F, 0x80]], dtype=torch.uint8))
+
+
 def test_split_gguf_nvfp4_moe_weight_preserves_expert_rows():
     scale_bytes = torch.full((2, 3, 4), 0x38, dtype=torch.uint8)
     packed_values = torch.arange(2 * 3 * 32, dtype=torch.uint8).reshape(2, 3, 32)
@@ -830,6 +880,24 @@ def test_split_gguf_nvfp4_moe_weight_preserves_expert_rows():
     assert weight_scale.shape == (2, 3, 8)
 
 
+def test_split_gguf_mxfp4_moe_weight_preserves_expert_rows():
+    scale_bytes = torch.full((2, 3, 1), 0x7F, dtype=torch.uint8)
+    packed_values = torch.arange(2 * 3 * 16, dtype=torch.uint8).reshape(2, 3, 16)
+    qweight = torch.cat((scale_bytes, packed_values), dim=2)
+
+    weight, weight_scale = split_gguf_mxfp4_moe_weight(qweight)
+
+    assert weight.shape == (2, 3, 16)
+    assert weight_scale.shape == (2, 3, 1)
+    assert weight_scale.dtype == torch.uint8
+
+    block_packed = qweight.reshape(2, 3, 1, 17).repeat(1, 1, 2, 1)
+    weight, weight_scale = split_gguf_mxfp4_moe_weight(block_packed)
+
+    assert weight.shape == (2, 3, 32)
+    assert weight_scale.shape == (2, 3, 2)
+
+
 def test_iter_gguf_nvfp4_native_moe_sidecar_weights_expands_experts():
     module_name = "model.layers.0.mlp.experts.0.gate_proj"
 
@@ -846,6 +914,27 @@ def test_iter_gguf_nvfp4_native_moe_sidecar_weights_expands_experts():
     assert [weight.shape for _, weight in mapped] == [torch.Size([]), torch.Size([])]
     assert torch.equal(mapped[0][1], torch.tensor(0.25))
     assert torch.equal(mapped[1][1], torch.tensor(0.5))
+
+
+def test_iter_gguf_mxfp4_native_moe_weights():
+    module_name = "model.layers.0.mlp.experts.0.gate_proj"
+    qweight = torch.cat(
+        (
+            torch.full((2, 3, 1), 0x7F, dtype=torch.uint8),
+            torch.arange(2 * 3 * 16, dtype=torch.uint8).reshape(2, 3, 16),
+        ),
+        dim=2,
+    )
+
+    mapped = iter_gguf_mxfp4_native_moe_weights(module_name, qweight)
+
+    assert [name for name, _ in mapped] == [
+        f"{module_name}.weight",
+        f"{module_name}.weight_scale",
+    ]
+    assert mapped[0][1].shape == (2, 3, 16)
+    assert mapped[1][1].shape == (2, 3, 1)
+    assert mapped[1][1].dtype == torch.uint8
 
 
 def test_nvfp4_sidecar_mappings_follow_weight_mappings_without_overwriting():
@@ -973,6 +1062,39 @@ def test_default_adapter_maps_nvfp4_moe_qweight_to_native_weights():
     assert mapped[1][1].shape == (2, 3, 4)
     assert mapped[1][1].dtype == torch.float8_e4m3fn
     assert all(torch.equal(weight, torch.tensor(1.0)) for _, weight in mapped[2:])
+
+
+def test_default_adapter_maps_mxfp4_moe_qweight_to_native_weights():
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="qwen3_moe"))
+    module_name = "model.layers.0.mlp.experts.0.gate_proj"
+    adapter._native_mxfp4_moe_projection_modules.add(module_name)
+    qweight_type = torch.tensor(
+        int(default_adapter_module.gguf.GGMLQuantizationType.MXFP4)
+    )
+    qweight = torch.cat(
+        (
+            torch.full((2, 3, 1), 0x7F, dtype=torch.uint8),
+            torch.arange(2 * 3 * 16, dtype=torch.uint8).reshape(2, 3, 16),
+        ),
+        dim=2,
+    )
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{module_name}.qweight_type", qweight_type),
+                (f"{module_name}.qweight", qweight),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        f"{module_name}.weight",
+        f"{module_name}.weight_scale",
+    ]
+    assert mapped[0][1].shape == (2, 3, 16)
+    assert mapped[1][1].shape == (2, 3, 1)
+    assert mapped[1][1].dtype == torch.uint8
 
 
 def test_default_adapter_omits_nvfp4_moe_default_scales_when_sidecars_exist():
@@ -1130,6 +1252,28 @@ def test_default_adapter_discovers_native_nvfp4_moe_modules():
     ]
 
 
+def test_default_adapter_discovers_native_mxfp4_moe_modules():
+    weight_type_map = {
+        "model.layers.0.mlp.experts.0.gate_proj.weight": "MXFP4",
+        "model.layers.0.mlp.experts.0.up_proj.weight": "MXFP4",
+        "model.layers.0.mlp.experts.0.down_proj.weight": "MXFP4",
+        "model.layers.1.mlp.experts.0.gate_proj.weight": "MXFP4",
+        "model.layers.1.mlp.experts.0.down_proj.weight": "MXFP4",
+    }
+
+    moe_modules = set(GGUFWeightsAdapter.get_native_mxfp4_moe_modules(weight_type_map))
+    projection_modules = GGUFWeightsAdapter.get_native_mxfp4_moe_projection_modules(
+        weight_type_map, moe_modules
+    )
+
+    assert moe_modules == {"model.layers.0.mlp.experts"}
+    assert projection_modules == [
+        "model.layers.0.mlp.experts.0.down_proj",
+        "model.layers.0.mlp.experts.0.gate_proj",
+        "model.layers.0.mlp.experts.0.up_proj",
+    ]
+
+
 def test_gguf_config_routes_nvfp4_linear_to_native_method(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
@@ -1221,6 +1365,35 @@ def test_gguf_config_routes_nvfp4_moe_to_modelopt_native_method(monkeypatch):
     assert isinstance(method, GGUFModelOptNvFp4FusedMoE)
     assert method.quant_config.quant_method == "W4A16_NVFP4"
     assert method.quant_config.group_size == 16
+
+
+def test_gguf_config_routes_mxfp4_moe_to_native_method(monkeypatch):
+    import vllm_gguf_plugin.quantization.mxfp4 as gguf_mxfp4_module
+
+    class FakeRoutedExperts(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.moe_config = SimpleNamespace(max_capture_size=0)
+
+    def fake_mxfp4_init(self, moe_config):
+        self.moe = moe_config
+        self.weight_dtype = "mxfp4"
+
+    monkeypatch.setattr(gguf_config_module, "RoutedExperts", FakeRoutedExperts)
+    monkeypatch.setattr(
+        gguf_mxfp4_module.Mxfp4MoEMethod,
+        "__init__",
+        fake_mxfp4_init,
+    )
+
+    quant_config = OOTGGUFConfig(mxfp4_moe_modules=["model.layers.0.mlp.experts"])
+    quant_config.packed_modules_mapping = {}
+    method = quant_config.get_quant_method(
+        FakeRoutedExperts(), "model.layers.0.mlp.experts"
+    )
+
+    assert isinstance(method, GGUFMxfp4FusedMoE)
+    assert method.weight_dtype == "mxfp4"
 
 
 def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
