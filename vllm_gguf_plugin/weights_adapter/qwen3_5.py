@@ -10,10 +10,11 @@ import gguf
 import torch
 
 from ..quantization.nvfp4 import (
+    iter_gguf_nvfp4_native_moe_sidecar_weights,
     iter_gguf_nvfp4_native_moe_weights,
     iter_gguf_nvfp4_native_weights,
 )
-from .default import GGUFWeightsAdapter
+from .default import _NVFP4_SIDECAR_SUFFIX_MAP, GGUFWeightsAdapter
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -293,6 +294,32 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
         patch_weight_1: torch.Tensor | None = None
 
         for hf_name, weight in weights:
+            sidecar_handled = False
+            for suffix in _NVFP4_SIDECAR_SUFFIX_MAP.values():
+                sidecar_suffix = f".{suffix}"
+                if not hf_name.endswith(sidecar_suffix):
+                    continue
+                module_name = hf_name.removesuffix(sidecar_suffix)
+                if module_name in self._native_nvfp4_moe_projection_modules:
+                    for (
+                        native_name,
+                        native_weight,
+                    ) in iter_gguf_nvfp4_native_moe_sidecar_weights(
+                        module_name,
+                        suffix,
+                        weight,
+                    ):
+                        yield (
+                            native_name,
+                            self.transform_weight(native_name, native_weight),
+                        )
+                elif module_name in self._native_nvfp4_modules:
+                    yield hf_name, self.transform_weight(hf_name, weight)
+                sidecar_handled = True
+                break
+            if sidecar_handled:
+                continue
+
             if hf_name.endswith(_QWEIGHT_TYPE_SUFFIX):
                 module_name = hf_name.removesuffix(_QWEIGHT_TYPE_SUFFIX)
                 qweight_type = gguf.GGMLQuantizationType(int(weight.item()))
@@ -318,9 +345,14 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
                     hf_name = f"{module_name}.weight"
                     weight = _dequantize_gguf_weight(weight, qweight_type)
                 elif module_name in self._native_nvfp4_moe_projection_modules:
+                    default_sidecars = {
+                        "weight_scale_2",
+                        "input_scale",
+                    } - self._native_nvfp4_sidecar_suffixes.get(module_name, set())
                     native_weights = iter_gguf_nvfp4_native_moe_weights(
                         module_name,
                         weight,
+                        default_sidecars,
                     )
                     for native_name, native_weight in native_weights:
                         yield (
@@ -329,8 +361,13 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
                         )
                     continue
                 elif module_name in self._native_nvfp4_modules:
+                    sidecars = self._native_nvfp4_sidecar_suffixes.get(
+                        module_name, set()
+                    )
                     for native_name, native_weight in iter_gguf_nvfp4_native_weights(
-                        module_name, weight
+                        module_name,
+                        weight,
+                        include_weight_scale_2="weight_scale_2" not in sidecars,
                     ):
                         yield (
                             native_name,

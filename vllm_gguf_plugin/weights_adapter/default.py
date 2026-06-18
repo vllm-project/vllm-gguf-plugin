@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 
 from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
 from ..quantization.nvfp4 import (
+    iter_gguf_nvfp4_native_moe_sidecar_weights,
     iter_gguf_nvfp4_native_moe_weights,
     iter_gguf_nvfp4_native_weights,
 )
@@ -38,6 +39,10 @@ _GGUF_MODEL_TYPE_ALIASES = {
 
 _QWEIGHT_SUFFIX = ".qweight"
 _QWEIGHT_TYPE_SUFFIX = ".qweight_type"
+_NVFP4_SIDECAR_SUFFIX_MAP = {
+    "scale": "weight_scale_2",
+    "input_scale": "input_scale",
+}
 _MOE_EXPERT_WEIGHT_RE = re.compile(
     r"^(?P<prefix>.+\.experts)\.0\."
     r"(?P<proj>gate_proj|up_proj|down_proj|w1|w2|w3)\.weight$"
@@ -54,6 +59,19 @@ def _gguf_arch_model_type(model_type: str) -> str:
 
 def _gguf_name_with_suffix(base_name: str, suffix: str) -> str:
     return f"{base_name}.{suffix}" if suffix else base_name
+
+
+def _add_nvfp4_sidecar_mappings(gguf_to_hf_name_map: dict[str, str]) -> None:
+    for gguf_name, hf_name in list(gguf_to_hf_name_map.items()):
+        if not gguf_name.endswith(".weight") or not hf_name.endswith(".weight"):
+            continue
+        gguf_base = gguf_name.removesuffix(".weight")
+        hf_base = hf_name.removesuffix(".weight")
+        for gguf_suffix, hf_suffix in _NVFP4_SIDECAR_SUFFIX_MAP.items():
+            gguf_to_hf_name_map.setdefault(
+                f"{gguf_base}.{gguf_suffix}",
+                f"{hf_base}.{hf_suffix}",
+            )
 
 
 def _get_vision_num_layers(config: PretrainedConfig) -> int:
@@ -367,6 +385,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         self._native_nvfp4_modules: set[str] = set()
         self._native_nvfp4_moe_modules: set[str] = set()
         self._native_nvfp4_moe_projection_modules: set[str] = set()
+        self._native_nvfp4_sidecar_suffixes: dict[str, set[str]] = {}
 
     @classmethod
     def matches(cls, config) -> bool:
@@ -388,6 +407,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
         if _is_gemma4_mtp_config(config):
             _add_gemma4_mtp_gguf_mappings(config, gguf_to_hf_name_map)
+            _add_nvfp4_sidecar_mappings(gguf_to_hf_name_map)
             return gguf_to_hf_name_map
 
         if model_type == "cohere":
@@ -607,6 +627,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 f"Failed to map GGUF parameters "
                 f"({len(unmapped_params)}): {unmapped_params}"
             )
+        _add_nvfp4_sidecar_mappings(gguf_to_hf_name_map)
         return gguf_to_hf_name_map
 
     def map_weights(
@@ -614,6 +635,32 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for hf_name, weight in weights:
+            sidecar_handled = False
+            for suffix in _NVFP4_SIDECAR_SUFFIX_MAP.values():
+                sidecar_suffix = f".{suffix}"
+                if not hf_name.endswith(sidecar_suffix):
+                    continue
+                module_name = hf_name.removesuffix(sidecar_suffix)
+                if module_name in self._native_nvfp4_moe_projection_modules:
+                    for (
+                        native_name,
+                        native_weight,
+                    ) in iter_gguf_nvfp4_native_moe_sidecar_weights(
+                        module_name,
+                        suffix,
+                        weight,
+                    ):
+                        yield (
+                            native_name,
+                            self.transform_weight(native_name, native_weight),
+                        )
+                elif module_name in self._native_nvfp4_modules:
+                    yield hf_name, self.transform_weight(hf_name, weight)
+                sidecar_handled = True
+                break
+            if sidecar_handled:
+                continue
+
             if hf_name.endswith(_QWEIGHT_TYPE_SUFFIX):
                 module_name = hf_name.removesuffix(_QWEIGHT_TYPE_SUFFIX)
                 if (
@@ -625,9 +672,14 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             if hf_name.endswith(_QWEIGHT_SUFFIX):
                 module_name = hf_name.removesuffix(_QWEIGHT_SUFFIX)
                 if module_name in self._native_nvfp4_moe_projection_modules:
+                    default_sidecars = {
+                        "weight_scale_2",
+                        "input_scale",
+                    } - self._native_nvfp4_sidecar_suffixes.get(module_name, set())
                     native_weights = iter_gguf_nvfp4_native_moe_weights(
                         module_name,
                         weight,
+                        default_sidecars,
                     )
                     for native_name, native_weight in native_weights:
                         yield (
@@ -636,8 +688,13 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                         )
                     continue
                 if module_name in self._native_nvfp4_modules:
+                    sidecars = self._native_nvfp4_sidecar_suffixes.get(
+                        module_name, set()
+                    )
                     for native_name, native_weight in iter_gguf_nvfp4_native_weights(
-                        module_name, weight
+                        module_name,
+                        weight,
+                        include_weight_scale_2="weight_scale_2" not in sidecars,
                     ):
                         yield (
                             native_name,
@@ -747,6 +804,19 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             and _MOE_EXPERT_WEIGHT_RE.match(name) is None
         ]
 
+    @staticmethod
+    def get_native_nvfp4_sidecar_suffixes(
+        weight_type_map: dict[str, str],
+    ) -> dict[str, set[str]]:
+        sidecar_suffixes: dict[str, set[str]] = {}
+        for name in weight_type_map:
+            for suffix in _NVFP4_SIDECAR_SUFFIX_MAP.values():
+                sidecar_suffix = f".{suffix}"
+                if name.endswith(sidecar_suffix):
+                    module_name = name.removesuffix(sidecar_suffix)
+                    sidecar_suffixes.setdefault(module_name, set()).add(suffix)
+        return sidecar_suffixes
+
     def prepare_loading(
         self,
         model_path: str,
@@ -777,6 +847,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             )
         )
         self._native_nvfp4_modules = set(self.get_native_nvfp4_modules(weight_type_map))
+        self._native_nvfp4_sidecar_suffixes = self.get_native_nvfp4_sidecar_suffixes(
+            weight_type_map
+        )
         self.load_spec = GGUFLoadSpec(
             weights_source=gguf_files,
             gguf_to_hf_name_map=gguf_to_hf_name_map,

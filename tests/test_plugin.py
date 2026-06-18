@@ -58,6 +58,7 @@ from vllm_gguf_plugin.quantization import (
     GGUFWeightTypeParameter,
 )
 from vllm_gguf_plugin.quantization.nvfp4 import (
+    iter_gguf_nvfp4_native_moe_sidecar_weights,
     split_gguf_nvfp4_moe_weight,
     split_gguf_nvfp4_weight,
 )
@@ -66,6 +67,7 @@ from vllm_gguf_plugin.weights_adapter.default import (
     GGUFWeightsAdapter,
     _add_gemma4_gguf_mappings,
     _add_gemma4_mtp_gguf_mappings,
+    _add_nvfp4_sidecar_mappings,
     _add_qwen3_5_mtp_gguf_mappings,
 )
 from vllm_gguf_plugin.weights_adapter.gemma4 import Gemma4GGUFAdapter
@@ -540,6 +542,45 @@ def test_split_gguf_nvfp4_moe_weight_preserves_expert_rows():
     assert weight_scale.shape == (2, 3, 8)
 
 
+def test_iter_gguf_nvfp4_native_moe_sidecar_weights_expands_experts():
+    module_name = "model.layers.0.mlp.experts.0.gate_proj"
+
+    mapped = iter_gguf_nvfp4_native_moe_sidecar_weights(
+        module_name,
+        "weight_scale_2",
+        torch.tensor([0.25, 0.5], dtype=torch.float32),
+    )
+
+    assert [name for name, _ in mapped] == [
+        f"{module_name}.weight_scale_2",
+        "model.layers.0.mlp.experts.1.gate_proj.weight_scale_2",
+    ]
+    assert [weight.shape for _, weight in mapped] == [torch.Size([]), torch.Size([])]
+    assert torch.equal(mapped[0][1], torch.tensor(0.25))
+    assert torch.equal(mapped[1][1], torch.tensor(0.5))
+
+
+def test_nvfp4_sidecar_mappings_follow_weight_mappings_without_overwriting():
+    mapping = {
+        "blk.0.ffn_gate_exps.weight": ("model.layers.0.mlp.experts.0.gate_proj.weight"),
+        "blk.0.ffn_gate_exps.scale": "model.layers.0.mlp.router.scale",
+        "blk.0.ffn_up_exps.weight": "model.layers.0.mlp.experts.0.up_proj.weight",
+    }
+
+    _add_nvfp4_sidecar_mappings(mapping)
+
+    assert mapping["blk.0.ffn_gate_exps.scale"] == "model.layers.0.mlp.router.scale"
+    assert mapping["blk.0.ffn_gate_exps.input_scale"] == (
+        "model.layers.0.mlp.experts.0.gate_proj.input_scale"
+    )
+    assert mapping["blk.0.ffn_up_exps.scale"] == (
+        "model.layers.0.mlp.experts.0.up_proj.weight_scale_2"
+    )
+    assert mapping["blk.0.ffn_up_exps.input_scale"] == (
+        "model.layers.0.mlp.experts.0.up_proj.input_scale"
+    )
+
+
 def test_default_adapter_maps_nvfp4_qweight_to_native_weights():
     adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="qwen3"))
     module_name = "model.layers.0.mlp.down_proj"
@@ -575,6 +616,37 @@ def test_default_adapter_maps_nvfp4_qweight_to_native_weights():
     assert torch.equal(mapped[0][1], expected_weight)
     assert mapped[1][1].dtype == torch.float8_e4m3fn
     assert torch.equal(mapped[2][1], torch.tensor(1.0, dtype=torch.float32))
+
+
+def test_default_adapter_omits_nvfp4_dense_default_scale_when_sidecar_exists():
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="qwen3"))
+    module_name = "model.layers.0.mlp.down_proj"
+    adapter._native_nvfp4_modules.add(module_name)
+    adapter._native_nvfp4_sidecar_suffixes[module_name] = {"weight_scale_2"}
+    qweight_type = torch.tensor(
+        int(default_adapter_module.gguf.GGMLQuantizationType.NVFP4)
+    )
+    qweight = torch.cat(
+        (
+            torch.tensor([[0x38, 0x38, 0x38, 0x38]], dtype=torch.uint8),
+            torch.arange(32, dtype=torch.uint8).reshape(1, 32),
+        ),
+        dim=1,
+    )
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{module_name}.qweight_type", qweight_type),
+                (f"{module_name}.qweight", qweight),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        f"{module_name}.weight",
+        f"{module_name}.weight_scale",
+    ]
 
 
 def test_default_adapter_maps_nvfp4_moe_qweight_to_native_weights():
@@ -613,6 +685,123 @@ def test_default_adapter_maps_nvfp4_moe_qweight_to_native_weights():
     assert mapped[1][1].shape == (2, 3, 4)
     assert mapped[1][1].dtype == torch.float8_e4m3fn
     assert all(torch.equal(weight, torch.tensor(1.0)) for _, weight in mapped[2:])
+
+
+def test_default_adapter_omits_nvfp4_moe_default_scales_when_sidecars_exist():
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="qwen3_moe"))
+    module_name = "model.layers.0.mlp.experts.0.gate_proj"
+    adapter._native_nvfp4_moe_projection_modules.add(module_name)
+    adapter._native_nvfp4_sidecar_suffixes[module_name] = {
+        "weight_scale_2",
+        "input_scale",
+    }
+    qweight_type = torch.tensor(
+        int(default_adapter_module.gguf.GGMLQuantizationType.NVFP4)
+    )
+    qweight = torch.cat(
+        (
+            torch.full((2, 3, 4), 0x38, dtype=torch.uint8),
+            torch.arange(2 * 3 * 32, dtype=torch.uint8).reshape(2, 3, 32),
+        ),
+        dim=2,
+    )
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{module_name}.qweight_type", qweight_type),
+                (f"{module_name}.qweight", qweight),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        f"{module_name}.weight",
+        f"{module_name}.weight_scale",
+    ]
+
+
+def test_default_adapter_maps_nvfp4_sidecars_only_for_native_modules():
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="qwen3"))
+    native_module = "model.layers.0.mlp.down_proj"
+    non_native_module = "model.layers.1.mlp.down_proj"
+    adapter._native_nvfp4_modules.add(native_module)
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{native_module}.weight_scale_2", torch.tensor(0.25)),
+                (f"{native_module}.input_scale", torch.tensor(1.25)),
+                (f"{non_native_module}.weight_scale_2", torch.tensor(0.5)),
+                (f"{non_native_module}.input_scale", torch.tensor(1.5)),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        f"{native_module}.weight_scale_2",
+        f"{native_module}.input_scale",
+    ]
+    assert torch.equal(mapped[0][1], torch.tensor(0.25))
+    assert torch.equal(mapped[1][1], torch.tensor(1.25))
+
+
+def test_default_adapter_maps_nvfp4_moe_sidecars_to_native_scales():
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="qwen3_moe"))
+    module_name = "model.layers.0.mlp.experts.0.gate_proj"
+    adapter._native_nvfp4_moe_projection_modules.add(module_name)
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{module_name}.weight_scale_2", torch.tensor([0.25, 0.5])),
+                (f"{module_name}.input_scale", torch.tensor([1.25, 1.5])),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        f"{module_name}.weight_scale_2",
+        "model.layers.0.mlp.experts.1.gate_proj.weight_scale_2",
+        f"{module_name}.input_scale",
+        "model.layers.0.mlp.experts.1.gate_proj.input_scale",
+    ]
+    assert [weight.shape for _, weight in mapped] == [
+        torch.Size([]),
+        torch.Size([]),
+        torch.Size([]),
+        torch.Size([]),
+    ]
+    assert torch.equal(mapped[0][1], torch.tensor(0.25))
+    assert torch.equal(mapped[1][1], torch.tensor(0.5))
+    assert torch.equal(mapped[2][1], torch.tensor(1.25))
+    assert torch.equal(mapped[3][1], torch.tensor(1.5))
+
+
+def test_qwen35_adapter_maps_nvfp4_moe_sidecars_to_native_scales():
+    adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5_moe"))
+    module_name = "model.layers.0.mlp.experts.0.gate_proj"
+    adapter._native_nvfp4_moe_projection_modules.add(module_name)
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{module_name}.weight_scale_2", torch.tensor([0.25, 0.5])),
+                (f"{module_name}.input_scale", torch.tensor([1.25, 1.5])),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        f"{module_name}.weight_scale_2",
+        "model.layers.0.mlp.experts.1.gate_proj.weight_scale_2",
+        f"{module_name}.input_scale",
+        "model.layers.0.mlp.experts.1.gate_proj.input_scale",
+    ]
+    assert torch.equal(mapped[0][1], torch.tensor(0.25))
+    assert torch.equal(mapped[1][1], torch.tensor(0.5))
+    assert torch.equal(mapped[2][1], torch.tensor(1.25))
+    assert torch.equal(mapped[3][1], torch.tensor(1.5))
 
 
 def test_default_adapter_discovers_native_nvfp4_modules():
@@ -693,6 +882,7 @@ def test_gguf_config_routes_nvfp4_linear_to_native_method(monkeypatch):
     assert layer.weight_scale.shape == (64, 4)
     assert layer.weight_scale.dtype == torch.float8_e4m3fn
     assert layer.weight_scale_2.shape == (2,)
+    assert layer.input_scale.shape == (2,)
 
     layer.weight_loader_v2(layer.weight, torch.ones((32, 32), dtype=torch.uint8), 0)
     layer.weight_loader_v2(layer.weight, 2 * torch.ones((32, 32), dtype=torch.uint8), 1)
@@ -708,10 +898,13 @@ def test_gguf_config_routes_nvfp4_linear_to_native_method(monkeypatch):
     )
     layer.weight_loader_v2(layer.weight_scale_2, torch.tensor(1.0), 0)
     layer.weight_loader_v2(layer.weight_scale_2, torch.tensor(1.0), 1)
+    layer.weight_loader_v2(layer.input_scale, torch.tensor(0.5), 0)
+    layer.weight_loader_v2(layer.input_scale, torch.tensor(0.75), 1)
     layer.quant_method.process_weights_after_loading(layer)
 
     assert layer.processed is True
     assert not hasattr(layer, "weight_scale_2")
+    assert not hasattr(layer, "input_scale")
     assert torch.equal(layer.weight_global_scale, torch.tensor(1.0))
 
 

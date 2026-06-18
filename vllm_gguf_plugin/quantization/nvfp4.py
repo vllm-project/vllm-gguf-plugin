@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Collection
+
 import torch
 from torch.nn.parameter import Parameter
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
@@ -113,13 +115,18 @@ def split_gguf_nvfp4_moe_weight(
 def iter_gguf_nvfp4_native_weights(
     module_name: str,
     qweight: torch.Tensor,
+    include_weight_scale_2: bool = True,
 ) -> list[tuple[str, torch.Tensor]]:
     weight, weight_scale = split_gguf_nvfp4_weight(qweight)
-    return [
+    native_weights: list[tuple[str, torch.Tensor]] = [
         (f"{module_name}.weight", weight),
         (f"{module_name}.weight_scale", weight_scale),
-        (f"{module_name}.weight_scale_2", torch.tensor(1.0, dtype=torch.float32)),
     ]
+    if include_weight_scale_2:
+        native_weights.append(
+            (f"{module_name}.weight_scale_2", torch.tensor(1.0, dtype=torch.float32))
+        )
+    return native_weights
 
 
 def _moe_expert_module_name(module_name: str, expert_id: int) -> str:
@@ -132,6 +139,7 @@ def _moe_expert_module_name(module_name: str, expert_id: int) -> str:
 def iter_gguf_nvfp4_native_moe_weights(
     module_name: str,
     qweight: torch.Tensor,
+    default_sidecar_suffixes: Collection[str] = ("weight_scale_2", "input_scale"),
 ) -> list[tuple[str, torch.Tensor]]:
     weight, weight_scale = split_gguf_nvfp4_moe_weight(qweight)
     native_weights: list[tuple[str, torch.Tensor]] = [
@@ -142,19 +150,31 @@ def iter_gguf_nvfp4_native_moe_weights(
     num_experts = qweight.shape[0] if qweight.ndim >= 3 else 1
     for expert_id in range(num_experts):
         expert_module_name = _moe_expert_module_name(module_name, expert_id)
-        native_weights.extend(
-            [
-                (
-                    f"{expert_module_name}.weight_scale_2",
-                    torch.tensor(1.0, dtype=torch.float32),
-                ),
-                (
-                    f"{expert_module_name}.input_scale",
-                    torch.tensor(1.0, dtype=torch.float32),
-                ),
-            ]
-        )
+        for suffix in ("weight_scale_2", "input_scale"):
+            if suffix in default_sidecar_suffixes:
+                native_weights.append(
+                    (
+                        f"{expert_module_name}.{suffix}",
+                        torch.tensor(1.0, dtype=torch.float32),
+                    )
+                )
     return native_weights
+
+
+def iter_gguf_nvfp4_native_moe_sidecar_weights(
+    module_name: str,
+    suffix: str,
+    values: torch.Tensor,
+) -> list[tuple[str, torch.Tensor]]:
+    """Expand per-expert GGUF NVFP4 sidecar vectors into native scalar loads."""
+    values = values.reshape(-1).to(torch.float32)
+    return [
+        (
+            f"{_moe_expert_module_name(module_name, expert_id)}.{suffix}",
+            value.reshape(()),
+        )
+        for expert_id, value in enumerate(values)
+    ]
 
 
 class GGUFModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
@@ -240,7 +260,15 @@ class GGUFNvFp4LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scale_2", weight_scale_2)
 
+        input_scale = PerTensorScaleParameter(
+            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("input_scale", input_scale)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if hasattr(layer, "input_scale"):
+            del layer.input_scale
         layer.weight_global_scale = Parameter(
             layer.weight_scale_2.max().to(torch.float32),
             requires_grad=False,
