@@ -43,6 +43,8 @@ import vllm_gguf_plugin.gguf_tokenizer_builder as gguf_tokenizer_builder_module
 import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
+import vllm_gguf_plugin.weights_adapter.default as default_adapter_module
+import vllm_gguf_plugin.weights_adapter.qwen3_5 as qwen3_5_adapter_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
 from vllm_gguf_plugin.gguf_tokenizer_builder import build_tokenizer_from_gguf
@@ -51,6 +53,15 @@ from vllm_gguf_plugin.quantization import (
     GGUFWeightParameter,
     GGUFWeightTypeParameter,
 )
+from vllm_gguf_plugin.weights_adapter import get_weights_adapter
+from vllm_gguf_plugin.weights_adapter.default import (
+    GGUFWeightsAdapter,
+    _add_gemma4_gguf_mappings,
+    _add_gemma4_mtp_gguf_mappings,
+    _add_qwen3_5_mtp_gguf_mappings,
+)
+from vllm_gguf_plugin.weights_adapter.gemma4 import Gemma4GGUFAdapter
+from vllm_gguf_plugin.weights_adapter.qwen3_5 import Qwen3_5GGUFAdapter
 
 
 def test_register_overrides_gguf_config():
@@ -86,6 +97,298 @@ def test_oot_config_reuses_in_tree_behavior():
     assert isinstance(quant_config, OOTGGUFConfig)
     assert quant_config.get_name() == "gguf"
     assert repr(quant_config) == "GGUFConfig()"
+
+
+def test_adapter_registry_selects_qwen35_and_gemma4():
+    assert isinstance(
+        get_weights_adapter(PretrainedConfig(model_type="qwen3_5")),
+        Qwen3_5GGUFAdapter,
+    )
+    assert isinstance(
+        get_weights_adapter(PretrainedConfig(model_type="qwen3_5_moe")),
+        Qwen3_5GGUFAdapter,
+    )
+    assert isinstance(
+        get_weights_adapter(PretrainedConfig(model_type="gemma4")),
+        Gemma4GGUFAdapter,
+    )
+    assert isinstance(
+        get_weights_adapter(PretrainedConfig(model_type="gemma4_assistant")),
+        Gemma4GGUFAdapter,
+    )
+
+
+def test_gemma4_adapter_transforms_quantized_moe_names():
+    adapter = Gemma4GGUFAdapter(PretrainedConfig(model_type="gemma4"))
+    qweight = torch.ones((2, 2), dtype=torch.uint8)
+    qweight_type = torch.tensor(2, dtype=torch.uint8)
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (
+                    "model.layers.0.experts.gate_up_proj.qweight_type",
+                    qweight_type,
+                ),
+                ("model.layers.0.experts.gate_up_proj.qweight", qweight),
+                ("model.layers.0.experts.down_proj.qweight_type", qweight_type),
+                ("model.layers.0.experts.down_proj.qweight", qweight),
+            ]
+        )
+    )
+
+    assert mapped[0][0] == (
+        "model.layers.0.moe.experts.routed_experts.w13_qweight_type"
+    )
+    assert mapped[1][0] == "model.layers.0.moe.experts.routed_experts.w13_qweight"
+    assert mapped[2][0] == "model.layers.0.moe.experts.routed_experts.w2_qweight_type"
+    assert mapped[3][0] == "model.layers.0.moe.experts.routed_experts.w2_qweight"
+
+
+def test_gemma4_adapter_flattens_patch_embed_weight():
+    adapter = Gemma4GGUFAdapter(PretrainedConfig(model_type="gemma4"))
+    weight = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+
+    transformed = adapter.transform_weight(
+        "model.vision_tower.patch_embedder.input_proj.weight",
+        weight,
+    )
+
+    assert transformed.shape == (2, 60)
+    assert torch.equal(transformed, weight.flatten(1))
+
+
+def test_gemma4_gguf_mappings_cover_moe_and_vision():
+    config = PretrainedConfig(model_type="gemma4", num_hidden_layers=2)
+    config.text_config = PretrainedConfig(num_hidden_layers=2)
+    config.vision_config = PretrainedConfig(num_hidden_layers=1)
+    config.architectures = ["Gemma4ForConditionalGeneration"]
+    mapping: dict[str, str] = {}
+    sideload_params = []
+
+    _add_gemma4_gguf_mappings(config, mapping, sideload_params)
+
+    assert mapping["blk.0.ffn_gate_up_exps.weight"] == (
+        "model.language_model.layers.0.experts.gate_up_proj.weight"
+    )
+    assert mapping["blk.1.layer_output_scale.weight"] == (
+        "model.language_model.layers.1.layer_scalar"
+    )
+    assert mapping["v.patch_embd.weight"] == (
+        "model.vision_tower.patch_embedder.input_proj.weight"
+    )
+    assert mapping["v.blk.0.attn_q.weight"] == (
+        "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight"
+    )
+    assert sideload_params[0].fullmatch(
+        "model.language_model.layers.0.experts.gate_up_proj.weight"
+    )
+
+
+def test_gemma4_text_only_does_not_add_vision_mappings():
+    config = PretrainedConfig(
+        architectures=["Gemma4ForCausalLM"],
+        model_type="gemma4",
+        num_hidden_layers=1,
+    )
+    config.text_config = PretrainedConfig(num_hidden_layers=1)
+    config.vision_config = PretrainedConfig(num_hidden_layers=1)
+    mapping: dict[str, str] = {}
+    sideload_params = []
+
+    _add_gemma4_gguf_mappings(config, mapping, sideload_params)
+
+    assert mapping["blk.0.ffn_gate_up_exps.weight"] == (
+        "model.layers.0.experts.gate_up_proj.weight"
+    )
+    assert "v.patch_embd.weight" not in mapping
+
+
+def test_gemma4_mtp_gguf_mappings():
+    config = PretrainedConfig(model_type="gemma4_assistant", num_hidden_layers=2)
+    mapping: dict[str, str] = {}
+
+    _add_gemma4_mtp_gguf_mappings(config, mapping)
+
+    assert mapping["nextn.pre_projection.weight"] == "model.pre_projection.weight"
+    assert mapping["blk.0.attn_q.weight"] == "model.layers.0.self_attn.q_proj.weight"
+    assert "blk.0.attn_k.weight" not in mapping
+    assert mapping["blk.1.layer_output_scale.weight"] == "model.layers.1.layer_scalar"
+
+
+def test_default_adapter_adds_mmproj_only_for_multimodal_layout(tmp_path, monkeypatch):
+    main_path = tmp_path / "model.gguf"
+    mmproj_path = tmp_path / "mmproj.gguf"
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="qwen3_5_moe"))
+    multimodal_config = PretrainedConfig(
+        model_type="qwen3_5_moe",
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+    )
+    multimodal_config.vision_config = PretrainedConfig()
+    text_config = PretrainedConfig(
+        model_type="qwen3_5",
+        architectures=["Qwen3_5ForCausalLM"],
+    )
+    text_config.vision_config = PretrainedConfig()
+
+    monkeypatch.setattr(
+        default_adapter_module,
+        "detect_gguf_multimodal",
+        lambda model: mmproj_path,
+    )
+
+    assert adapter._get_weight_sources(str(main_path), multimodal_config) == [
+        str(main_path),
+        str(mmproj_path),
+    ]
+    assert adapter._get_weight_sources(str(main_path), text_config) == [str(main_path)]
+
+
+class _FakeTensorNameMap:
+    def get_name(self, name):
+        return None
+
+
+class _FakeModel:
+    def __init__(self, state_names):
+        self._state_names = state_names
+
+    def state_dict(self):
+        return {name: torch.empty((), device="meta") for name in self._state_names}
+
+
+def test_qwen35_multimodal_mapping_includes_visual_and_linear_attention(monkeypatch):
+    config = PretrainedConfig(
+        model_type="qwen3_5",
+        architectures=["Qwen3_5ForConditionalGeneration"],
+    )
+    config.text_config = PretrainedConfig(
+        num_hidden_layers=1,
+        layer_types=["linear_attention"],
+    )
+    config.vision_config = PretrainedConfig(num_hidden_layers=1)
+    model_config = type(
+        "ModelConfig",
+        (),
+        {"hf_config": config, "trust_remote_code": False},
+    )()
+
+    monkeypatch.setattr(default_adapter_module.gguf, "MODEL_ARCH_NAMES", {1: "qwen35"})
+    monkeypatch.setattr(
+        default_adapter_module.gguf,
+        "get_tensor_name_map",
+        lambda arch, num_layers: _FakeTensorNameMap(),
+    )
+    monkeypatch.setattr(
+        default_adapter_module.AutoModelForImageTextToText,
+        "from_config",
+        lambda *args, **kwargs: _FakeModel(
+            ["model.language_model.layers.0.linear_attn.dt_bias"]
+        ),
+    )
+
+    mapping = GGUFWeightsAdapter(config).build_name_map(model_config)
+
+    assert mapping["token_embd.weight"] == "model.language_model.embed_tokens.weight"
+    assert mapping["v.patch_embd.weight.1"] == "model.visual.patch_embed.proj.weight.1"
+    assert mapping["mm.0.weight"] == "model.visual.merger.linear_fc1.weight"
+    assert mapping["blk.0.ssm_dt.bias"] == (
+        "model.language_model.layers.0.linear_attn.dt_bias"
+    )
+
+
+def test_qwen35_mtp_gguf_mappings_use_trunk_layer_count():
+    config = PretrainedConfig(
+        model_type="qwen3_5_moe",
+        num_hidden_layers=40,
+        mtp_num_hidden_layers=2,
+    )
+    mapping: dict[str, str] = {}
+    sideload_params = []
+
+    _add_qwen3_5_mtp_gguf_mappings(config, mapping, sideload_params)
+
+    assert mapping["blk.40.attn_q.weight"] == "mtp.layers.0.self_attn.q_proj.weight"
+    assert mapping["blk.41.attn_k.weight"] == "mtp.layers.1.self_attn.k_proj.weight"
+    assert mapping["blk.40.ffn_gate_inp.weight"] == "mtp.layers.0.mlp.gate.weight"
+    assert mapping["blk.40.nextn.eh_proj.weight"] == "mtp.fc.weight"
+    assert sideload_params[0].fullmatch("mtp.layers.0.mlp.experts.15.gate_proj.weight")
+
+
+def test_qwen35_adapter_combines_split_patch_embed_weight():
+    adapter = Qwen3_5GGUFAdapter(PretrainedConfig(model_type="qwen3_5_moe"))
+    first = torch.ones((2, 3), dtype=torch.float32)
+    second = 2 * torch.ones((2, 3), dtype=torch.float32)
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                ("model.visual.patch_embed.proj.weight", first),
+                ("model.visual.patch_embed.proj.weight.1", second),
+            ]
+        )
+    )
+
+    assert len(mapped) == 1
+    assert mapped[0][0] == "model.visual.patch_embed.proj.weight"
+    assert torch.equal(mapped[0][1], torch.stack((first, second), dim=2))
+
+
+def _qwen35_linear_attn_config():
+    return PretrainedConfig(
+        model_type="qwen3_5_moe",
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        linear_key_head_dim=1,
+        linear_value_head_dim=1,
+    )
+
+
+def test_qwen35_adapter_restores_linear_attention_layout():
+    adapter = Qwen3_5GGUFAdapter(_qwen35_linear_attn_config())
+    # GGUF stores value heads tiled by value-head group; HF expects grouped by
+    # key head. With 2 key heads and 2 value heads per key, [0, 1, 2, 3]
+    # becomes [0, 2, 1, 3].
+    stored_qkv = torch.arange(8, dtype=torch.float32).reshape(8, 1)
+
+    restored = adapter.transform_weight(
+        "model.layers.0.linear_attn.in_proj_qkv.weight",
+        stored_qkv,
+    )
+
+    assert torch.equal(restored.squeeze(-1), torch.tensor([0, 1, 2, 3, 4, 6, 5, 7]))
+
+
+def test_qwen35_adapter_dequantizes_forced_out_proj(monkeypatch):
+    adapter = Qwen3_5GGUFAdapter(_qwen35_linear_attn_config())
+    module_name = "model.layers.0.linear_attn.out_proj"
+    adapter._forced_dequantized_modules.add(module_name)
+    qweight_type = torch.tensor(
+        int(qwen3_5_adapter_module.gguf.GGMLQuantizationType.Q4_0)
+    )
+    qweight = torch.ones((2, 2), dtype=torch.uint8)
+
+    def fake_dequantize(weight, weight_type):
+        assert weight_type == qwen3_5_adapter_module.gguf.GGMLQuantizationType.Q4_0
+        return torch.ones((2, 2), dtype=torch.float32).numpy()
+
+    monkeypatch.setattr(
+        qwen3_5_adapter_module.gguf.quants,
+        "dequantize",
+        fake_dequantize,
+    )
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{module_name}.qweight_type", qweight_type),
+                (f"{module_name}.qweight", qweight),
+            ]
+        )
+    )
+
+    assert mapped[0][0] == f"{module_name}.weight"
+    assert torch.equal(mapped[0][1], torch.ones((2, 2), dtype=torch.float32))
 
 
 def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
