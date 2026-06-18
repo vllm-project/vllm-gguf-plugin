@@ -21,10 +21,10 @@ from vllm.transformers_utils.repo_utils import (
 )
 
 from .weight_utils import (
-    _download_candidate_sort_key,
     _mmproj_candidate_sort_key,
     remote_gguf_quant_allow_patterns,
     resolve_gguf_file_set,
+    select_remote_gguf_filename,
     split_remote_gguf_file_ref,
 )
 
@@ -670,6 +670,11 @@ def get_gguf_file_path_from_hf(
             quant_type,
         )
 
-    matching_files.sort(key=_download_candidate_sort_key)
-    gguf_filename = matching_files[0]
+    gguf_filename = select_remote_gguf_filename(matching_files, quant_type)
+    if gguf_filename is None:
+        raise ValueError(
+            "Could not find model GGUF file for repo %s with quantization %s.",
+            repo_id,
+            quant_type,
+        )
     return gguf_filename

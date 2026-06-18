@@ -273,6 +273,14 @@ def _select_remote_gguf_filename(
     return sorted(set(gguf_files), key=_download_candidate_sort_key)[0]
 
 
+def select_remote_gguf_filename(
+    files: list[str],
+    quant_type: str,
+) -> str | None:
+    """Select the main GGUF model file for ``repo_id:quant`` candidates."""
+    return _select_remote_gguf_filename(files, quant_type)
+
+
 def _resolve_downloaded_gguf_from_patterns(
     folder: str,
     allow_patterns: list[str],

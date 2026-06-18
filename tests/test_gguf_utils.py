@@ -462,6 +462,28 @@ class TestGetGGUFFilePathFromHF:
             == "model-Q4_K_M-00001-of-00002.gguf"
         )
 
+    def test_ignores_mmproj_candidates(self, monkeypatch):
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "list_filtered_repo_files",
+            lambda repo_id, allow_patterns, revision: [
+                "mmproj-Q4_K_M.gguf",
+                "model-Q4_K_M.gguf",
+            ],
+        )
+
+        assert get_gguf_file_path_from_hf("org/repo", "Q4_K_M") == ("model-Q4_K_M.gguf")
+
+    def test_rejects_mmproj_only_candidates(self, monkeypatch):
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "list_filtered_repo_files",
+            lambda repo_id, allow_patterns, revision: ["mmproj-Q4_K_M.gguf"],
+        )
+
+        with pytest.raises(ValueError, match="model GGUF file"):
+            get_gguf_file_path_from_hf("org/repo", "Q4_K_M")
+
 
 class TestExtractLMHeadFromGGUF:
     @patch("vllm_gguf_plugin.gguf_utils.check_gguf_file", return_value=True)
