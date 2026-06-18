@@ -119,16 +119,7 @@ def actual_verdict(after: dict[str, Any]) -> str:
     return "active" if plugin_owned else "skipped"
 
 
-def run_generation(args: argparse.Namespace) -> dict[str, Any] | None:
-    if not args.generate:
-        return None
-    if not args.model:
-        raise SystemExit("--generate requires --model")
-    if not args.tokenizer:
-        raise SystemExit("--generate requires --tokenizer")
-
-    from vllm import LLM, SamplingParams
-
+def build_llm_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "model": args.model,
         "tokenizer": args.tokenizer,
@@ -142,8 +133,24 @@ def run_generation(args: argparse.Namespace) -> dict[str, Any] | None:
     }
     if args.hf_config_path:
         kwargs["hf_config_path"] = args.hf_config_path
+    if args.max_num_seqs is not None:
+        kwargs["max_num_seqs"] = args.max_num_seqs
+    if args.moe_backend:
+        kwargs["moe_backend"] = args.moe_backend
+    return kwargs
 
-    llm = LLM(**kwargs)
+
+def run_generation(args: argparse.Namespace) -> dict[str, Any] | None:
+    if not args.generate:
+        return None
+    if not args.model:
+        raise SystemExit("--generate requires --model")
+    if not args.tokenizer:
+        raise SystemExit("--generate requires --tokenizer")
+
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(**build_llm_kwargs(args))
     outputs = llm.generate(
         [args.prompt],
         SamplingParams(
@@ -164,7 +171,9 @@ def run_generation(args: argparse.Namespace) -> dict[str, Any] | None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expect", choices=["auto", "active", "skipped"], default="auto")
+    parser.add_argument(
+        "--expect", choices=["auto", "active", "skipped"], default="auto"
+    )
     parser.add_argument("--override-in-tree", action="store_true")
     parser.add_argument("--generate", action="store_true")
     parser.add_argument("--model")
@@ -172,11 +181,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hf-config-path")
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--max-model-len", type=int, default=1024)
+    parser.add_argument("--max-num-seqs", type=int)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.25)
+    parser.add_argument("--moe-backend")
     parser.add_argument("--max-tokens", type=int, default=8)
+    parser.add_argument("--min-generated-tokens", type=int, default=1)
     parser.add_argument("--prompt", default="Reply with exactly: gguf ok")
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument(
+        "--disable-v1-multiprocessing",
+        action="store_true",
+        help="Set VLLM_ENABLE_V1_MULTIPROCESSING=0 before importing vLLM.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
 
@@ -186,6 +203,8 @@ def main() -> int:
     ensure_python_bin_on_path()
     if args.override_in_tree:
         os.environ["VLLM_GGUF_PLUGIN_OVERRIDE_IN_TREE"] = "1"
+    if args.disable_v1_multiprocessing:
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     before = import_state()
 
@@ -200,8 +219,15 @@ def main() -> int:
     ok = actual == expected and imported_without_quantization
 
     generation = None
+    generation_error = None
     if ok:
         generation = run_generation(args)
+        if generation is not None and generation["tokens"] < args.min_generated_tokens:
+            ok = False
+            generation_error = (
+                f"expected at least {args.min_generated_tokens} generated tokens, "
+                f"got {generation['tokens']}"
+            )
 
     result = {
         "ok": ok,
@@ -213,6 +239,7 @@ def main() -> int:
         "before": before,
         "after": after,
         "generation": generation,
+        "generationError": generation_error,
     }
 
     if args.json:
@@ -228,7 +255,11 @@ def main() -> int:
             f"parser={after['configParser']}"
         )
         if generation:
-            print(f"generation tokens={generation['tokens']} text={generation['text']!r}")
+            print(
+                f"generation tokens={generation['tokens']} text={generation['text']!r}"
+            )
+        if generation_error:
+            print(f"generation error={generation_error}")
 
     return 0 if ok else 1
 

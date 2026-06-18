@@ -83,3 +83,24 @@ python scripts/plugin_gguf_smoke.py \
   --enforce-eager \
   --json
 ```
+
+For a large GPT-OSS MXFP4 GGUF smoke on a single GPU, keep the request shape
+small and select the native vLLM MoE backend explicitly:
+
+```bash
+python scripts/plugin_gguf_smoke.py \
+  --override-in-tree \
+  --expect active \
+  --generate \
+  --model /path/to/gpt-oss-20b-mxfp4.gguf \
+  --tokenizer openai/gpt-oss-20b \
+  --dtype bfloat16 \
+  --max-model-len 64 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.20 \
+  --moe-backend marlin \
+  --max-tokens 4 \
+  --disable-v1-multiprocessing \
+  --enforce-eager \
+  --json
+```
