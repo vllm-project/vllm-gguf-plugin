@@ -10,17 +10,34 @@ from pathlib import Path
 import gguf
 import numpy as np
 import torch
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 _SPLIT_GGUF_RE = re.compile(r"-(\d+)-of-(\d+)\.gguf$")
+_HF_REPO_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _split_gguf_match(path: str | Path) -> re.Match[str] | None:
     return _SPLIT_GGUF_RE.search(str(path))
+
+
+def expand_split_gguf_filenames(filename: str) -> list[str]:
+    match = _split_gguf_match(filename)
+    if match is None:
+        return [filename]
+
+    total = int(match.group(2))
+    shard_digits = len(match.group(1))
+    total_digits = len(match.group(2))
+    prefix = filename[: match.start(1)]
+    suffix = filename[match.end(2) :]
+    return [
+        f"{prefix}{idx:0{shard_digits}d}-of-{total:0{total_digits}d}{suffix}"
+        for idx in range(1, total + 1)
+    ]
 
 
 def resolve_gguf_file_set(model_path: str | Path) -> list[str]:
@@ -31,28 +48,33 @@ def resolve_gguf_file_set(model_path: str | Path) -> list[str]:
     that produces missing weights later in model load with much worse errors.
     """
     model_path = str(model_path)
-    match = _split_gguf_match(model_path)
-    if match is None:
-        return [model_path]
+    files = expand_split_gguf_filenames(model_path)
+    if len(files) == 1:
+        return files
 
-    total = int(match.group(2))
-    shard_digits = len(match.group(1))
-    total_digits = len(match.group(2))
-    prefix = model_path[: match.start(1)]
-    suffix = model_path[match.end(2) :]
-    files = [
-        f"{prefix}{idx:0{shard_digits}d}-of-{total:0{total_digits}d}{suffix}"
-        for idx in range(1, total + 1)
-    ]
     missing = [path for path in files if not os.path.isfile(path)]
     if missing:
         raise ValueError(
             "Incomplete split GGUF model: expected "
-            f"{total} shards for {model_path}, missing {len(missing)}: "
+            f"{len(files)} shards for {model_path}, missing {len(missing)}: "
             + ", ".join(missing)
         )
     logger.info("Resolved split GGUF model to %d shard files", len(files))
     return files
+
+
+def split_remote_gguf_file_ref(model_ref: str) -> tuple[str, str] | None:
+    """Split ``namespace/repo/path.gguf`` into HF repo ID and filename."""
+    parts = model_ref.split("/", 2)
+    if len(parts) != 3 or not parts[2].endswith(".gguf"):
+        return None
+    if not _HF_REPO_PART_RE.fullmatch(parts[0]):
+        return None
+    if not _HF_REPO_PART_RE.fullmatch(parts[1]):
+        return None
+    if any(segment in ("", ".", "..") for segment in parts[2].split("/")):
+        return None
+    return f"{parts[0]}/{parts[1]}", parts[2]
 
 
 def _download_candidate_sort_key(path: str) -> tuple[bool, int, str, int, str]:
@@ -104,6 +126,31 @@ def download_gguf(
     return resolve_gguf_file_set(local_files[0])[0]
 
 
+def download_gguf_file(
+    repo_id: str,
+    filename: str,
+    cache_dir: str | None = None,
+    revision: str | None = None,
+) -> str:
+    """Download an exact GGUF file reference, including split shard sets."""
+    filenames = expand_split_gguf_filenames(filename)
+    if len(filenames) == 1:
+        return hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            cache_dir=cache_dir,
+            revision=revision,
+        )
+
+    folder = snapshot_download(
+        repo_id=repo_id,
+        cache_dir=cache_dir,
+        allow_patterns=filenames,
+        revision=revision,
+    )
+    return resolve_gguf_file_set(os.path.join(folder, filename))[0]
+
+
 def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     """Find a GGUF file matching *quant_type* in a local directory."""
     import glob as glob_mod
@@ -119,8 +166,8 @@ def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
         raise ValueError(
             f"No GGUF file matching quant_type '{quant_type}' found in {local_dir}"
         )
-    matches.sort(key=lambda x: (x.count("-"), x))
-    return matches[0]
+    matches.sort(key=_download_candidate_sort_key)
+    return resolve_gguf_file_set(matches[0])[0]
 
 
 def get_gguf_extra_tensor_names(

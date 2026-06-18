@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
-from huggingface_hub import hf_hub_download
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
@@ -16,7 +15,12 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from .weight_utils import download_gguf, resolve_local_gguf
+from .weight_utils import (
+    download_gguf,
+    download_gguf_file,
+    resolve_local_gguf,
+    split_remote_gguf_file_ref,
+)
 from .weights_adapter import get_weights_adapter
 
 if TYPE_CHECKING:
@@ -57,10 +61,15 @@ class GGUFModelLoader(BaseModelLoader):
                 revision=model_config.revision,
                 ignore_patterns=self.load_config.ignore_patterns,
             )
-        # repo id/filename.gguf
-        if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
-            repo_id, filename = model_name_or_path.rsplit("/", 1)
-            return hf_hub_download(repo_id=repo_id, filename=filename)
+        remote_file_ref = split_remote_gguf_file_ref(model_name_or_path)
+        if remote_file_ref is not None:
+            repo_id, filename = remote_file_ref
+            return download_gguf_file(
+                repo_id=repo_id,
+                filename=filename,
+                cache_dir=self.load_config.download_dir,
+                revision=model_config.revision,
+            )
 
         raise ValueError(
             f"Unrecognised GGUF reference: {model_name_or_path} "

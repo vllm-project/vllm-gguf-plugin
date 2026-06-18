@@ -7,7 +7,13 @@ import pytest
 from vllm.config.load import LoadConfig
 
 from vllm_gguf_plugin.loader import GGUFModelLoader
-from vllm_gguf_plugin.weight_utils import download_gguf, resolve_gguf_file_set
+from vllm_gguf_plugin.weight_utils import (
+    download_gguf,
+    download_gguf_file,
+    resolve_gguf_file_set,
+    resolve_local_gguf,
+    split_remote_gguf_file_ref,
+)
 
 
 class TestSplitGGUFResolution:
@@ -22,9 +28,7 @@ class TestSplitGGUFResolution:
         for idx in range(1, 4):
             (tmp_path / f"model-Q4_K_M-0000{idx}-of-00003.gguf").touch()
 
-        result = resolve_gguf_file_set(
-            tmp_path / "model-Q4_K_M-00002-of-00003.gguf"
-        )
+        result = resolve_gguf_file_set(tmp_path / "model-Q4_K_M-00002-of-00003.gguf")
 
         assert result == [
             str(tmp_path / "model-Q4_K_M-00001-of-00003.gguf"),
@@ -38,6 +42,25 @@ class TestSplitGGUFResolution:
 
         with pytest.raises(ValueError, match="Incomplete split GGUF model"):
             resolve_gguf_file_set(tmp_path / "model-Q4_K_M-00001-of-00003.gguf")
+
+
+class TestRemoteGGUFFileRefs:
+    def test_split_remote_gguf_file_ref_root_file(self):
+        assert split_remote_gguf_file_ref("unsloth/Qwen-GGUF/model.gguf") == (
+            "unsloth/Qwen-GGUF",
+            "model.gguf",
+        )
+
+    def test_split_remote_gguf_file_ref_subdir_file(self):
+        assert split_remote_gguf_file_ref("org/repo/Q4_K_M/model.gguf") == (
+            "org/repo",
+            "Q4_K_M/model.gguf",
+        )
+
+    def test_split_remote_gguf_file_ref_rejects_local_or_unsafe_paths(self):
+        assert split_remote_gguf_file_ref("/tmp/model.gguf") is None
+        assert split_remote_gguf_file_ref("org/repo/../model.gguf") is None
+        assert split_remote_gguf_file_ref("repo/model.gguf") is None
 
 
 class TestGGUFDownload:
@@ -117,6 +140,67 @@ class TestGGUFDownload:
         with pytest.raises(ValueError, match="Downloaded GGUF files not found"):
             download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
 
+    @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
+    def test_download_gguf_file_single_exact_file(self, mock_hf_download):
+        mock_hf_download.return_value = "/downloaded/Qwen.gguf"
+
+        result = download_gguf_file(
+            "unsloth/Qwen3-0.6B-GGUF",
+            "Qwen3-0.6B-Q8_0.gguf",
+            cache_dir="/cache",
+            revision="abc123",
+        )
+
+        assert result == "/downloaded/Qwen.gguf"
+        mock_hf_download.assert_called_once_with(
+            repo_id="unsloth/Qwen3-0.6B-GGUF",
+            filename="Qwen3-0.6B-Q8_0.gguf",
+            cache_dir="/cache",
+            revision="abc123",
+        )
+
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_file_split_exact_file_set(self, mock_download, tmp_path):
+        mock_download.return_value = str(tmp_path)
+        (tmp_path / "Qwen-Q4_K_M-00001-of-00002.gguf").touch()
+        (tmp_path / "Qwen-Q4_K_M-00002-of-00002.gguf").touch()
+
+        result = download_gguf_file(
+            "org/repo",
+            "Qwen-Q4_K_M-00002-of-00002.gguf",
+            cache_dir="/cache",
+            revision="abc123",
+        )
+
+        assert result == str(tmp_path / "Qwen-Q4_K_M-00001-of-00002.gguf")
+        mock_download.assert_called_once_with(
+            repo_id="org/repo",
+            cache_dir="/cache",
+            allow_patterns=[
+                "Qwen-Q4_K_M-00001-of-00002.gguf",
+                "Qwen-Q4_K_M-00002-of-00002.gguf",
+            ],
+            revision="abc123",
+        )
+
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_file_split_missing_shard_fails(
+        self, mock_download, tmp_path
+    ):
+        mock_download.return_value = str(tmp_path)
+        (tmp_path / "Qwen-Q4_K_M-00001-of-00002.gguf").touch()
+
+        with pytest.raises(ValueError, match="Incomplete split GGUF model"):
+            download_gguf_file("org/repo", "Qwen-Q4_K_M-00001-of-00002.gguf")
+
+    def test_resolve_local_gguf_validates_split_shards(self, tmp_path):
+        (tmp_path / "model-Q4_K_M-00001-of-00002.gguf").touch()
+        (tmp_path / "model-Q4_K_M-00002-of-00002.gguf").touch()
+
+        assert resolve_local_gguf(str(tmp_path), "Q4_K_M") == str(
+            tmp_path / "model-Q4_K_M-00001-of-00002.gguf"
+        )
+
 
 class TestGGUFModelLoader:
     """Test GGUFModelLoader class methods."""
@@ -135,23 +219,52 @@ class TestGGUFModelLoader:
         assert result == "/path/to/model.gguf"
         mock_isfile.assert_called_once_with("/path/to/model.gguf")
 
-    @patch("vllm_gguf_plugin.loader.hf_hub_download")
+    @patch("vllm_gguf_plugin.loader.download_gguf_file")
     @patch("os.path.isfile", return_value=False)
-    def test_prepare_weights_repo_filename(self, mock_isfile, mock_hf_download):
+    def test_prepare_weights_repo_filename(self, mock_isfile, mock_download_file):
         """Test _prepare_weights with repo_id/filename.gguf format."""
         load_config = LoadConfig(load_format="gguf")
         loader = GGUFModelLoader(load_config)
 
-        mock_hf_download.return_value = "/downloaded/model.gguf"
+        mock_download_file.return_value = "/downloaded/model.gguf"
 
         model_config = MagicMock()
         model_config.model_weights = "unsloth/Qwen3-0.6B-GGUF/model.gguf"
         model_config.model = "unsloth/Qwen3-0.6B-GGUF"
+        model_config.revision = "abc123"
 
         result = loader._prepare_weights(model_config)
         assert result == "/downloaded/model.gguf"
-        mock_hf_download.assert_called_once_with(
-            repo_id="unsloth/Qwen3-0.6B-GGUF", filename="model.gguf"
+        mock_download_file.assert_called_once_with(
+            repo_id="unsloth/Qwen3-0.6B-GGUF",
+            filename="model.gguf",
+            cache_dir=None,
+            revision="abc123",
+        )
+
+    @patch("vllm_gguf_plugin.loader.download_gguf_file")
+    @patch("os.path.isfile", return_value=False)
+    def test_prepare_weights_repo_subdir_filename(
+        self, mock_isfile, mock_download_file
+    ):
+        """Test _prepare_weights with repo_id/subdir/filename.gguf format."""
+        load_config = LoadConfig(load_format="gguf")
+        loader = GGUFModelLoader(load_config)
+
+        mock_download_file.return_value = "/downloaded/model.gguf"
+
+        model_config = MagicMock()
+        model_config.model_weights = "org/repo/Q8_0/model.gguf"
+        model_config.model = "org/repo"
+        model_config.revision = None
+
+        result = loader._prepare_weights(model_config)
+        assert result == "/downloaded/model.gguf"
+        mock_download_file.assert_called_once_with(
+            repo_id="org/repo",
+            filename="Q8_0/model.gguf",
+            cache_dir=None,
+            revision=None,
         )
 
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
