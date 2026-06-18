@@ -99,8 +99,9 @@ def _download_candidate_sort_key(path: str) -> tuple[bool, int, str, int, str]:
 def _mmproj_quant_tokens(quant_type: str) -> tuple[str, ...]:
     quant_type = quant_type.upper()
     tokens = [quant_type]
-    if "-" in quant_type:
-        tokens.append(quant_type.rsplit("-", 1)[1])
+    for separator in ("-", "."):
+        if separator in quant_type:
+            tokens.append(quant_type.rsplit(separator, 1)[1])
     return tuple(dict.fromkeys(tokens))
 
 
