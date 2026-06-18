@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import glob
 import itertools
 import os
 import re
@@ -286,23 +285,21 @@ def _resolve_downloaded_gguf_from_patterns(
     allow_patterns: list[str],
     quant_type: str,
 ) -> str:
-    local_files: list[str] = []
-    for pattern in allow_patterns:
-        local_files.extend(glob.glob(os.path.join(folder, pattern)))
+    del allow_patterns
+    folder_path = Path(folder)
     local_files = [
-        filename
-        for filename in local_files
-        if filename.lower().endswith(".gguf")
-        and "mmproj" not in Path(filename).name.lower()
+        path.relative_to(folder_path).as_posix()
+        for path in folder_path.rglob("*.gguf")
+        if path.is_file()
     ]
+    selected_filename = _select_remote_gguf_filename(local_files, quant_type)
 
-    if not local_files:
+    if selected_filename is None:
         raise ValueError(
             f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
         )
 
-    local_files = sorted(set(local_files), key=_download_candidate_sort_key)
-    return resolve_gguf_file_set(local_files[0])[0]
+    return resolve_gguf_file_set(folder_path / selected_filename)[0]
 
 
 def download_gguf(

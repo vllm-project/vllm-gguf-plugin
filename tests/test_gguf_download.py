@@ -68,48 +68,49 @@ class TestGGUFDownload:
 
     @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    def test_download_gguf_single_file(self, mock_download, mock_list_repo_files):
+    def test_download_gguf_single_file(
+        self,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
+    ):
         """Test downloading a single GGUF file."""
-        mock_folder = "/tmp/mock_cache"
+        mock_folder = str(tmp_path)
         mock_download.return_value = mock_folder
+        (tmp_path / "model-IQ1_S.gguf").touch()
 
-        with patch("glob.glob") as mock_glob:
-            mock_glob.side_effect = lambda pattern, **kwargs: (
-                [f"{mock_folder}/model-IQ1_S.gguf"] if "IQ1_S" in pattern else []
-            )
+        result = download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
 
-            result = download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
+        mock_download.assert_called_once_with(
+            repo_id="unsloth/Qwen3-0.6B-GGUF",
+            cache_dir=None,
+            allow_patterns=[
+                "*.IQ1_S-*.gguf",
+                "*/*.IQ1_S-*.gguf",
+                "*.IQ1_S.gguf",
+                "*/*.IQ1_S.gguf",
+                "*-IQ1_S-*.gguf",
+                "*/*-IQ1_S-*.gguf",
+                "*-IQ1_S.gguf",
+                "*/*-IQ1_S.gguf",
+                "*.iq1_s-*.gguf",
+                "*/*.iq1_s-*.gguf",
+                "*.iq1_s.gguf",
+                "*/*.iq1_s.gguf",
+                "*-iq1_s-*.gguf",
+                "*/*-iq1_s-*.gguf",
+                "*-iq1_s.gguf",
+                "*/*-iq1_s.gguf",
+            ],
+            revision=None,
+            ignore_patterns=None,
+        )
 
-            mock_download.assert_called_once_with(
-                repo_id="unsloth/Qwen3-0.6B-GGUF",
-                cache_dir=None,
-                allow_patterns=[
-                    "*.IQ1_S-*.gguf",
-                    "*/*.IQ1_S-*.gguf",
-                    "*.IQ1_S.gguf",
-                    "*/*.IQ1_S.gguf",
-                    "*-IQ1_S-*.gguf",
-                    "*/*-IQ1_S-*.gguf",
-                    "*-IQ1_S.gguf",
-                    "*/*-IQ1_S.gguf",
-                    "*.iq1_s-*.gguf",
-                    "*/*.iq1_s-*.gguf",
-                    "*.iq1_s.gguf",
-                    "*/*.iq1_s.gguf",
-                    "*-iq1_s-*.gguf",
-                    "*/*-iq1_s-*.gguf",
-                    "*-iq1_s.gguf",
-                    "*/*-iq1_s.gguf",
-                ],
-                revision=None,
-                ignore_patterns=None,
-            )
-
-            assert result == f"{mock_folder}/model-IQ1_S.gguf"
-            mock_list_repo_files.assert_called_once_with(
-                "unsloth/Qwen3-0.6B-GGUF",
-                revision=None,
-            )
+        assert result == f"{mock_folder}/model-IQ1_S.gguf"
+        mock_list_repo_files.assert_called_once_with(
+            "unsloth/Qwen3-0.6B-GGUF",
+            revision=None,
+        )
 
     @patch(
         "vllm_gguf_plugin.weight_utils.list_repo_files",
@@ -295,15 +296,34 @@ class TestGGUFDownload:
 
     @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    @patch("glob.glob", return_value=[])
-    def test_download_gguf_no_files_found(
+    def test_download_gguf_nested_fallback_snapshot(
         self,
-        mock_glob,
         mock_download,
         mock_list_repo_files,
+        tmp_path,
+    ):
+        mock_download.return_value = str(tmp_path)
+        model_dir = tmp_path / "weights" / "Q4_K_M" / "nested"
+        model_dir.mkdir(parents=True)
+        (tmp_path / "weights" / "Q4_K_M" / "mmproj-Q4_K_M.gguf").touch()
+        model = model_dir / "model.q4_k_m.gguf"
+        model.touch()
+
+        result = download_gguf("org/repo", "Q4_K_M")
+
+        assert result == str(model)
+        mock_list_repo_files.assert_called_once_with("org/repo", revision=None)
+
+    @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_no_files_found(
+        self,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
     ):
         """Test error when no GGUF files are found."""
-        mock_folder = "/tmp/mock_cache"
+        mock_folder = str(tmp_path)
         mock_download.return_value = mock_folder
 
         with pytest.raises(ValueError, match="Downloaded GGUF files not found"):
@@ -651,18 +671,20 @@ class TestGGUFModelLoader:
 
     @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    @patch("glob.glob")
     @patch("os.path.isdir", return_value=False)
     @patch("os.path.isfile", return_value=False)
     def test_prepare_weights_remote_repo_quant_type(
-        self, mock_isfile, mock_isdir, mock_glob, mock_download, mock_list_repo_files
+        self,
+        mock_isfile,
+        mock_isdir,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
     ):
         """Test _prepare_weights with remote repo_id:quant_type format."""
-        mock_folder = "/tmp/mock_cache"
+        mock_folder = str(tmp_path)
         mock_download.return_value = mock_folder
-        mock_glob.side_effect = lambda pattern, **kwargs: (
-            [f"{mock_folder}/model-IQ1_S.gguf"] if "IQ1_S" in pattern else []
-        )
+        (tmp_path / "model-IQ1_S.gguf").touch()
 
         load_config = LoadConfig(load_format="gguf")
         loader = GGUFModelLoader(load_config)
