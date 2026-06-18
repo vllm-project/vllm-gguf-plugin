@@ -936,6 +936,54 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     assert engine_args.load_format == "gguf"
 
 
+def test_register_defaults_auto_dtype_to_float16_for_blackwell_gguf(monkeypatch):
+    register()
+    captured = {}
+
+    fake_platform = type(
+        "FakePlatform",
+        (),
+        {"has_device_capability": staticmethod(lambda capability: capability == 100)},
+    )
+    monkeypatch.setattr(gguf_plugin_module, "current_platform", fake_platform)
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model="/tmp/model.gguf")
+
+    engine_args.create_model_config()
+
+    assert captured["dtype"] == "float16"
+    assert engine_args.dtype == "float16"
+
+
+def test_register_preserves_explicit_dtype_for_blackwell_gguf(monkeypatch):
+    register()
+    captured = {}
+
+    fake_platform = type(
+        "FakePlatform",
+        (),
+        {"has_device_capability": staticmethod(lambda capability: capability == 100)},
+    )
+    monkeypatch.setattr(gguf_plugin_module, "current_platform", fake_platform)
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model="/tmp/model.gguf", dtype="float32")
+
+    engine_args.create_model_config()
+
+    assert captured["dtype"] == "float32"
+    assert engine_args.dtype == "float32"
+
+
 def test_register_sets_embedded_tokenizer_for_local_gguf(tmp_path, monkeypatch):
     register()
     gguf_path = tmp_path / "model.gguf"

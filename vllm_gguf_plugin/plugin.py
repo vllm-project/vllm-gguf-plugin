@@ -23,6 +23,7 @@ from vllm.model_executor.model_loader import (
     _LOAD_FORMAT_TO_MODEL_LOADER,
     register_model_loader,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
 from vllm.transformers_utils.repo_utils import file_or_path_exists
 from vllm.transformers_utils.utils import without_trust_remote_code
@@ -140,6 +141,20 @@ def _get_gguf_config_probe_model(engine_args: EngineArgs) -> str | None:
     return None
 
 
+def _maybe_set_blackwell_gguf_dtype(engine_args: EngineArgs) -> None:
+    if engine_args.dtype != "auto":
+        return
+    if not current_platform.has_device_capability(100):
+        return
+
+    logger.warning_once(
+        "Defaulting GGUF `dtype=auto` to `float16` on Blackwell because "
+        "bfloat16 GGUF kernels are disabled for precision issues. Pass an "
+        "explicit `--dtype` to override this default.",
+    )
+    engine_args.dtype = "float16"
+
+
 def _patch_quantization_config_lookup() -> None:
     if getattr(quantization_module, "_gguf_config_lookup_patched", False):
         return
@@ -193,6 +208,7 @@ def _patch_engine_args() -> None:
 
         if _is_gguf_reference(self.model):
             gguf_model = self.model
+            _maybe_set_blackwell_gguf_dtype(self)
             explicit_tokenizer = (
                 self.tokenizer if isinstance(self.tokenizer, str) else None
             )
