@@ -14,7 +14,10 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from vllm.logger import init_logger
 
 from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
-from ..quantization.nvfp4 import iter_gguf_nvfp4_native_weights
+from ..quantization.nvfp4 import (
+    iter_gguf_nvfp4_native_moe_weights,
+    iter_gguf_nvfp4_native_weights,
+)
 from ..weight_utils import (
     get_gguf_extra_tensor_names,
     get_gguf_weight_type_map,
@@ -35,6 +38,14 @@ _GGUF_MODEL_TYPE_ALIASES = {
 
 _QWEIGHT_SUFFIX = ".qweight"
 _QWEIGHT_TYPE_SUFFIX = ".qweight_type"
+_MOE_EXPERT_WEIGHT_RE = re.compile(
+    r"^(?P<prefix>.+\.experts)\.0\."
+    r"(?P<proj>gate_proj|up_proj|down_proj|w1|w2|w3)\.weight$"
+)
+_MOE_PROJECTOR_GROUPS = (
+    frozenset(("gate_proj", "up_proj", "down_proj")),
+    frozenset(("w1", "w2", "w3")),
+)
 
 
 def _gguf_arch_model_type(model_type: str) -> str:
@@ -354,6 +365,8 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
     def __init__(self, config) -> None:
         super().__init__(config)
         self._native_nvfp4_modules: set[str] = set()
+        self._native_nvfp4_moe_modules: set[str] = set()
+        self._native_nvfp4_moe_projection_modules: set[str] = set()
 
     @classmethod
     def matches(cls, config) -> bool:
@@ -603,11 +616,25 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         for hf_name, weight in weights:
             if hf_name.endswith(_QWEIGHT_TYPE_SUFFIX):
                 module_name = hf_name.removesuffix(_QWEIGHT_TYPE_SUFFIX)
-                if module_name in self._native_nvfp4_modules:
+                if (
+                    module_name in self._native_nvfp4_modules
+                    or module_name in self._native_nvfp4_moe_projection_modules
+                ):
                     continue
 
             if hf_name.endswith(_QWEIGHT_SUFFIX):
                 module_name = hf_name.removesuffix(_QWEIGHT_SUFFIX)
+                if module_name in self._native_nvfp4_moe_projection_modules:
+                    native_weights = iter_gguf_nvfp4_native_moe_weights(
+                        module_name,
+                        weight,
+                    )
+                    for native_name, native_weight in native_weights:
+                        yield (
+                            native_name,
+                            self.transform_weight(native_name, native_weight),
+                        )
+                    continue
                 if module_name in self._native_nvfp4_modules:
                     for native_name, native_weight in iter_gguf_nvfp4_native_weights(
                         module_name, weight
@@ -678,6 +705,37 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         ]
 
     @staticmethod
+    def get_native_nvfp4_moe_modules(weight_type_map: dict[str, str]) -> list[str]:
+        proj_by_prefix: dict[str, set[str]] = {}
+        for name, weight_type in weight_type_map.items():
+            if weight_type != "NVFP4":
+                continue
+            match = _MOE_EXPERT_WEIGHT_RE.match(name)
+            if match is None:
+                continue
+            proj_by_prefix.setdefault(match["prefix"], set()).add(match["proj"])
+        return sorted(
+            prefix
+            for prefix, projs in proj_by_prefix.items()
+            if any(required.issubset(projs) for required in _MOE_PROJECTOR_GROUPS)
+        )
+
+    @staticmethod
+    def get_native_nvfp4_moe_projection_modules(
+        weight_type_map: dict[str, str],
+        moe_modules: set[str],
+    ) -> list[str]:
+        projection_modules = []
+        for name, weight_type in weight_type_map.items():
+            if weight_type != "NVFP4":
+                continue
+            match = _MOE_EXPERT_WEIGHT_RE.match(name)
+            if match is None or match["prefix"] not in moe_modules:
+                continue
+            projection_modules.append(name.removesuffix(".weight"))
+        return sorted(projection_modules)
+
+    @staticmethod
     def get_native_nvfp4_modules(weight_type_map: dict[str, str]) -> list[str]:
         return [
             name.removesuffix(".weight")
@@ -686,6 +744,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             and name.endswith(".weight")
             and "embed_tokens" not in name
             and "lm_head" not in name
+            and _MOE_EXPERT_WEIGHT_RE.match(name) is None
         ]
 
     def prepare_loading(
@@ -709,12 +768,21 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             gguf_files, model_config.hf_config, gguf_to_hf_name_map
         )
         weight_type_map = self.get_weight_type_map(gguf_files, gguf_to_hf_name_map)
+        self._native_nvfp4_moe_modules = set(
+            self.get_native_nvfp4_moe_modules(weight_type_map)
+        )
+        self._native_nvfp4_moe_projection_modules = set(
+            self.get_native_nvfp4_moe_projection_modules(
+                weight_type_map, self._native_nvfp4_moe_modules
+            )
+        )
         self._native_nvfp4_modules = set(self.get_native_nvfp4_modules(weight_type_map))
         self.load_spec = GGUFLoadSpec(
             weights_source=gguf_files,
             gguf_to_hf_name_map=gguf_to_hf_name_map,
             unquantized_modules=self.get_unquantized_modules(weight_type_map),
             nvfp4_modules=sorted(self._native_nvfp4_modules),
+            nvfp4_moe_modules=sorted(self._native_nvfp4_moe_modules),
         )
         return self.load_spec
 

@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING
 import gguf
 import torch
 
-from ..quantization.nvfp4 import iter_gguf_nvfp4_native_weights
+from ..quantization.nvfp4 import (
+    iter_gguf_nvfp4_native_moe_weights,
+    iter_gguf_nvfp4_native_weights,
+)
 from .default import GGUFWeightsAdapter
 
 if TYPE_CHECKING:
@@ -297,6 +300,7 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
                 if (
                     module_name in self._forced_dequantized_modules
                     or module_name in self._native_nvfp4_modules
+                    or module_name in self._native_nvfp4_moe_projection_modules
                 ):
                     continue
                 yield hf_name, weight
@@ -313,6 +317,17 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
                         )
                     hf_name = f"{module_name}.weight"
                     weight = _dequantize_gguf_weight(weight, qweight_type)
+                elif module_name in self._native_nvfp4_moe_projection_modules:
+                    native_weights = iter_gguf_nvfp4_native_moe_weights(
+                        module_name,
+                        weight,
+                    )
+                    for native_name, native_weight in native_weights:
+                        yield (
+                            native_name,
+                            self.transform_weight(native_name, native_weight),
+                        )
+                    continue
                 elif module_name in self._native_nvfp4_modules:
                     for native_name, native_weight in iter_gguf_nvfp4_native_weights(
                         module_name, weight

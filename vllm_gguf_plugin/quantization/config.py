@@ -38,10 +38,12 @@ class GGUFConfig(QuantizationConfig):
         self,
         unquantized_modules: list[str] | None = None,
         nvfp4_modules: list[str] | None = None,
+        nvfp4_moe_modules: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.unquantized_modules = unquantized_modules or []
         self.nvfp4_modules = nvfp4_modules or []
+        self.nvfp4_moe_modules = nvfp4_moe_modules or []
 
     def __repr__(self) -> str:
         return "GGUFConfig()"
@@ -84,7 +86,7 @@ class GGUFConfig(QuantizationConfig):
     ) -> "QuantizeMethodBase | None":
         from .fused_moe import GGUFMoEMethod
         from .linear import GGUFLinearMethod
-        from .nvfp4 import GGUFNvFp4LinearMethod
+        from .nvfp4 import GGUFModelOptNvFp4FusedMoE, GGUFNvFp4LinearMethod
         from .vocal_embeds import GGUFEmbeddingMethod
 
         if isinstance(layer, LinearBase):
@@ -104,6 +106,10 @@ class GGUFConfig(QuantizationConfig):
                 return UnquantizedEmbeddingMethod()
             return GGUFEmbeddingMethod(self)
         if isinstance(layer, RoutedExperts):
+            if is_layer_skipped_gguf(
+                prefix, self.nvfp4_moe_modules, self.packed_modules_mapping
+            ):
+                return GGUFModelOptNvFp4FusedMoE(self, layer.moe_config)
             return GGUFMoEMethod(self, layer.moe_config)
         return None
 
@@ -121,3 +127,7 @@ class GGUFConfig(QuantizationConfig):
             )
         if self.nvfp4_modules is not None:
             self.nvfp4_modules = hf_to_vllm_mapper.apply_list(self.nvfp4_modules)
+        if self.nvfp4_moe_modules is not None:
+            self.nvfp4_moe_modules = hf_to_vllm_mapper.apply_list(
+                self.nvfp4_moe_modules
+            )

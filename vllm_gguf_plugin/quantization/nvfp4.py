@@ -8,6 +8,10 @@ from vllm.model_executor.layers.linear import (
     LinearMethodBase,
     register_weight_loader_v2_supported_method,
 )
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptNvFp4Config,
+    ModelOptNvFp4FusedMoE,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -23,25 +27,20 @@ GGUF_NVFP4_GROUP_SIZE = 16
 def _as_nvfp4_blocks(qweight: torch.Tensor) -> torch.Tensor:
     if qweight.dtype != torch.uint8:
         qweight = qweight.view(torch.uint8)
-    if qweight.ndim == 3:
-        if qweight.shape[-1] != GGUF_NVFP4_BLOCK_BYTES:
-            raise ValueError(
-                "Expected GGUF NVFP4 block dimension to be "
-                f"{GGUF_NVFP4_BLOCK_BYTES}, got {qweight.shape[-1]}."
-            )
+    if qweight.ndim >= 3 and qweight.shape[-1] == GGUF_NVFP4_BLOCK_BYTES:
         return qweight.contiguous()
-    if qweight.ndim != 2:
+    if qweight.ndim < 2:
         raise ValueError(
-            "Expected a 2-D row-packed or 3-D block-packed GGUF NVFP4 tensor, "
+            "Expected a row-packed or block-packed GGUF NVFP4 tensor, "
             f"got {qweight.ndim} dimensions."
         )
-    if qweight.shape[1] % GGUF_NVFP4_BLOCK_BYTES != 0:
+    if qweight.shape[-1] % GGUF_NVFP4_BLOCK_BYTES != 0:
         raise ValueError(
             "Expected GGUF NVFP4 row byte width to be divisible by "
-            f"{GGUF_NVFP4_BLOCK_BYTES}, got {qweight.shape[1]}."
+            f"{GGUF_NVFP4_BLOCK_BYTES}, got {qweight.shape[-1]}."
         )
-    blocks_per_row = qweight.shape[1] // GGUF_NVFP4_BLOCK_BYTES
-    return qweight.reshape(qweight.shape[0], blocks_per_row, GGUF_NVFP4_BLOCK_BYTES)
+    blocks_per_row = qweight.shape[-1] // GGUF_NVFP4_BLOCK_BYTES
+    return qweight.reshape(*qweight.shape[:-1], blocks_per_row, GGUF_NVFP4_BLOCK_BYTES)
 
 
 def gguf_ue4m3_to_fp8_e4m3fn(scale_bytes: torch.Tensor) -> torch.Tensor:
@@ -65,21 +64,50 @@ def gguf_ue4m3_to_fp8_e4m3fn(scale_bytes: torch.Tensor) -> torch.Tensor:
 def split_gguf_nvfp4_weight(qweight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Split one GGUF NVFP4 tensor into vLLM native weight and scale tensors."""
     blocks = _as_nvfp4_blocks(qweight)
-    rows, blocks_per_row, _ = blocks.shape
+    leading_shape = blocks.shape[:-2]
+    blocks_per_row = blocks.shape[-2]
     scale_bytes = blocks[..., :GGUF_NVFP4_SCALE_BYTES]
     packed_values = blocks[..., GGUF_NVFP4_SCALE_BYTES:].reshape(
-        rows, blocks_per_row, GGUF_NVFP4_SCALE_BYTES, 8
+        *leading_shape, blocks_per_row, GGUF_NVFP4_SCALE_BYTES, 8
     )
     low = packed_values & 0x0F
     high = packed_values >> 4
     values = torch.cat((low, high), dim=-1)
     packed_values = values[..., 0::2] | (values[..., 1::2] << 4)
 
-    weight = packed_values.reshape(rows, blocks_per_row * (GGUF_NVFP4_BLOCK_SIZE // 2))
+    weight = packed_values.reshape(
+        *leading_shape, blocks_per_row * (GGUF_NVFP4_BLOCK_SIZE // 2)
+    )
     weight_scale = gguf_ue4m3_to_fp8_e4m3fn(
-        scale_bytes.reshape(rows, blocks_per_row * GGUF_NVFP4_SCALE_BYTES)
+        scale_bytes.reshape(*leading_shape, blocks_per_row * GGUF_NVFP4_SCALE_BYTES)
     )
     return weight.contiguous(), weight_scale.contiguous()
+
+
+def split_gguf_nvfp4_moe_weight(
+    qweight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split a GGUF NVFP4 expert tensor while preserving expert/row dimensions."""
+    if qweight.ndim < 3:
+        return split_gguf_nvfp4_weight(qweight)
+    if qweight.ndim >= 4 and qweight.shape[-1] == GGUF_NVFP4_BLOCK_BYTES:
+        leading_shape = qweight.shape[:-2]
+        flat_qweight = qweight.reshape(-1, qweight.shape[-2], GGUF_NVFP4_BLOCK_BYTES)
+        weight, weight_scale = split_gguf_nvfp4_weight(flat_qweight)
+        return (
+            weight.reshape(*leading_shape, weight.shape[-1]).contiguous(),
+            weight_scale.reshape(*leading_shape, weight_scale.shape[-1]).contiguous(),
+        )
+    if qweight.shape[-1] % GGUF_NVFP4_BLOCK_BYTES != 0:
+        return split_gguf_nvfp4_weight(qweight)
+
+    leading_shape = qweight.shape[:-1]
+    flat_qweight = qweight.reshape(-1, qweight.shape[-1])
+    weight, weight_scale = split_gguf_nvfp4_weight(flat_qweight)
+    return (
+        weight.reshape(*leading_shape, weight.shape[-1]).contiguous(),
+        weight_scale.reshape(*leading_shape, weight_scale.shape[-1]).contiguous(),
+    )
 
 
 def iter_gguf_nvfp4_native_weights(
@@ -92,6 +120,54 @@ def iter_gguf_nvfp4_native_weights(
         (f"{module_name}.weight_scale", weight_scale),
         (f"{module_name}.weight_scale_2", torch.tensor(1.0, dtype=torch.float32)),
     ]
+
+
+def _moe_expert_module_name(module_name: str, expert_id: int) -> str:
+    marker = ".experts.0."
+    if marker not in module_name:
+        return module_name
+    return module_name.replace(marker, f".experts.{expert_id}.", 1)
+
+
+def iter_gguf_nvfp4_native_moe_weights(
+    module_name: str,
+    qweight: torch.Tensor,
+) -> list[tuple[str, torch.Tensor]]:
+    weight, weight_scale = split_gguf_nvfp4_moe_weight(qweight)
+    native_weights: list[tuple[str, torch.Tensor]] = [
+        (f"{module_name}.weight", weight),
+        (f"{module_name}.weight_scale", weight_scale),
+    ]
+
+    num_experts = qweight.shape[0] if qweight.ndim >= 3 else 1
+    for expert_id in range(num_experts):
+        expert_module_name = _moe_expert_module_name(module_name, expert_id)
+        native_weights.extend(
+            [
+                (
+                    f"{expert_module_name}.weight_scale_2",
+                    torch.tensor(1.0, dtype=torch.float32),
+                ),
+                (
+                    f"{expert_module_name}.input_scale",
+                    torch.tensor(1.0, dtype=torch.float32),
+                ),
+            ]
+        )
+    return native_weights
+
+
+class GGUFModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
+    """Native vLLM NVFP4 W4A16 MoE method for GGUF NVFP4 expert tensors."""
+
+    def __init__(self, gguf_quant_config, moe_config):
+        del gguf_quant_config
+        modelopt_config = ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            group_size=GGUF_NVFP4_GROUP_SIZE,
+        )
+        super().__init__(quant_config=modelopt_config, moe_config=moe_config)
 
 
 @register_weight_loader_v2_supported_method
