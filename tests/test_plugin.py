@@ -1136,6 +1136,50 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     assert config.architectures == ["Qwen3MoeForCausalLM"]
 
 
+def test_gguf_config_parser_uses_first_split_shard_for_local_file(
+    tmp_path,
+    monkeypatch,
+):
+    first_shard = tmp_path / "model-Q4_K_M-00001-of-00002.gguf"
+    second_shard = tmp_path / "model-Q4_K_M-00002-of-00002.gguf"
+    first_shard.write_bytes(b"GGUF")
+    second_shard.write_bytes(b"GGUF")
+    calls = {}
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {}, PretrainedConfig(model_type="qwen3")
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "_get_local_gguf_base_model_ids",
+        lambda model: (),
+    )
+
+    config_dict, config = GGUFConfigParser().parse(
+        second_shard,
+        trust_remote_code=False,
+    )
+
+    assert calls["model"] == tmp_path
+    assert calls["gguf_file"] == first_shard.name
+    assert config_dict["architectures"] == ["Qwen3ForCausalLM"]
+    assert config.architectures == ["Qwen3ForCausalLM"]
+
+
 def test_gguf_config_parser_preserves_trust_for_snapshot_root_config(
     tmp_path,
     monkeypatch,
@@ -1342,6 +1386,56 @@ def test_gguf_config_parser_passes_exact_remote_file_when_repo_has_no_config(
     assert calls["revision"] == "main"
     assert calls["trust_remote_code"] is True
     assert calls["gguf_file"] == "subdir/model.gguf"
+    assert config_dict["architectures"] == ["Qwen3ForCausalLM"]
+    assert config.architectures == ["Qwen3ForCausalLM"]
+
+
+def test_gguf_config_parser_uses_first_split_shard_for_exact_remote_file(
+    monkeypatch,
+):
+    calls = {}
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {}, PretrainedConfig(model_type="qwen3")
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "file_or_path_exists",
+        lambda model, filename, revision: False,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "file_or_path_exists",
+        lambda model, filename, revision: False,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "_get_remote_gguf_base_model_ids",
+        lambda repo_id, revision=None: (),
+    )
+
+    config_dict, config = GGUFConfigParser().parse(
+        "org/repo/subdir/model-Q4_K_M-00002-of-00002.gguf",
+        trust_remote_code=True,
+        revision="main",
+    )
+
+    assert calls["model"] == "org/repo"
+    assert calls["gguf_file"] == "subdir/model-Q4_K_M-00001-of-00002.gguf"
     assert config_dict["architectures"] == ["Qwen3ForCausalLM"]
     assert config.architectures == ["Qwen3ForCausalLM"]
 
@@ -1604,6 +1698,73 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     (tokenizer_cache / "preprocessor_config.json").unlink()
     assert build_tokenizer_from_gguf(gguf_path) == tokenizer_path
     assert (tokenizer_cache / "preprocessor_config.json").is_file()
+
+
+def test_build_tokenizer_from_gguf_uses_first_split_shard(tmp_path, monkeypatch):
+    first_shard = tmp_path / "model-Q4_K_M-00001-of-00002.gguf"
+    second_shard = tmp_path / "model-Q4_K_M-00002-of-00002.gguf"
+    first_shard.write_bytes(b"GGUF")
+    second_shard.write_bytes(b"GGUF")
+    fake_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "qwen3",
+            "tokenizer.ggml.tokens": [
+                "<pad>",
+                "<bos>",
+                "<eos>",
+                "hello",
+            ],
+            "tokenizer.ggml.token_type": [3, 3, 3, 1],
+            "tokenizer.ggml.model": "gpt2",
+            "tokenizer.ggml.merges": ["h ello"],
+            "tokenizer.ggml.bos_token_id": 1,
+            "tokenizer.ggml.eos_token_id": 2,
+            "tokenizer.ggml.padding_token_id": 0,
+        }
+    )
+    reader_paths = []
+
+    class FakeTokenizer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def save_pretrained(self, path):
+            (path / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (path / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+    def fake_gguf_reader(path):
+        reader_paths.append(Path(path))
+        return fake_reader
+
+    monkeypatch.setenv(
+        "VLLM_GGUF_TOKENIZER_CACHE",
+        str(tmp_path / "tokenizer-cache"),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module.gguf,
+        "GGUFReader",
+        fake_gguf_reader,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "convert_gguf_tokenizer",
+        lambda architecture, tokenizer_dict: (object(), {}),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "PreTrainedTokenizerFast",
+        FakeTokenizer,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: None,
+    )
+
+    tokenizer_path = build_tokenizer_from_gguf(second_shard)
+
+    assert tokenizer_path is not None
+    assert reader_paths[0] == first_shard
 
 
 def test_build_tokenizer_from_gguf_prefers_local_config_special_token_ids(
@@ -1933,6 +2094,51 @@ def test_register_skips_speculator_probe_for_gguf(monkeypatch):
     assert model == "org/repo/subdir/model.gguf"
     assert tokenizer == "/tmp/tokenizer"
     assert speculative_config == {"foo": "bar"}
+
+
+def test_register_speculator_probe_uses_first_split_shard_for_exact_remote(
+    monkeypatch,
+):
+    register()
+    calls = {}
+
+    def fake_get_config_dict(config_source, **kwargs):
+        calls["config_source"] = config_source
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {"model_type": "qwen3"}, {}
+
+    monkeypatch.setattr(
+        gguf_plugin_module.PretrainedConfig,
+        "get_config_dict",
+        fake_get_config_dict,
+    )
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "org/repo",
+    )
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "file_or_path_exists",
+        lambda model, filename, revision=None: False,
+    )
+
+    model, tokenizer, speculative_config = (
+        config_module.maybe_override_with_speculators(
+            model="org/repo/subdir/model-Q4_K_M-00002-of-00002.gguf",
+            tokenizer="/tmp/tokenizer",
+            trust_remote_code=False,
+            revision=None,
+            vllm_speculative_config=None,
+            hf_token=None,
+        )
+    )
+
+    assert calls["config_source"] == "org/repo"
+    assert calls["gguf_file"] == "subdir/model-Q4_K_M-00001-of-00002.gguf"
+    assert model == "org/repo/subdir/model-Q4_K_M-00002-of-00002.gguf"
+    assert tokenizer == "/tmp/tokenizer"
+    assert speculative_config is None
 
 
 def test_register_speculator_probe_prefers_sidecar_config(tmp_path, monkeypatch):

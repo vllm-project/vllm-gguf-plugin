@@ -46,6 +46,11 @@ def expand_split_gguf_filenames(filename: str) -> list[str]:
     ]
 
 
+def first_split_gguf_filename(filename: str | Path) -> str:
+    """Return the first filename in a split GGUF set, or filename itself."""
+    return expand_split_gguf_filenames(str(filename))[0]
+
+
 def resolve_gguf_file_set(model_path: str | Path) -> list[str]:
     """Return the ordered GGUF files needed to load ``model_path``.
 

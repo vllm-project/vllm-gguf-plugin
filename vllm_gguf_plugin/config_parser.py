@@ -19,7 +19,7 @@ from .gguf_utils import (
     resolve_gguf_config_source,
     split_remote_gguf,
 )
-from .weight_utils import split_remote_gguf_file_ref
+from .weight_utils import first_split_gguf_filename, split_remote_gguf_file_ref
 
 
 class GGUFConfigParser(ConfigParserBase):
@@ -51,7 +51,7 @@ class GGUFConfigParser(ConfigParserBase):
                 trust_remote_code = False
                 revision = None
             elif not file_or_path_exists(resolved_model, HF_CONFIG_NAME, revision):
-                kwargs["gguf_file"] = gguf_path.name
+                kwargs["gguf_file"] = Path(first_split_gguf_filename(gguf_path)).name
         elif is_remote_gguf(model):
             repo_id, quant_type = split_remote_gguf(model)
             if resolved_model != repo_id:
@@ -69,7 +69,7 @@ class GGUFConfigParser(ConfigParserBase):
                 trust_remote_code = False
                 revision = None
             elif not file_or_path_exists(repo_id, HF_CONFIG_NAME, revision):
-                kwargs["gguf_file"] = filename
+                kwargs["gguf_file"] = first_split_gguf_filename(filename)
 
         config_dict, config = HFConfigParser().parse(
             resolved_model,

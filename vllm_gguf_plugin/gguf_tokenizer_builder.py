@@ -26,6 +26,7 @@ from .gguf_utils import (
     detect_gguf_multimodal,
     gguf_sidecar_search_dirs,
 )
+from .weight_utils import resolve_gguf_file_set
 
 logger = init_logger(__name__)
 
@@ -682,6 +683,11 @@ def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
     """
     model_path = Path(model)
     if not check_gguf_file(model_path):
+        return None
+    try:
+        model_path = Path(resolve_gguf_file_set(model_path)[0])
+    except ValueError as e:
+        logger.debug("Failed to resolve split GGUF tokenizer source %s: %s", model, e)
         return None
 
     cache_key = _cache_key(model_path)

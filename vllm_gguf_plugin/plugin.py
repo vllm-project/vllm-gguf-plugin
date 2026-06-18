@@ -39,7 +39,7 @@ from .gguf_utils import (
     resolve_gguf_config_source,
     split_remote_gguf,
 )
-from .weight_utils import split_remote_gguf_file_ref
+from .weight_utils import first_split_gguf_filename, split_remote_gguf_file_ref
 
 logger = init_logger(__name__)
 
@@ -321,7 +321,9 @@ def _patch_speculator_probe() -> None:
                     HF_CONFIG_NAME,
                     revision=revision,
                 ):
-                    kwargs["gguf_file"] = gguf_path.name
+                    kwargs["gguf_file"] = Path(
+                        first_split_gguf_filename(gguf_path)
+                    ).name
             else:
                 gguf_model_repo = Path(model).parent
         elif is_remote_gguf(model):
@@ -341,7 +343,7 @@ def _patch_speculator_probe() -> None:
             if gguf_model_repo != repo_id:
                 revision = None
             elif not file_or_path_exists(repo_id, HF_CONFIG_NAME, revision=revision):
-                kwargs["gguf_file"] = filename
+                kwargs["gguf_file"] = first_split_gguf_filename(filename)
         else:
             return model, tokenizer, vllm_speculative_config
 
