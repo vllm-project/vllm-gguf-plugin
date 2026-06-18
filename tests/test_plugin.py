@@ -254,6 +254,37 @@ def test_default_adapter_adds_mmproj_only_for_multimodal_layout(tmp_path, monkey
     assert adapter._get_weight_sources(str(main_path), text_config) == [str(main_path)]
 
 
+def test_default_adapter_requires_mmproj_for_multimodal_layout(tmp_path, monkeypatch):
+    main_path = tmp_path / "model.gguf"
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="qwen3_5_moe"))
+    multimodal_config = PretrainedConfig(
+        model_type="qwen3_5_moe",
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+    )
+    multimodal_config.vision_config = PretrainedConfig()
+
+    monkeypatch.setattr(
+        default_adapter_module,
+        "detect_gguf_multimodal",
+        lambda model: None,
+    )
+
+    with pytest.raises(ValueError, match="requires an mmproj sidecar"):
+        adapter._get_weight_sources(
+            str(main_path),
+            multimodal_config,
+            use_multimodal_weight_layout=True,
+            require_multimodal_sidecar=True,
+        )
+
+    assert adapter._get_weight_sources(
+        str(main_path),
+        multimodal_config,
+        use_multimodal_weight_layout=True,
+        require_multimodal_sidecar=False,
+    ) == [str(main_path)]
+
+
 class _FakeTensorNameMap:
     def get_name(self, name):
         return None

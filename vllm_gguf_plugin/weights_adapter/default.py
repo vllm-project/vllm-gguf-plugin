@@ -713,6 +713,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         model_path: str,
         hf_config: PretrainedConfig,
         use_multimodal_weight_layout: bool | None = None,
+        require_multimodal_sidecar: bool = False,
     ) -> list[str]:
         gguf_files = self._get_all_gguf_files(model_path)
         if use_multimodal_weight_layout is None:
@@ -723,6 +724,15 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 mm_proj_file = str(mm_proj_path)
                 if mm_proj_file not in gguf_files:
                     gguf_files.append(mm_proj_file)
+            elif require_multimodal_sidecar:
+                raise ValueError(
+                    "Multimodal GGUF loading requires an mmproj sidecar next "
+                    f"to {model_path}. Expected a file matching mmproj.gguf, "
+                    "mmproj-*.gguf, or *mmproj*.gguf. Place the projector GGUF "
+                    "next to the model, use a remote GGUF repo reference so "
+                    "sidecars can be downloaded with the model, or pass "
+                    "language_model_only=True for text-only inference."
+                )
         return gguf_files
 
     def update_tie_word_embeddings(
@@ -833,6 +843,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_path,
             model_config.hf_config,
             use_multimodal_weight_layout,
+            require_multimodal_sidecar=not getattr(
+                model_config, "language_model_only", False
+            ),
         )
         self.update_tie_word_embeddings(
             gguf_files, model_config.hf_config, gguf_to_hf_name_map
