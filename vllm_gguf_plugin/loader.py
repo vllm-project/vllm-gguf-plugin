@@ -103,6 +103,7 @@ class GGUFModelLoader(BaseModelLoader):
         vllm_config.quant_config.unquantized_modules.extend(
             adapter.load_spec.unquantized_modules
         )
+        vllm_config.quant_config.nvfp4_modules.extend(adapter.load_spec.nvfp4_modules)
 
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):

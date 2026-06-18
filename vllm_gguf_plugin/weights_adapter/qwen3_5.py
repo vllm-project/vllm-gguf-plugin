@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import gguf
 import torch
 
+from ..quantization.nvfp4 import iter_gguf_nvfp4_native_weights
 from .default import GGUFWeightsAdapter
 
 if TYPE_CHECKING:
@@ -184,6 +185,7 @@ def _dequantize_gguf_weight(
 def _force_dequantized_gguf_weight(
     load_spec,
     forced_dequantized_modules: set[str],
+    native_nvfp4_modules: set[str],
     gguf_name: str,
 ) -> None:
     if load_spec.gguf_to_hf_name_map is None:
@@ -194,6 +196,9 @@ def _force_dequantized_gguf_weight(
 
     module_name = hf_name.removesuffix(".weight")
     forced_dequantized_modules.add(module_name)
+    native_nvfp4_modules.discard(module_name)
+    if hasattr(load_spec, "nvfp4_modules") and module_name in load_spec.nvfp4_modules:
+        load_spec.nvfp4_modules.remove(module_name)
     if module_name not in load_spec.unquantized_modules:
         load_spec.unquantized_modules.append(module_name)
 
@@ -254,6 +259,7 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
             _force_dequantized_gguf_weight(
                 load_spec,
                 self._forced_dequantized_modules,
+                self._native_nvfp4_modules,
                 _QWEN3_5_TOKEN_EMBD_WEIGHT,
             )
         if _qwen3_5_linear_attention_dims(self.config) is None:
@@ -265,6 +271,12 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
             if hf_name.endswith(".linear_attn.out_proj.weight"):
                 module_name = hf_name.removesuffix(".weight")
                 self._forced_dequantized_modules.add(module_name)
+                self._native_nvfp4_modules.discard(module_name)
+                if (
+                    hasattr(load_spec, "nvfp4_modules")
+                    and module_name in load_spec.nvfp4_modules
+                ):
+                    load_spec.nvfp4_modules.remove(module_name)
                 if module_name not in load_spec.unquantized_modules:
                     load_spec.unquantized_modules.append(module_name)
         return load_spec
@@ -282,7 +294,10 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
                 module_name = hf_name.removesuffix(_QWEIGHT_TYPE_SUFFIX)
                 qweight_type = gguf.GGMLQuantizationType(int(weight.item()))
                 self._qweight_types[module_name] = qweight_type
-                if module_name in self._forced_dequantized_modules:
+                if (
+                    module_name in self._forced_dequantized_modules
+                    or module_name in self._native_nvfp4_modules
+                ):
                     continue
                 yield hf_name, weight
                 continue
@@ -298,6 +313,15 @@ class Qwen3_5GGUFAdapter(GGUFWeightsAdapter):
                         )
                     hf_name = f"{module_name}.weight"
                     weight = _dequantize_gguf_weight(weight, qweight_type)
+                elif module_name in self._native_nvfp4_modules:
+                    for native_name, native_weight in iter_gguf_nvfp4_native_weights(
+                        module_name, weight
+                    ):
+                        yield (
+                            native_name,
+                            self.transform_weight(native_name, native_weight),
+                        )
+                    continue
 
             if hf_name == _QWEN3_5_PATCH_EMBED_WEIGHT:
                 patch_weight = weight

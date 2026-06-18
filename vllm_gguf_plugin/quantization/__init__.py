@@ -1,6 +1,7 @@
 from .config import GGUFConfig
 from .fused_moe import GGUFMoEMethod, fused_moe_gguf
 from .linear import GGUFLinearMethod, fused_mul_mat_gguf
+from .nvfp4 import GGUFNvFp4LinearMethod
 from .params import (
     GGUFUninitializedParameter,
     GGUFUninitializedWeightParameter,
@@ -26,6 +27,7 @@ __all__ = [
     "GGUFEmbeddingMethod",
     "GGUFLinearMethod",
     "GGUFMoEMethod",
+    "GGUFNvFp4LinearMethod",
     "GGUFUninitializedParameter",
     "GGUFUninitializedWeightParameter",
     "GGUFUninitializedWeightTypeParameter",

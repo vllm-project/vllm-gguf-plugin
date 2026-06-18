@@ -14,6 +14,7 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from vllm.logger import init_logger
 
 from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
+from ..quantization.nvfp4 import iter_gguf_nvfp4_native_weights
 from ..weight_utils import (
     get_gguf_extra_tensor_names,
     get_gguf_weight_type_map,
@@ -31,6 +32,9 @@ logger = init_logger(__name__)
 _GGUF_MODEL_TYPE_ALIASES = {
     "gemma4": "gemma3",
 }
+
+_QWEIGHT_SUFFIX = ".qweight"
+_QWEIGHT_TYPE_SUFFIX = ".qweight_type"
 
 
 def _gguf_arch_model_type(model_type: str) -> str:
@@ -347,6 +351,10 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
     load_spec = None
 
+    def __init__(self, config) -> None:
+        super().__init__(config)
+        self._native_nvfp4_modules: set[str] = set()
+
     @classmethod
     def matches(cls, config) -> bool:
         del config
@@ -593,6 +601,23 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for hf_name, weight in weights:
+            if hf_name.endswith(_QWEIGHT_TYPE_SUFFIX):
+                module_name = hf_name.removesuffix(_QWEIGHT_TYPE_SUFFIX)
+                if module_name in self._native_nvfp4_modules:
+                    continue
+
+            if hf_name.endswith(_QWEIGHT_SUFFIX):
+                module_name = hf_name.removesuffix(_QWEIGHT_SUFFIX)
+                if module_name in self._native_nvfp4_modules:
+                    for native_name, native_weight in iter_gguf_nvfp4_native_weights(
+                        module_name, weight
+                    ):
+                        yield (
+                            native_name,
+                            self.transform_weight(native_name, native_weight),
+                        )
+                    continue
+
             yield hf_name, self.transform_weight(hf_name, weight)
 
     @staticmethod
@@ -652,6 +677,17 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
         ]
 
+    @staticmethod
+    def get_native_nvfp4_modules(weight_type_map: dict[str, str]) -> list[str]:
+        return [
+            name.removesuffix(".weight")
+            for name, weight_type in weight_type_map.items()
+            if weight_type == "NVFP4"
+            and name.endswith(".weight")
+            and "embed_tokens" not in name
+            and "lm_head" not in name
+        ]
+
     def prepare_loading(
         self,
         model_path: str,
@@ -673,10 +709,12 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             gguf_files, model_config.hf_config, gguf_to_hf_name_map
         )
         weight_type_map = self.get_weight_type_map(gguf_files, gguf_to_hf_name_map)
+        self._native_nvfp4_modules = set(self.get_native_nvfp4_modules(weight_type_map))
         self.load_spec = GGUFLoadSpec(
             weights_source=gguf_files,
             gguf_to_hf_name_map=gguf_to_hf_name_map,
             unquantized_modules=self.get_unquantized_modules(weight_type_map),
+            nvfp4_modules=sorted(self._native_nvfp4_modules),
         )
         return self.load_spec
 

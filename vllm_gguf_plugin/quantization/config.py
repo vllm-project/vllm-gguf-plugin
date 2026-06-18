@@ -4,6 +4,7 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
+
 try:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
 except ImportError:
@@ -33,9 +34,14 @@ if TYPE_CHECKING:
 class GGUFConfig(QuantizationConfig):
     """Config class for GGUF."""
 
-    def __init__(self, unquantized_modules: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        unquantized_modules: list[str] | None = None,
+        nvfp4_modules: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.unquantized_modules = unquantized_modules or []
+        self.nvfp4_modules = nvfp4_modules or []
 
     def __repr__(self) -> str:
         return "GGUFConfig()"
@@ -78,6 +84,7 @@ class GGUFConfig(QuantizationConfig):
     ) -> "QuantizeMethodBase | None":
         from .fused_moe import GGUFMoEMethod
         from .linear import GGUFLinearMethod
+        from .nvfp4 import GGUFNvFp4LinearMethod
         from .vocal_embeds import GGUFEmbeddingMethod
 
         if isinstance(layer, LinearBase):
@@ -85,6 +92,10 @@ class GGUFConfig(QuantizationConfig):
                 prefix, self.unquantized_modules, self.packed_modules_mapping
             ):
                 return UnquantizedLinearMethod()
+            if is_layer_skipped_gguf(
+                prefix, self.nvfp4_modules, self.packed_modules_mapping
+            ):
+                return GGUFNvFp4LinearMethod(self)
             return GGUFLinearMethod(self)
         if isinstance(layer, VocabParallelEmbedding):
             if is_layer_skipped_gguf(
@@ -108,3 +119,5 @@ class GGUFConfig(QuantizationConfig):
             self.unquantized_modules = hf_to_vllm_mapper.apply_list(
                 self.unquantized_modules
             )
+        if self.nvfp4_modules is not None:
+            self.nvfp4_modules = hf_to_vllm_mapper.apply_list(self.nvfp4_modules)

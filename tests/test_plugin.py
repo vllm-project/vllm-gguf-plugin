@@ -49,9 +49,13 @@ from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
 from vllm_gguf_plugin.gguf_tokenizer_builder import build_tokenizer_from_gguf
 from vllm_gguf_plugin.quantization import (
+    GGUFNvFp4LinearMethod,
     GGUFUninitializedParameter,
     GGUFWeightParameter,
     GGUFWeightTypeParameter,
+)
+from vllm_gguf_plugin.quantization.nvfp4 import (
+    split_gguf_nvfp4_weight,
 )
 from vllm_gguf_plugin.weights_adapter import get_weights_adapter
 from vllm_gguf_plugin.weights_adapter.default import (
@@ -494,6 +498,136 @@ def test_qwen35_adapter_dequantizes_forced_token_embedding(monkeypatch):
     assert len(mapped) == 1
     assert mapped[0][0] == f"{module_name}.weight"
     assert torch.equal(mapped[0][1], torch.full((2, 2), 3.0, dtype=torch.float32))
+
+
+def test_split_gguf_nvfp4_weight_to_native_tensors():
+    scale_bytes = torch.tensor([[0x00, 0x38, 0x40, 0x48]], dtype=torch.uint8)
+    packed_values = torch.arange(32, dtype=torch.uint8).reshape(1, 32)
+    qweight = torch.cat((scale_bytes, packed_values), dim=1)
+    grouped = packed_values.reshape(1, 1, 4, 8)
+    values = torch.cat((grouped & 0x0F, grouped >> 4), dim=-1)
+    expected_weight = (values[..., 0::2] | (values[..., 1::2] << 4)).reshape(1, 32)
+
+    weight, weight_scale = split_gguf_nvfp4_weight(qweight)
+
+    assert torch.equal(weight, expected_weight)
+    assert weight_scale.dtype == torch.float8_e4m3fn
+    assert torch.equal(
+        weight_scale.to(torch.float32),
+        torch.tensor([[0.0, 1.0, 2.0, 4.0]], dtype=torch.float32),
+    )
+
+
+def test_default_adapter_maps_nvfp4_qweight_to_native_weights():
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="qwen3"))
+    module_name = "model.layers.0.mlp.down_proj"
+    adapter._native_nvfp4_modules.add(module_name)
+    qweight_type = torch.tensor(
+        int(default_adapter_module.gguf.GGMLQuantizationType.NVFP4)
+    )
+    qweight = torch.cat(
+        (
+            torch.tensor([[0x38, 0x38, 0x38, 0x38]], dtype=torch.uint8),
+            torch.arange(32, dtype=torch.uint8).reshape(1, 32),
+        ),
+        dim=1,
+    )
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{module_name}.qweight_type", qweight_type),
+                (f"{module_name}.qweight", qweight),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        f"{module_name}.weight",
+        f"{module_name}.weight_scale",
+        f"{module_name}.weight_scale_2",
+    ]
+    grouped = qweight[:, 4:].reshape(1, 1, 4, 8)
+    values = torch.cat((grouped & 0x0F, grouped >> 4), dim=-1)
+    expected_weight = (values[..., 0::2] | (values[..., 1::2] << 4)).reshape(1, 32)
+    assert torch.equal(mapped[0][1], expected_weight)
+    assert mapped[1][1].dtype == torch.float8_e4m3fn
+    assert torch.equal(mapped[2][1], torch.tensor(1.0, dtype=torch.float32))
+
+
+def test_default_adapter_discovers_native_nvfp4_modules():
+    modules = GGUFWeightsAdapter.get_native_nvfp4_modules(
+        {
+            "model.layers.0.mlp.down_proj.weight": "NVFP4",
+            "model.embed_tokens.weight": "NVFP4",
+            "lm_head.weight": "NVFP4",
+            "model.layers.0.self_attn.q_proj.weight": "Q4_K",
+        }
+    )
+
+    assert modules == ["model.layers.0.mlp.down_proj"]
+
+
+def test_gguf_config_routes_nvfp4_linear_to_native_method(monkeypatch):
+    register()
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    class FakeNvFp4Kernel:
+        def process_weights_after_loading(self, layer):
+            layer.processed = True
+
+        def apply_weights(self, layer, x, bias=None):
+            return torch.empty(x.shape[0], layer.output_size_per_partition)
+
+    monkeypatch.setattr(
+        "vllm_gguf_plugin.quantization.nvfp4.init_nvfp4_linear_kernel",
+        lambda use_a16=False: FakeNvFp4Kernel(),
+    )
+    quant_config = OOTGGUFConfig(
+        nvfp4_modules=[
+            "model.layers.0.mlp.gate_proj",
+            "model.layers.0.mlp.up_proj",
+        ]
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+    layer = MergedColumnParallelLinear(
+        input_size=64,
+        output_sizes=[32, 32],
+        bias=False,
+        quant_config=quant_config,
+        prefix="model.layers.0.mlp.gate_up_proj",
+        disable_tp=True,
+    )
+
+    assert "GGUFNvFp4LinearMethod" in WEIGHT_LOADER_V2_SUPPORTED
+    assert isinstance(layer.quant_method, GGUFNvFp4LinearMethod)
+    assert layer.weight.shape == (64, 32)
+    assert layer.weight_scale.shape == (64, 4)
+    assert layer.weight_scale.dtype == torch.float8_e4m3fn
+    assert layer.weight_scale_2.shape == (2,)
+
+    layer.weight_loader_v2(layer.weight, torch.ones((32, 32), dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight, 2 * torch.ones((32, 32), dtype=torch.uint8), 1)
+    layer.weight_loader_v2(
+        layer.weight_scale,
+        torch.ones((32, 4), dtype=torch.float32).to(torch.float8_e4m3fn),
+        0,
+    )
+    layer.weight_loader_v2(
+        layer.weight_scale,
+        torch.full((32, 4), 2.0, dtype=torch.float32).to(torch.float8_e4m3fn),
+        1,
+    )
+    layer.weight_loader_v2(layer.weight_scale_2, torch.tensor(1.0), 0)
+    layer.weight_loader_v2(layer.weight_scale_2, torch.tensor(1.0), 1)
+    layer.quant_method.process_weights_after_loading(layer)
+
+    assert layer.processed is True
+    assert not hasattr(layer, "weight_scale_2")
+    assert torch.equal(layer.weight_global_scale, torch.tensor(1.0))
 
 
 def test_gguf_linear_uses_weight_loader_v2(monkeypatch):

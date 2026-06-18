@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -19,6 +19,7 @@ class GGUFLoadSpec:
     weights_source: list[str]
     unquantized_modules: list[str]
     gguf_to_hf_name_map: dict[str, str] | None = None
+    nvfp4_modules: list[str] = field(default_factory=list)
 
 
 class BaseGGUFWeightsAdapter(ABC):
