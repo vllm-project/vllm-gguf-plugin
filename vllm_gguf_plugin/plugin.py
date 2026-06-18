@@ -33,6 +33,7 @@ from .gguf_utils import (
     check_gguf_file,
     get_gguf_file_path_from_hf,
     is_gguf,
+    is_local_gguf_sidecar_source,
     is_remote_gguf,
     maybe_patch_hf_config_from_gguf,
     resolve_gguf_config_source,
@@ -104,11 +105,11 @@ def _uses_gguf_derived_config_source(
         return False
 
     if check_gguf_file(model):
-        gguf_repo = Path(model).parent
+        gguf_path = Path(model)
         resolved_source = resolve_gguf_config_source(model, revision=revision)
-        if resolved_source != gguf_repo:
+        if not is_local_gguf_sidecar_source(gguf_path, resolved_source):
             return True
-        return not file_or_path_exists(gguf_repo, HF_CONFIG_NAME, revision)
+        return not file_or_path_exists(resolved_source, HF_CONFIG_NAME, revision)
 
     if is_remote_gguf(model):
         repo_id, _ = split_remote_gguf(model)
@@ -308,19 +309,19 @@ def _patch_speculator_probe() -> None:
         remote_file_ref = split_remote_gguf_file_ref(str(model))
         if check_gguf_file(model):
             if hf_config_path is None:
-                gguf_repo = Path(model).parent
+                gguf_path = Path(model)
                 gguf_model_repo = resolve_gguf_config_source(
                     model,
                     revision=revision,
                 )
-                if gguf_model_repo != gguf_repo:
+                if not is_local_gguf_sidecar_source(gguf_path, gguf_model_repo):
                     revision = None
                 elif not file_or_path_exists(
-                    gguf_repo,
+                    gguf_model_repo,
                     HF_CONFIG_NAME,
                     revision=revision,
                 ):
-                    kwargs["gguf_file"] = Path(model).name
+                    kwargs["gguf_file"] = gguf_path.name
             else:
                 gguf_model_repo = Path(model).parent
         elif is_remote_gguf(model):

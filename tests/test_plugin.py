@@ -1136,6 +1136,62 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     assert config.architectures == ["Qwen3MoeForCausalLM"]
 
 
+def test_gguf_config_parser_preserves_trust_for_snapshot_root_config(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = tmp_path / "models--org--repo" / "snapshots" / "abc123"
+    model_dir = snapshot / "Q8_0" / "nested"
+    model_dir.mkdir(parents=True)
+    gguf_path = model_dir / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    calls = {}
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["trust_remote_code"] = trust_remote_code
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {}, PretrainedConfig(model_type="qwen3")
+
+    def fake_file_or_path_exists(model, filename, revision=None):
+        return (Path(model) / filename).is_file()
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "file_or_path_exists",
+        fake_file_or_path_exists,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "file_or_path_exists",
+        fake_file_or_path_exists,
+    )
+
+    config_dict, config = GGUFConfigParser().parse(
+        gguf_path,
+        trust_remote_code=True,
+    )
+
+    assert calls["model"] == snapshot
+    assert calls["trust_remote_code"] is True
+    assert calls["gguf_file"] is None
+    assert config_dict["architectures"] == ["Qwen3ForCausalLM"]
+    assert config.architectures == ["Qwen3ForCausalLM"]
+
+
 def test_gguf_config_parser_uses_repo_for_exact_remote_file(monkeypatch):
     calls = {}
 
@@ -1999,6 +2055,51 @@ def test_register_disables_trust_for_gguf_config_redirect(tmp_path, monkeypatch)
     engine_args.create_model_config()
 
     assert captured["trust_remote_code"] is False
+
+
+def test_register_keeps_trust_for_local_snapshot_root_config(tmp_path, monkeypatch):
+    snapshot = tmp_path / "models--org--repo" / "snapshots" / "abc123"
+    model_dir = snapshot / "Q8_0" / "nested"
+    model_dir.mkdir(parents=True)
+    gguf_path = model_dir / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    captured = {}
+
+    def fake_file_or_path_exists(model, filename, revision=None):
+        return (Path(model) / filename).is_file()
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    register()
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "file_or_path_exists",
+        fake_file_or_path_exists,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "file_or_path_exists",
+        fake_file_or_path_exists,
+    )
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "build_tokenizer_from_gguf",
+        lambda model: None,
+    )
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(
+        model=str(gguf_path),
+        tokenizer=None,
+        trust_remote_code=True,
+        revision="gguf-revision",
+    )
+    engine_args.create_model_config()
+
+    assert captured["model"] == str(snapshot)
+    assert captured["trust_remote_code"] is True
 
 
 def test_register_keeps_trust_for_explicit_gguf_config_path(tmp_path, monkeypatch):

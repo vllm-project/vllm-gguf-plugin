@@ -13,6 +13,7 @@ from .gguf_utils import (
     check_gguf_file,
     get_gguf_file_path_from_hf,
     is_gguf,
+    is_local_gguf_sidecar_source,
     is_remote_gguf,
     maybe_patch_hf_config_from_gguf,
     resolve_gguf_config_source,
@@ -46,11 +47,10 @@ class GGUFConfigParser(ConfigParserBase):
                 gguf_path,
                 revision=revision,
             )
-            gguf_repo = gguf_path.parent
-            if resolved_model != gguf_repo:
+            if not is_local_gguf_sidecar_source(gguf_path, resolved_model):
                 trust_remote_code = False
                 revision = None
-            elif not file_or_path_exists(gguf_repo, HF_CONFIG_NAME, revision):
+            elif not file_or_path_exists(resolved_model, HF_CONFIG_NAME, revision):
                 kwargs["gguf_file"] = gguf_path.name
         elif is_remote_gguf(model):
             repo_id, quant_type = split_remote_gguf(model)

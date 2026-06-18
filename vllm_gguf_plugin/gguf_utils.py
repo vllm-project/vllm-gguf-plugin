@@ -394,6 +394,12 @@ def gguf_sidecar_search_dirs(model_path: Path) -> list[Path]:
     return search_dirs
 
 
+def is_local_gguf_sidecar_source(model_path: Path, source: str | Path) -> bool:
+    """Return whether source is one of the local sidecar dirs for model_path."""
+    source_path = Path(source)
+    return source_path in gguf_sidecar_search_dirs(model_path)
+
+
 def _mmproj_search_dirs(model_path: Path) -> list[Path]:
     return gguf_sidecar_search_dirs(model_path)
 
