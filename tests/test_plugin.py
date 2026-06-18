@@ -1029,6 +1029,35 @@ def test_register_preserves_explicit_dtype_for_blackwell_gguf(monkeypatch):
     assert engine_args.dtype == "float32"
 
 
+def test_register_routes_remote_gguf_base_config_source(monkeypatch):
+    register()
+    captured = {}
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "base/repo",
+    )
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(
+        model="org/repo:Q4_K_M",
+        trust_remote_code=True,
+        revision="gguf-revision",
+    )
+
+    engine_args.create_model_config()
+
+    assert captured["model"] == "base/repo"
+    assert captured["model_weights"] == "org/repo:Q4_K_M"
+    assert captured["served_model_name"] == ["org/repo:Q4_K_M"]
+    assert captured["trust_remote_code"] is False
+
+
 def test_register_sets_embedded_tokenizer_for_local_gguf(tmp_path, monkeypatch):
     register()
     gguf_path = tmp_path / "model.gguf"
@@ -1092,6 +1121,11 @@ def test_register_preserves_implicit_gguf_model_for_config_parser(monkeypatch):
         captured.update(kwargs)
         return kwargs
 
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: model,
+    )
     monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
     engine_args = EngineArgs(model="org/repo/subdir/model.gguf")
 

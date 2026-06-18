@@ -128,6 +128,25 @@ def _uses_gguf_derived_config_source(
     return False
 
 
+def _get_implicit_gguf_config_source(
+    model: str,
+    revision: str | None = None,
+) -> str | None:
+    if check_gguf_file(model):
+        gguf_source: str | Path = Path(model).parent
+    elif is_remote_gguf(model):
+        gguf_source, _ = split_remote_gguf(model)
+    elif (remote_file_ref := split_remote_gguf_file_ref(str(model))) is not None:
+        gguf_source, _ = remote_file_ref
+    else:
+        return None
+
+    resolved_source = resolve_gguf_config_source(model, revision=revision)
+    if resolved_source == gguf_source:
+        return None
+    return str(resolved_source)
+
+
 def _get_gguf_config_probe_model(engine_args: EngineArgs) -> str | None:
     if _is_gguf_reference(engine_args.model):
         return engine_args.model
@@ -233,6 +252,11 @@ def _patch_engine_args() -> None:
                 explicit_tokenizer,
                 self.hf_config_path,
             )
+            if config_source is None:
+                config_source = _get_implicit_gguf_config_source(
+                    gguf_model,
+                    revision=self.revision,
+                )
             if config_source is not None:
                 self.model = config_source
         return original_create_model_config(self, *args, **kwargs)
