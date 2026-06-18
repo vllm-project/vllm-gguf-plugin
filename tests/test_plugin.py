@@ -64,6 +64,7 @@ from vllm_gguf_plugin.quantization.nvfp4 import (
     split_gguf_nvfp4_weight,
 )
 from vllm_gguf_plugin.weights_adapter import get_weights_adapter
+from vllm_gguf_plugin.weights_adapter.base import GGUFLoadSpec
 from vllm_gguf_plugin.weights_adapter.default import (
     GGUFWeightsAdapter,
     _add_gemma4_gguf_mappings,
@@ -216,6 +217,102 @@ def test_gemma4_adapter_transforms_quantized_moe_names():
     assert mapped[1][0] == "model.layers.0.moe.experts.routed_experts.w13_qweight"
     assert mapped[2][0] == "model.layers.0.moe.experts.routed_experts.w2_qweight_type"
     assert mapped[3][0] == "model.layers.0.moe.experts.routed_experts.w2_qweight"
+
+
+def test_gemma4_adapter_promotes_packed_nvfp4_moe_modules():
+    adapter = Gemma4GGUFAdapter(PretrainedConfig(model_type="gemma4"))
+    adapter._native_nvfp4_modules = {
+        "model.layers.0.experts.gate_up_proj",
+        "model.layers.0.experts.down_proj",
+        "model.layers.1.experts.gate_up_proj",
+        "model.layers.2.mlp.down_proj",
+    }
+    load_spec = GGUFLoadSpec(
+        weights_source=["model.gguf"],
+        unquantized_modules=[],
+        nvfp4_modules=sorted(adapter._native_nvfp4_modules),
+    )
+
+    adapter._promote_native_nvfp4_moe_modules(load_spec)
+
+    assert adapter._native_nvfp4_modules == {"model.layers.2.mlp.down_proj"}
+    assert load_spec.nvfp4_modules == ["model.layers.2.mlp.down_proj"]
+    assert load_spec.nvfp4_moe_modules == ["model.layers.0.moe.experts"]
+    assert adapter._native_nvfp4_gemma4_moe_projection_modules == {
+        "model.layers.0.experts.gate_up_proj": "w13",
+        "model.layers.0.experts.down_proj": "w2",
+    }
+
+
+def test_gemma4_adapter_maps_packed_nvfp4_moe_to_native_weights():
+    adapter = Gemma4GGUFAdapter(PretrainedConfig(model_type="gemma4"))
+    adapter._native_nvfp4_gemma4_moe_projection_modules = {
+        "model.layers.0.experts.gate_up_proj": "w13",
+    }
+    qweight_type = torch.tensor(
+        int(default_adapter_module.gguf.GGMLQuantizationType.NVFP4)
+    )
+    qweight = torch.cat(
+        (
+            torch.full((2, 3, 4), 0x38, dtype=torch.uint8),
+            torch.arange(2 * 3 * 32, dtype=torch.uint8).reshape(2, 3, 32),
+        ),
+        dim=2,
+    )
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                ("model.layers.0.experts.gate_up_proj.qweight_type", qweight_type),
+                ("model.layers.0.experts.gate_up_proj.qweight", qweight),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        "model.layers.0.moe.experts.w13_weight",
+        "model.layers.0.moe.experts.w13_weight_scale",
+        "model.layers.0.moe.experts.w13_weight_scale_2",
+        "model.layers.0.moe.experts.w13_input_scale",
+    ]
+    assert mapped[0][1].shape == (2, 3, 32)
+    assert mapped[1][1].shape == (2, 3, 4)
+    assert mapped[1][1].dtype == torch.float8_e4m3fn
+    assert torch.equal(mapped[2][1], torch.ones((2, 2), dtype=torch.float32))
+    assert torch.equal(mapped[3][1], torch.ones((2, 2), dtype=torch.float32))
+
+
+def test_gemma4_adapter_maps_packed_nvfp4_moe_sidecars():
+    adapter = Gemma4GGUFAdapter(PretrainedConfig(model_type="gemma4"))
+    adapter._native_nvfp4_gemma4_moe_projection_modules = {
+        "model.layers.0.experts.gate_up_proj": "w13",
+        "model.layers.0.experts.down_proj": "w2",
+    }
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (
+                    "model.layers.0.experts.gate_up_proj.weight_scale_2",
+                    torch.tensor([0.25, 0.5]),
+                ),
+                (
+                    "model.layers.0.experts.down_proj.input_scale",
+                    torch.tensor([1.25, 1.5]),
+                ),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        "model.layers.0.moe.experts.w13_weight_scale_2",
+        "model.layers.0.moe.experts.w2_input_scale",
+    ]
+    assert torch.equal(
+        mapped[0][1],
+        torch.tensor([[0.25, 0.25], [0.5, 0.5]], dtype=torch.float32),
+    )
+    assert torch.equal(mapped[1][1], torch.tensor([1.25, 1.5]))
 
 
 def test_gemma4_adapter_flattens_patch_embed_weight():
