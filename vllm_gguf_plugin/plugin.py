@@ -39,7 +39,12 @@ from .gguf_utils import (
     resolve_gguf_config_source,
     split_remote_gguf,
 )
-from .weight_utils import first_split_gguf_filename, split_remote_gguf_file_ref
+from .weight_utils import (
+    download_gguf,
+    download_gguf_file,
+    first_split_gguf_filename,
+    split_remote_gguf_file_ref,
+)
 
 logger = init_logger(__name__)
 
@@ -48,6 +53,13 @@ GGUFConfigParser: Any | None = None
 GGUFModelLoader: Any | None = None
 OOTGGUFConfig: Any | None = None
 OOTGGUFModelLoader: Any | None = None
+
+_HF_TOKENIZER_FILES = (
+    "tokenizer.json",
+    "tokenizer.model",
+    "spiece.model",
+    "vocab.json",
+)
 
 
 def _load_oot_gguf_classes() -> tuple[type, type, type]:
@@ -95,6 +107,82 @@ def _get_explicit_gguf_config_source(
     if tokenizer is not None and not _is_gguf_reference(tokenizer):
         return tokenizer
     return None
+
+
+def _source_has_tokenizer_files(
+    source: str | Path,
+    revision: str | None = None,
+) -> bool:
+    for filename in _HF_TOKENIZER_FILES:
+        try:
+            if file_or_path_exists(source, filename, revision):
+                return True
+        except Exception as e:
+            logger.debug(
+                "Failed to inspect tokenizer file %s/%s: %s",
+                source,
+                filename,
+                e,
+            )
+            return True
+    return False
+
+
+def _remote_gguf_tokenizer_source_has_files(
+    model: str,
+    revision: str | None = None,
+) -> bool:
+    resolved_source = resolve_gguf_config_source(model, revision=revision)
+    if _source_has_tokenizer_files(resolved_source, revision=revision):
+        return True
+
+    if is_remote_gguf(model):
+        repo_id, _ = split_remote_gguf(model)
+    elif (remote_file_ref := split_remote_gguf_file_ref(str(model))) is not None:
+        repo_id, _ = remote_file_ref
+    else:
+        return False
+
+    if resolved_source != repo_id:
+        return False
+    return _source_has_tokenizer_files(repo_id, revision=revision)
+
+
+def _build_tokenizer_from_gguf_reference(
+    model: str,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+    ignore_patterns: str | list[str] | None = None,
+) -> str | None:
+    if check_gguf_file(model):
+        return build_tokenizer_from_gguf(model)
+
+    remote_file_ref = split_remote_gguf_file_ref(str(model))
+    if not is_remote_gguf(model) and remote_file_ref is None:
+        return None
+
+    if _remote_gguf_tokenizer_source_has_files(model, revision=revision):
+        return None
+
+    if is_remote_gguf(model):
+        repo_id, quant_type = split_remote_gguf(model)
+        local_model = download_gguf(
+            repo_id,
+            quant_type,
+            cache_dir=cache_dir,
+            revision=revision,
+            ignore_patterns=ignore_patterns,
+        )
+        return build_tokenizer_from_gguf(local_model)
+
+    repo_id, filename = remote_file_ref
+    local_model = download_gguf_file(
+        repo_id=repo_id,
+        filename=filename,
+        cache_dir=cache_dir,
+        revision=revision,
+    )
+    return build_tokenizer_from_gguf(local_model)
 
 
 def _uses_gguf_derived_config_source(
@@ -232,10 +320,13 @@ def _patch_engine_args() -> None:
             explicit_tokenizer = (
                 self.tokenizer if isinstance(self.tokenizer, str) else None
             )
-            if (
-                self.tokenizer is None
-                and check_gguf_file(gguf_model)
-                and (tokenizer_path := build_tokenizer_from_gguf(gguf_model))
+            if self.tokenizer is None and (
+                tokenizer_path := _build_tokenizer_from_gguf_reference(
+                    gguf_model,
+                    revision=self.revision,
+                    cache_dir=getattr(self, "download_dir", None),
+                    ignore_patterns=getattr(self, "ignore_patterns", None),
+                )
             ):
                 self.tokenizer = tokenizer_path
             if self.quantization is None:

@@ -2217,6 +2217,154 @@ def test_register_sets_embedded_tokenizer_for_local_gguf(tmp_path, monkeypatch):
     assert captured["tokenizer"] == "/tmp/gguf-tokenizer-cache"
 
 
+def test_register_sets_embedded_tokenizer_for_remote_gguf_quant(monkeypatch):
+    register()
+    captured = {}
+    download_calls = []
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "org/repo",
+    )
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "file_or_path_exists",
+        lambda model, filename, revision=None: False,
+    )
+
+    def fake_download_gguf(
+        repo_id,
+        quant_type,
+        cache_dir=None,
+        revision=None,
+        ignore_patterns=None,
+    ):
+        download_calls.append(
+            (repo_id, quant_type, cache_dir, revision, ignore_patterns)
+        )
+        return "/cache/org/repo/model-Q4_K_M.gguf"
+
+    monkeypatch.setattr(gguf_plugin_module, "download_gguf", fake_download_gguf)
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "build_tokenizer_from_gguf",
+        lambda model: "/tmp/gguf-tokenizer-cache",
+    )
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(
+        model="org/repo:Q4_K_M",
+        download_dir="/cache",
+        revision="abc123",
+    )
+    engine_args.ignore_patterns = ["*.safetensors"]
+
+    engine_args.create_model_config()
+
+    assert captured["model_weights"] == "org/repo:Q4_K_M"
+    assert captured["tokenizer"] == "/tmp/gguf-tokenizer-cache"
+    assert download_calls == [
+        ("org/repo", "Q4_K_M", "/cache", "abc123", ["*.safetensors"])
+    ]
+
+
+def test_register_sets_embedded_tokenizer_for_exact_remote_gguf(monkeypatch):
+    register()
+    captured = {}
+    download_calls = []
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "org/repo",
+    )
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "file_or_path_exists",
+        lambda model, filename, revision=None: False,
+    )
+
+    def fake_download_gguf_file(
+        repo_id,
+        filename,
+        cache_dir=None,
+        revision=None,
+    ):
+        download_calls.append((repo_id, filename, cache_dir, revision))
+        return "/cache/org/repo/Q8_0/model.gguf"
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "download_gguf_file",
+        fake_download_gguf_file,
+    )
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "build_tokenizer_from_gguf",
+        lambda model: "/tmp/gguf-tokenizer-cache",
+    )
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(
+        model="org/repo/Q8_0/model.gguf",
+        download_dir="/cache",
+        revision="abc123",
+    )
+
+    engine_args.create_model_config()
+
+    assert captured["model_weights"] == "org/repo/Q8_0/model.gguf"
+    assert captured["tokenizer"] == "/tmp/gguf-tokenizer-cache"
+    assert download_calls == [("org/repo", "Q8_0/model.gguf", "/cache", "abc123")]
+
+
+def test_register_skips_remote_embedded_tokenizer_when_source_has_tokenizer(
+    monkeypatch,
+):
+    register()
+    captured = {}
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "base/repo",
+    )
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "file_or_path_exists",
+        lambda model, filename, revision=None: filename == "tokenizer.json",
+    )
+
+    def fail_download(*args, **kwargs):
+        raise AssertionError("remote GGUF should not download when tokenizer exists")
+
+    monkeypatch.setattr(gguf_plugin_module, "download_gguf", fail_download)
+    monkeypatch.setattr(gguf_plugin_module, "download_gguf_file", fail_download)
+    monkeypatch.setattr(gguf_plugin_module, "build_tokenizer_from_gguf", fail_download)
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model="org/repo:Q4_K_M")
+
+    engine_args.create_model_config()
+
+    assert captured["model"] == "base/repo"
+    assert captured["model_weights"] == "org/repo:Q4_K_M"
+    assert captured["tokenizer"] is None
+
+
 def test_register_preserves_explicit_tokenizer_for_local_gguf(tmp_path, monkeypatch):
     register()
     gguf_path = tmp_path / "model.gguf"
