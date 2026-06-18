@@ -5,11 +5,13 @@ from unittest.mock import patch
 
 import pytest
 
+import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 from vllm_gguf_plugin.gguf_utils import (
     extract_lm_head_from_gguf,
     is_gguf,
     is_local_gguf_quant,
     is_remote_gguf,
+    resolve_gguf_config_source,
     split_remote_gguf,
 )
 
@@ -213,6 +215,11 @@ class TestIsGGUF:
         assert not is_gguf("repo/model:quant")
         assert not is_gguf("repo/model:INVALID")
 
+    def test_is_gguf_with_exact_remote_file(self):
+        """Test is_gguf with exact remote GGUF file references."""
+        assert is_gguf("org/repo/model.gguf")
+        assert is_gguf("org/repo/subdir/model.gguf")
+
     @patch("vllm_gguf_plugin.gguf_utils.check_gguf_file", return_value=False)
     def test_is_gguf_false(self, mock_check_gguf):
         """Test is_gguf returns False for non-GGUF models."""
@@ -229,6 +236,63 @@ class TestIsGGUF:
         assert not is_gguf("https://repo/model:Q2_K")
         assert not is_gguf("s3://bucket/repo/model:IQ1_S")
         assert not is_gguf("gs://bucket/repo/model:Q2_K")
+
+
+class TestResolveGGUFConfigSource:
+    def test_exact_remote_file_uses_repo_config(self, monkeypatch):
+        calls = []
+
+        def fake_file_or_path_exists(model, filename, revision):
+            calls.append((model, filename, revision))
+            return model == "org/repo" and filename == "config.json"
+
+        def fail_base_model_lookup(repo_id, revision=None):
+            raise AssertionError(
+                "base model lookup should not run when repo has config"
+            )
+
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "_get_remote_gguf_base_model_ids",
+            fail_base_model_lookup,
+        )
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "file_or_path_exists",
+            fake_file_or_path_exists,
+        )
+
+        assert (
+            resolve_gguf_config_source(
+                "org/repo/subdir/model.gguf",
+                revision="main",
+            )
+            == "org/repo"
+        )
+        assert calls == [("org/repo", "config.json", "main")]
+
+    def test_exact_remote_file_can_redirect_to_base_model(self, monkeypatch):
+        def fake_file_or_path_exists(model, filename, revision):
+            return model == "base/model" and filename == "config.json"
+
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "_get_remote_gguf_base_model_ids",
+            lambda repo_id, revision=None: ("base/model",),
+        )
+        monkeypatch.setattr(
+            gguf_utils_module,
+            "file_or_path_exists",
+            fake_file_or_path_exists,
+        )
+
+        assert (
+            resolve_gguf_config_source(
+                "org/repo/subdir/model.gguf",
+                revision="main",
+            )
+            == "base/model"
+        )
 
 
 class TestExtractLMHeadFromGGUF:

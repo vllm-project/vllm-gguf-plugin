@@ -4,16 +4,21 @@ from pathlib import Path
 
 from transformers import PretrainedConfig
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from vllm.transformers_utils.config import HFConfigParser
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
+from vllm.transformers_utils.repo_utils import file_or_path_exists
 
 from .gguf_utils import (
     check_gguf_file,
+    get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
     maybe_patch_hf_config_from_gguf,
+    resolve_gguf_config_source,
     split_remote_gguf,
 )
+from .weight_utils import split_remote_gguf_file_ref
 
 
 class GGUFConfigParser(ConfigParserBase):
@@ -26,7 +31,46 @@ class GGUFConfigParser(ConfigParserBase):
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         original_model = model
-        resolved_model = self._resolve_config_source(model)
+        gguf_path = None
+        if (gguf_file := kwargs.pop("gguf_file", None)) is not None:
+            candidate = Path(model) / gguf_file
+            if check_gguf_file(candidate):
+                original_model = candidate
+                gguf_path = candidate
+
+        resolved_model = self._resolve_config_source(model, revision=revision)
+
+        if gguf_path is not None or check_gguf_file(model):
+            gguf_path = gguf_path or Path(model)
+            resolved_model = self._resolve_config_source(
+                gguf_path,
+                revision=revision,
+            )
+            gguf_repo = gguf_path.parent
+            if resolved_model != gguf_repo:
+                trust_remote_code = False
+                revision = None
+            elif not file_or_path_exists(gguf_repo, HF_CONFIG_NAME, revision):
+                kwargs["gguf_file"] = gguf_path.name
+        elif is_remote_gguf(model):
+            repo_id, quant_type = split_remote_gguf(model)
+            if resolved_model != repo_id:
+                trust_remote_code = False
+                revision = None
+            elif not file_or_path_exists(repo_id, HF_CONFIG_NAME, revision):
+                kwargs["gguf_file"] = get_gguf_file_path_from_hf(
+                    repo_id,
+                    quant_type,
+                    revision=revision,
+                )
+        elif (remote_file_ref := split_remote_gguf_file_ref(str(model))) is not None:
+            repo_id, filename = remote_file_ref
+            if resolved_model != repo_id:
+                trust_remote_code = False
+                revision = None
+            elif not file_or_path_exists(repo_id, HF_CONFIG_NAME, revision):
+                kwargs["gguf_file"] = filename
+
         config_dict, config = HFConfigParser().parse(
             resolved_model,
             trust_remote_code=trust_remote_code,
@@ -52,10 +96,8 @@ class GGUFConfigParser(ConfigParserBase):
         return config_dict, config
 
     @staticmethod
-    def _resolve_config_source(model: str | Path) -> str | Path:
-        if check_gguf_file(model):
-            return Path(model).parent
-        if is_remote_gguf(model):
-            repo_id, _ = split_remote_gguf(model)
-            return repo_id
-        return model
+    def _resolve_config_source(
+        model: str | Path,
+        revision: str | None = None,
+    ) -> str | Path:
+        return resolve_gguf_config_source(model, revision=revision)

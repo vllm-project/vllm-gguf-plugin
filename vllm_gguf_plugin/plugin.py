@@ -3,7 +3,6 @@
 import os
 import sys
 from functools import wraps
-from pathlib import Path
 from typing import Any
 
 import vllm.engine.arg_utils as arg_utils_module
@@ -21,7 +20,7 @@ from vllm.model_executor.model_loader import (
 )
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
 
-from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
+from .gguf_utils import is_gguf, is_remote_gguf
 
 logger = init_logger(__name__)
 
@@ -67,21 +66,16 @@ def _is_gguf_reference(model: str | None) -> bool:
     return model.endswith(".gguf") or is_remote_gguf(model) or is_gguf(model)
 
 
-def _get_gguf_config_source(
+def _get_explicit_gguf_config_source(
     model: str,
     tokenizer: str | None,
     hf_config_path: str | None,
-) -> str:
+) -> str | None:
     if hf_config_path is not None:
         return hf_config_path
     if tokenizer is not None and not _is_gguf_reference(tokenizer):
         return tokenizer
-    if is_remote_gguf(model):
-        repo_id, _ = split_remote_gguf(model)
-        return repo_id
-    if check_gguf_file(model):
-        return str(Path(model).parent)
-    return model
+    return None
 
 
 def _patch_quantization_config_lookup() -> None:
@@ -131,11 +125,13 @@ def _patch_engine_args() -> None:
                 self.model_weights = gguf_model
             if self.served_model_name is None:
                 self.served_model_name = [gguf_model]
-            self.model = _get_gguf_config_source(
+            config_source = _get_explicit_gguf_config_source(
                 gguf_model,
                 self.tokenizer if isinstance(self.tokenizer, str) else None,
                 self.hf_config_path,
             )
+            if config_source is not None:
+                self.model = config_source
         return original_create_model_config(self, *args, **kwargs)
 
     EngineArgs.create_model_config = create_model_config

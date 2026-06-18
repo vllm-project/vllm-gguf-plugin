@@ -36,6 +36,7 @@ if (
     )
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
+import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
@@ -203,6 +204,7 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     ):
         calls["model"] = model
         calls["trust_remote_code"] = trust_remote_code
+        calls["gguf_file"] = kwargs.get("gguf_file")
         return {}, PretrainedConfig(model_type="qwen3_moe")
 
     monkeypatch.setattr(
@@ -220,8 +222,118 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
 
     assert calls["model"] == gguf_path.parent
     assert calls["trust_remote_code"] is False
+    assert calls["gguf_file"] == gguf_path.name
     assert config_dict["norm_topk_prob"] is True
     assert config.architectures == ["Qwen3MoeForCausalLM"]
+
+
+def test_gguf_config_parser_uses_repo_for_exact_remote_file(monkeypatch):
+    calls = {}
+
+    def fake_file_or_path_exists(model, filename, revision):
+        return model == "org/repo" and filename == "config.json"
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["revision"] = revision
+        calls["trust_remote_code"] = trust_remote_code
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {}, PretrainedConfig(model_type="qwen3")
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "file_or_path_exists",
+        fake_file_or_path_exists,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "file_or_path_exists",
+        fake_file_or_path_exists,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "_get_remote_gguf_base_model_ids",
+        lambda repo_id, revision=None: (),
+    )
+
+    config_dict, config = GGUFConfigParser().parse(
+        "org/repo/subdir/model.gguf",
+        trust_remote_code=True,
+        revision="main",
+    )
+
+    assert calls["model"] == "org/repo"
+    assert calls["revision"] == "main"
+    assert calls["trust_remote_code"] is True
+    assert calls["gguf_file"] is None
+    assert config_dict["architectures"] == ["Qwen3ForCausalLM"]
+    assert config.architectures == ["Qwen3ForCausalLM"]
+
+
+def test_gguf_config_parser_passes_exact_remote_file_when_repo_has_no_config(
+    monkeypatch,
+):
+    calls = {}
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["revision"] = revision
+        calls["trust_remote_code"] = trust_remote_code
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        return {}, PretrainedConfig(model_type="qwen3")
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "file_or_path_exists",
+        lambda model, filename, revision: False,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "file_or_path_exists",
+        lambda model, filename, revision: False,
+    )
+    monkeypatch.setattr(
+        gguf_utils_module,
+        "_get_remote_gguf_base_model_ids",
+        lambda repo_id, revision=None: (),
+    )
+
+    config_dict, config = GGUFConfigParser().parse(
+        "org/repo/subdir/model.gguf",
+        trust_remote_code=True,
+        revision="main",
+    )
+
+    assert calls["model"] == "org/repo"
+    assert calls["revision"] == "main"
+    assert calls["trust_remote_code"] is True
+    assert calls["gguf_file"] == "subdir/model.gguf"
+    assert config_dict["architectures"] == ["Qwen3ForCausalLM"]
+    assert config.architectures == ["Qwen3ForCausalLM"]
 
 
 def test_register_sets_engine_args_for_gguf_model(monkeypatch):
@@ -240,6 +352,26 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     assert captured["config_format"] == "gguf"
     assert captured["model"] == "/tmp/tokenizer"
     assert captured["model_weights"] == "/tmp/model.gguf"
+    assert captured["quantization"] == "gguf"
+    assert engine_args.load_format == "gguf"
+
+
+def test_register_preserves_implicit_gguf_model_for_config_parser(monkeypatch):
+    register()
+    captured = {}
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model="org/repo/subdir/model.gguf")
+
+    engine_args.create_model_config()
+
+    assert captured["config_format"] == "gguf"
+    assert captured["model"] == "org/repo/subdir/model.gguf"
+    assert captured["model_weights"] == "org/repo/subdir/model.gguf"
     assert captured["quantization"] == "gguf"
     assert engine_args.load_format == "gguf"
 
