@@ -244,7 +244,7 @@ def remote_gguf_quant_allow_patterns(quant_type: str) -> list[str]:
     )
 
 
-def _matches_remote_gguf_quant(filename: str, quant_type: str) -> bool:
+def _matches_gguf_quant_filename(filename: str, quant_type: str) -> bool:
     return any(
         fnmatch(filename, pattern)
         for pattern in remote_gguf_quant_allow_patterns(quant_type)
@@ -260,7 +260,7 @@ def _select_remote_gguf_filename(
         for filename in files
         if filename.lower().endswith(".gguf")
         and "mmproj" not in Path(filename).name.lower()
-        and _matches_remote_gguf_quant(filename, quant_type)
+        and _matches_gguf_quant_filename(filename, quant_type)
     ]
     if not gguf_files:
         return None
@@ -400,20 +400,26 @@ def download_gguf_file(
 
 def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     """Find a GGUF file matching *quant_type* in a local directory."""
-    import glob as glob_mod
-
-    patterns = [
-        f"*-{quant_type}.gguf",
-        f"*-{quant_type}-*.gguf",
+    local_path = Path(local_dir)
+    matches = [
+        path
+        for path in local_path.rglob("*.gguf")
+        if path.is_file()
+        and "mmproj" not in path.name.lower()
+        and _matches_gguf_quant_filename(
+            path.relative_to(local_path).as_posix(),
+            quant_type,
+        )
     ]
-    matches: list[str] = []
-    for pat in patterns:
-        matches.extend(glob_mod.glob(os.path.join(local_dir, pat)))
     if not matches:
         raise ValueError(
             f"No GGUF file matching quant_type '{quant_type}' found in {local_dir}"
         )
-    matches.sort(key=_download_candidate_sort_key)
+    matches.sort(
+        key=lambda path: _download_candidate_sort_key(
+            path.relative_to(local_path).as_posix()
+        )
+    )
     return resolve_gguf_file_set(matches[0])[0]
 
 

@@ -527,6 +527,21 @@ class TestGGUFDownload:
             tmp_path / "model-Q4_K_M-00001-of-00002.gguf"
         )
 
+    def test_resolve_local_gguf_uses_shared_quant_patterns(self, tmp_path):
+        quant_dir = tmp_path / "Q4_K_M"
+        quant_dir.mkdir()
+        model = quant_dir / "model.q4_k_m.gguf"
+        model.touch()
+
+        assert resolve_local_gguf(str(tmp_path), "Q4_K_M") == str(model)
+
+    def test_resolve_local_gguf_ignores_mmproj_matches(self, tmp_path):
+        (tmp_path / "mmproj-Q4_K_M.gguf").touch()
+        model = tmp_path / "model-Q4_K_M.gguf"
+        model.touch()
+
+        assert resolve_local_gguf(str(tmp_path), "Q4_K_M") == str(model)
+
 
 class TestGGUFModelLoader:
     """Test GGUFModelLoader class methods."""
