@@ -104,3 +104,45 @@ python scripts/plugin_gguf_smoke.py \
   --enforce-eager \
   --json
 ```
+
+Run the smoke matrix wrapper to execute isolated cases in separate Python
+processes. With no extra cases, it runs the lightweight registration check:
+
+```bash
+python scripts/plugin_gguf_matrix.py --json
+```
+
+Pass a local GPT-OSS GGUF path and select the built-in native MXFP4 Marlin case
+for the large-model GPU smoke:
+
+```bash
+python scripts/plugin_gguf_matrix.py \
+  --gpt-oss-mxfp4-model /path/to/gpt-oss-20b-mxfp4.gguf \
+  --case gpt_oss_mxfp4_marlin \
+  --settle-seconds 10 \
+  --json
+```
+
+For custom coverage, provide a JSON matrix:
+
+```json
+{
+  "cases": [
+    {
+      "name": "qwen3_q8",
+      "args": [
+        "--override-in-tree",
+        "--expect",
+        "active",
+        "--generate",
+        "--model",
+        "unsloth/Qwen3-0.6B-GGUF:Q8_0",
+        "--tokenizer",
+        "Qwen/Qwen3-0.6B",
+        "--json"
+      ],
+      "timeoutSeconds": 600
+    }
+  ]
+}
+```
