@@ -1750,6 +1750,12 @@ def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     (tokenizer_cache / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     (tokenizer_cache / "preprocessor_config.json").unlink()
     assert build_tokenizer_from_gguf(gguf_path) == tokenizer_path
+    tokenizer_config = json.loads(
+        (tokenizer_cache / "tokenizer_config.json").read_text(encoding="utf-8")
+    )
+    assert tokenizer_config["bos_token"] == "<bos>"
+    assert tokenizer_config["eos_token"] == "<eos>"
+    assert tokenizer_config["pad_token"] == "<pad>"
     assert (tokenizer_cache / "preprocessor_config.json").is_file()
 
 

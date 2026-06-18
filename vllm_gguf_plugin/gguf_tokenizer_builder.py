@@ -206,6 +206,17 @@ def _local_config_special_token_kwargs(
     }
 
 
+def _named_special_token_kwargs(
+    model_path: Path,
+    tokenizer_dict: dict[str, Any],
+) -> dict[str, str]:
+    special_token_kwargs = _special_token_kwargs(tokenizer_dict)
+    special_token_kwargs.update(
+        _local_config_special_token_kwargs(model_path, tokenizer_dict)
+    )
+    return special_token_kwargs
+
+
 _GEMMA4_MODEL_SPECIFIC_TOKENS = {
     "audio_token": "<|audio|>",
     "boa_token": "<|audio>",
@@ -369,10 +380,7 @@ def _patch_tokenizer_config_from_gguf(
         return
 
     changed = False
-    special_token_kwargs = _local_config_special_token_kwargs(
-        model_path,
-        tokenizer_dict,
-    )
+    special_token_kwargs = _named_special_token_kwargs(model_path, tokenizer_dict)
     for token_name, token in special_token_kwargs.items():
         if tokenizer_config.get(token_name) != token:
             tokenizer_config[token_name] = token
@@ -713,10 +721,7 @@ def build_tokenizer_from_gguf(model: str | PathLike) -> str | None:
             tokenizer_architecture,
             tokenizer_dict,
         )
-        special_token_kwargs = _special_token_kwargs(tokenizer_dict)
-        special_token_kwargs.update(
-            _local_config_special_token_kwargs(model_path, tokenizer_dict)
-        )
+        special_token_kwargs = _named_special_token_kwargs(model_path, tokenizer_dict)
         tokenizer = PreTrainedTokenizerFast(
             tokenizer_object=backend_tokenizer,
             **additional_kwargs,
