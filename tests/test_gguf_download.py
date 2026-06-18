@@ -81,30 +81,32 @@ class TestGGUFDownload:
 
         result = download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
 
-        mock_download.assert_called_once_with(
-            repo_id="unsloth/Qwen3-0.6B-GGUF",
-            cache_dir=None,
-            allow_patterns=[
-                "*.IQ1_S-*.gguf",
-                "*/*.IQ1_S-*.gguf",
-                "*.IQ1_S.gguf",
-                "*/*.IQ1_S.gguf",
-                "*-IQ1_S-*.gguf",
-                "*/*-IQ1_S-*.gguf",
-                "*-IQ1_S.gguf",
-                "*/*-IQ1_S.gguf",
-                "*.iq1_s-*.gguf",
-                "*/*.iq1_s-*.gguf",
-                "*.iq1_s.gguf",
-                "*/*.iq1_s.gguf",
-                "*-iq1_s-*.gguf",
-                "*/*-iq1_s-*.gguf",
-                "*-iq1_s.gguf",
-                "*/*-iq1_s.gguf",
-            ],
-            revision=None,
-            ignore_patterns=None,
-        )
+        mock_download.assert_called_once()
+        assert mock_download.call_args.kwargs["repo_id"] == "unsloth/Qwen3-0.6B-GGUF"
+        assert mock_download.call_args.kwargs["cache_dir"] is None
+        assert mock_download.call_args.kwargs["revision"] is None
+        assert mock_download.call_args.kwargs["ignore_patterns"] is None
+        allow_patterns = mock_download.call_args.kwargs["allow_patterns"]
+        assert allow_patterns[:16] == [
+            "*.IQ1_S-*.gguf",
+            "*/*.IQ1_S-*.gguf",
+            "*.IQ1_S.gguf",
+            "*/*.IQ1_S.gguf",
+            "*-IQ1_S-*.gguf",
+            "*/*-IQ1_S-*.gguf",
+            "*-IQ1_S.gguf",
+            "*/*-IQ1_S.gguf",
+            "*.iq1_s-*.gguf",
+            "*/*.iq1_s-*.gguf",
+            "*.iq1_s.gguf",
+            "*/*.iq1_s.gguf",
+            "*-iq1_s-*.gguf",
+            "*/*-iq1_s-*.gguf",
+            "*-iq1_s.gguf",
+            "*/*-iq1_s.gguf",
+        ]
+        assert "mmproj-*.gguf" in allow_patterns
+        assert "processor_config.json" in allow_patterns
 
         assert result == f"{mock_folder}/model-IQ1_S.gguf"
         mock_list_repo_files.assert_called_once_with(

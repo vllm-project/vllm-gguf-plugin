@@ -207,6 +207,17 @@ def _remote_processor_sidecar_patterns() -> list[str]:
     ]
 
 
+def _remote_mmproj_sidecar_patterns() -> list[str]:
+    return [
+        "mmproj.gguf",
+        "*/mmproj.gguf",
+        "mmproj-*.gguf",
+        "*/mmproj-*.gguf",
+        "*mmproj*.gguf",
+        "*/*mmproj*.gguf",
+    ]
+
+
 def _remote_sidecar_search_dirs(filename: str) -> list[str]:
     path = PurePosixPath(filename)
     dirs = []
@@ -331,6 +342,9 @@ def download_gguf(
             quant_type,
         ):
             allow_patterns.append(mmproj_filename)
+            allow_patterns.extend(_remote_processor_sidecar_patterns())
+        elif not sidecar_files:
+            allow_patterns.extend(_remote_mmproj_sidecar_patterns())
             allow_patterns.extend(_remote_processor_sidecar_patterns())
 
         folder = snapshot_download(
