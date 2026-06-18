@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,6 +44,7 @@ if (
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
 import vllm_gguf_plugin.gguf_tokenizer_builder as gguf_tokenizer_builder_module
 import vllm_gguf_plugin.gguf_utils as gguf_utils_module
+import vllm_gguf_plugin.loader as gguf_loader_module
 import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 import vllm_gguf_plugin.quantization.config as gguf_config_module
@@ -53,6 +55,7 @@ from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
 from vllm_gguf_plugin.gguf_tokenizer_builder import build_tokenizer_from_gguf
 from vllm_gguf_plugin.quantization import (
+    GGUFGptOssMxfp4FusedMoE,
     GGUFModelOptNvFp4FusedMoE,
     GGUFMxfp4FusedMoE,
     GGUFNvFp4LinearMethod,
@@ -91,12 +94,45 @@ def test_register_overrides_gguf_config():
     assert quantization_module.get_quantization_config("gguf") is OOTGGUFConfig
 
 
+def test_register_stubs_in_tree_gguf_quant_module_for_other_quant_lookups():
+    register()
+
+    module = sys.modules["vllm.model_executor.layers.quantization.gguf"]
+    assert module.GGUFConfig is OOTGGUFConfig
+
+    assert quantization_module.get_quantization_config("fp8").__name__ == "Fp8Config"
+    assert module.GGUFConfig is OOTGGUFConfig
+
+
 def test_register_overrides_gguf_loader():
     register()
 
     model_loader = get_model_loader(LoadConfig(load_format="gguf"))
 
     assert isinstance(model_loader, OOTGGUFModelLoader)
+
+
+def test_loader_restores_gguf_quant_config_after_native_hf_override():
+    native_quant_config = SimpleNamespace(packed_modules_mapping={"gate_up": ["gate"]})
+    vllm_config = SimpleNamespace(quant_config=native_quant_config)
+
+    quant_config = gguf_loader_module._ensure_gguf_quant_config(vllm_config)
+
+    assert isinstance(quant_config, OOTGGUFConfig)
+    assert vllm_config.quant_config is quant_config
+    assert (
+        quant_config.packed_modules_mapping
+        is native_quant_config.packed_modules_mapping
+    )
+
+
+def test_loader_restores_gguf_quant_config_without_packed_mapping():
+    vllm_config = SimpleNamespace(quant_config=SimpleNamespace())
+
+    quant_config = gguf_loader_module._ensure_gguf_quant_config(vllm_config)
+
+    assert isinstance(quant_config, OOTGGUFConfig)
+    assert vllm_config.quant_config is quant_config
 
 
 def test_register_is_idempotent():
@@ -759,6 +795,143 @@ def test_default_adapter_excludes_native_mxfp4_from_unquantized_modules():
     assert modules == ["model.layers.0.mlp.down_proj"]
 
 
+def test_default_adapter_forces_gpt_oss_lm_head_dense(monkeypatch):
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="gpt_oss"))
+    config = PretrainedConfig(model_type="gpt_oss")
+    model_config = SimpleNamespace(
+        hf_config=config,
+        language_model_only=True,
+        trust_remote_code=False,
+    )
+
+    monkeypatch.setattr(adapter, "patch_hf_config", lambda model, hf_config: hf_config)
+    monkeypatch.setattr(adapter, "build_name_map", lambda model_config: {})
+    monkeypatch.setattr(adapter, "_get_weight_sources", lambda *args, **kwargs: [])
+    monkeypatch.setattr(adapter, "update_tie_word_embeddings", lambda *args: None)
+    monkeypatch.setattr(
+        adapter,
+        "get_weight_type_map",
+        lambda gguf_files, name_map: {
+            "lm_head.weight": "Q8_0",
+            "model.layers.0.mlp.experts.down_proj.weight": "MXFP4",
+            "model.layers.0.mlp.experts.gate_proj.weight": "MXFP4",
+            "model.layers.0.mlp.experts.up_proj.weight": "MXFP4",
+        },
+    )
+
+    load_spec = adapter.prepare_loading("model.gguf", model_config)
+
+    assert load_spec.unquantized_modules == ["lm_head"]
+    assert load_spec.mxfp4_moe_modules == ["model.layers.0.mlp.experts"]
+    assert adapter._native_mxfp4_gate_up_projection_modules == {
+        "model.layers.0.mlp.experts.gate_proj",
+        "model.layers.0.mlp.experts.up_proj",
+    }
+    assert adapter._forced_dequantized_modules == {"lm_head"}
+
+
+def test_default_adapter_dequantizes_forced_lm_head(monkeypatch):
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="gpt_oss"))
+    adapter._forced_dequantized_modules.add("lm_head")
+    qweight_type = torch.tensor(
+        int(default_adapter_module.gguf.GGMLQuantizationType.Q8_0)
+    )
+    qweight = torch.ones((2, 2), dtype=torch.uint8)
+
+    def fake_dequantize(weight, weight_type):
+        assert weight_type == default_adapter_module.gguf.GGMLQuantizationType.Q8_0
+        return torch.full((2, 2), 5.0, dtype=torch.float32).numpy()
+
+    monkeypatch.setattr(
+        default_adapter_module.gguf.quants,
+        "dequantize",
+        fake_dequantize,
+    )
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                ("lm_head.qweight_type", qweight_type),
+                ("lm_head.qweight", qweight),
+            ]
+        )
+    )
+
+    assert len(mapped) == 1
+    assert mapped[0][0] == "lm_head.weight"
+    assert torch.equal(mapped[0][1], torch.full((2, 2), 5.0, dtype=torch.float32))
+
+
+def test_default_adapter_combines_gpt_oss_gate_up_mxfp4_weights_and_biases():
+    adapter = GGUFWeightsAdapter(PretrainedConfig(model_type="gpt_oss"))
+    base = "model.layers.0.mlp.experts"
+    adapter._native_mxfp4_moe_projection_modules.update(
+        {
+            f"{base}.down_proj",
+            f"{base}.gate_proj",
+            f"{base}.up_proj",
+        }
+    )
+    adapter._native_mxfp4_gate_up_projection_modules.update(
+        {
+            f"{base}.gate_proj",
+            f"{base}.up_proj",
+        }
+    )
+    qweight_type = torch.tensor(
+        int(default_adapter_module.gguf.GGMLQuantizationType.MXFP4)
+    )
+    gate_qweight = torch.cat(
+        (
+            torch.full((2, 3, 1), 1, dtype=torch.uint8),
+            torch.full((2, 3, 16), 11, dtype=torch.uint8),
+        ),
+        dim=2,
+    )
+    up_qweight = torch.cat(
+        (
+            torch.full((2, 3, 1), 2, dtype=torch.uint8),
+            torch.full((2, 3, 16), 22, dtype=torch.uint8),
+        ),
+        dim=2,
+    )
+    gate_bias = torch.full((2, 3), 0.5)
+    up_bias = torch.full((2, 3), 1.5)
+
+    mapped = list(
+        adapter.map_weights(
+            [
+                (f"{base}.gate_proj.qweight_type", qweight_type),
+                (f"{base}.gate_proj.qweight", gate_qweight),
+                (f"{base}.up_proj.qweight_type", qweight_type),
+                (f"{base}.up_proj.qweight", up_qweight),
+                (f"{base}.gate_proj.bias", gate_bias),
+                (f"{base}.up_proj.bias", up_bias),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [
+        f"{base}.gate_up_proj.weight",
+        f"{base}.gate_up_proj.weight_scale",
+        f"{base}.gate_up_proj.bias",
+    ]
+    assert mapped[0][1].shape == (2, 6, 16)
+    assert torch.equal(
+        mapped[0][1][:, :3],
+        torch.full((2, 3, 16), 11, dtype=torch.uint8),
+    )
+    assert torch.equal(
+        mapped[0][1][:, 3:],
+        torch.full((2, 3, 16), 22, dtype=torch.uint8),
+    )
+    assert torch.equal(
+        mapped[1][1],
+        torch.cat((gate_qweight[:, :, :1], up_qweight[:, :, :1]), dim=1),
+    )
+    assert torch.equal(mapped[2][1], torch.cat((gate_bias, up_bias), dim=1))
+
+
 def test_gguf_iterator_dequantizes_dense_fallback_types(monkeypatch):
     weight_type = default_adapter_module.gguf.GGMLQuantizationType.MXFP4
     packed = np.arange(17, dtype=np.uint8).reshape(1, 17)
@@ -1406,6 +1579,52 @@ def test_gguf_config_routes_mxfp4_moe_to_native_method(monkeypatch):
 
     assert isinstance(method, GGUFMxfp4FusedMoE)
     assert method.weight_dtype == "mxfp4"
+
+
+def test_gguf_config_routes_gpt_oss_mxfp4_moe_to_native_method(monkeypatch):
+    import vllm_gguf_plugin.quantization.mxfp4 as gguf_mxfp4_module
+
+    class FakeRoutedExperts(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.moe_config = SimpleNamespace(max_capture_size=0)
+
+    def fake_gpt_oss_mxfp4_init(self, moe_config):
+        self.moe = moe_config
+        self.weight_dtype = "gpt_oss_mxfp4"
+
+    def fake_gpt_oss_mxfp4_create_weights(self, layer, *args, **kwargs):
+        del self, args, kwargs
+        layer.created_weights = True
+
+    monkeypatch.setattr(gguf_config_module, "RoutedExperts", FakeRoutedExperts)
+    monkeypatch.setattr(
+        gguf_mxfp4_module.GptOssMxfp4MoEMethod,
+        "__init__",
+        fake_gpt_oss_mxfp4_init,
+    )
+    monkeypatch.setattr(
+        gguf_mxfp4_module.GptOssMxfp4MoEMethod,
+        "create_weights",
+        fake_gpt_oss_mxfp4_create_weights,
+    )
+
+    quant_config = OOTGGUFConfig(
+        mxfp4_moe_modules=["model.layers.0.mlp.experts"],
+        gpt_oss_mxfp4_moe_modules=["model.layers.0.mlp.experts"],
+    )
+    quant_config.packed_modules_mapping = {}
+    method = quant_config.get_quant_method(
+        FakeRoutedExperts(), "model.layers.0.mlp.experts"
+    )
+
+    assert isinstance(method, GGUFGptOssMxfp4FusedMoE)
+    assert method.weight_dtype == "gpt_oss_mxfp4"
+    layer = SimpleNamespace(quant_config=quant_config)
+    method.create_weights(layer)
+    assert layer.created_weights is True
+    assert layer.quant_config.get_name() == "gpt_oss_mxfp4"
+    assert layer.quant_config.gguf_quant_config is quant_config
 
 
 def test_gguf_linear_uses_weight_loader_v2(monkeypatch):

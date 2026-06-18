@@ -4,6 +4,7 @@ import os
 import sys
 from functools import wraps
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import huggingface_hub
@@ -268,6 +269,14 @@ def _patch_quantization_config_lookup() -> None:
         return
 
     assert GGUFConfig is not None
+    in_tree_module_name = "vllm.model_executor.layers.quantization.gguf"
+    in_tree_module = sys.modules.get(in_tree_module_name)
+    if getattr(in_tree_module, "GGUFConfig", None) is not GGUFConfig:
+        in_tree_module = ModuleType(in_tree_module_name)
+        in_tree_module.GGUFConfig = GGUFConfig
+        in_tree_module.__all__ = ["GGUFConfig"]
+        sys.modules[in_tree_module_name] = in_tree_module
+
     original_get_quantization_config = quantization_module.get_quantization_config
 
     @wraps(original_get_quantization_config)

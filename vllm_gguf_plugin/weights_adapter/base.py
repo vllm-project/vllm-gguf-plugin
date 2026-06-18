@@ -22,6 +22,7 @@ class GGUFLoadSpec:
     nvfp4_modules: list[str] = field(default_factory=list)
     nvfp4_moe_modules: list[str] = field(default_factory=list)
     mxfp4_moe_modules: list[str] = field(default_factory=list)
+    gpt_oss_mxfp4_moe_modules: list[str] = field(default_factory=list)
 
 
 class BaseGGUFWeightsAdapter(ABC):

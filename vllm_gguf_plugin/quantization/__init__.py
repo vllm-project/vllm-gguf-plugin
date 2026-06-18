@@ -1,7 +1,7 @@
 from .config import GGUFConfig
 from .fused_moe import GGUFMoEMethod, fused_moe_gguf
 from .linear import GGUFLinearMethod, fused_mul_mat_gguf
-from .mxfp4 import GGUFMxfp4FusedMoE
+from .mxfp4 import GGUFGptOssMxfp4FusedMoE, GGUFMxfp4FusedMoE
 from .nvfp4 import GGUFModelOptNvFp4FusedMoE, GGUFNvFp4LinearMethod
 from .params import (
     GGUFUninitializedParameter,
@@ -29,6 +29,7 @@ __all__ = [
     "GGUFLinearMethod",
     "GGUFMoEMethod",
     "GGUFModelOptNvFp4FusedMoE",
+    "GGUFGptOssMxfp4FusedMoE",
     "GGUFMxfp4FusedMoE",
     "GGUFNvFp4LinearMethod",
     "GGUFUninitializedParameter",

@@ -14,7 +14,10 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from vllm.logger import init_logger
 
 from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
-from ..quantization.mxfp4 import iter_gguf_mxfp4_native_moe_weights
+from ..quantization.mxfp4 import (
+    iter_gguf_mxfp4_native_moe_weights,
+    split_gguf_mxfp4_moe_weight,
+)
 from ..quantization.nvfp4 import (
     iter_gguf_nvfp4_native_moe_sidecar_weights,
     iter_gguf_nvfp4_native_moe_weights,
@@ -47,10 +50,11 @@ _NVFP4_SIDECAR_SUFFIX_MAP = {
     "input_scale": "input_scale",
 }
 _MOE_EXPERT_WEIGHT_RE = re.compile(
-    r"^(?P<prefix>.+\.experts)\.0\."
-    r"(?P<proj>gate_proj|up_proj|down_proj|w1|w2|w3)\.weight$"
+    r"^(?P<prefix>.+\.experts)(?:\.0)?\."
+    r"(?P<proj>gate_up_proj|gate_proj|up_proj|down_proj|w1|w2|w3)\.weight$"
 )
 _MOE_PROJECTOR_GROUPS = (
+    frozenset(("gate_up_proj", "down_proj")),
     frozenset(("gate_proj", "up_proj", "down_proj")),
     frozenset(("w1", "w2", "w3")),
 )
@@ -116,6 +120,14 @@ def _get_mtp_num_layers(text_config: PretrainedConfig) -> int:
         )
         or 0
     )
+
+
+def _dequantize_gguf_weight(
+    weight: torch.Tensor,
+    qweight_type: gguf.GGMLQuantizationType,
+) -> torch.Tensor:
+    dense = gguf.quants.dequantize(weight.detach().cpu().numpy(), qweight_type)
+    return torch.from_numpy(dense.copy())
 
 
 def _add_gemma4_mtp_gguf_mappings(
@@ -390,7 +402,10 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         self._native_nvfp4_moe_projection_modules: set[str] = set()
         self._native_mxfp4_moe_modules: set[str] = set()
         self._native_mxfp4_moe_projection_modules: set[str] = set()
+        self._native_mxfp4_gate_up_projection_modules: set[str] = set()
         self._native_nvfp4_sidecar_suffixes: dict[str, set[str]] = {}
+        self._forced_dequantized_modules: set[str] = set()
+        self._qweight_types: dict[str, gguf.GGMLQuantizationType] = {}
 
     @classmethod
     def matches(cls, config) -> bool:
@@ -446,7 +461,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_type = "qwen35"
         if model_type == "gpt_oss":
             for idx in range(config.num_hidden_layers):
-                layer_prefix = f"model.layers.{idx}.mlp.experts.0"
+                layer_prefix = f"model.layers.{idx}.mlp.experts"
                 for suffix in ("weight", "bias"):
                     gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.{suffix}"] = (
                         f"{layer_prefix}.down_proj.{suffix}"
@@ -658,6 +673,61 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[tuple[str, torch.Tensor]]:
+        self._qweight_types.clear()
+        mxfp4_gate_up_parts: dict[
+            str, dict[str, tuple[torch.Tensor, torch.Tensor]]
+        ] = {}
+        gate_up_bias_parts: dict[str, dict[str, torch.Tensor]] = {}
+
+        def collect_mxfp4_gate_up_part(
+            module_name: str,
+            weight: torch.Tensor,
+        ) -> list[tuple[str, torch.Tensor]]:
+            base_module, proj = module_name.rsplit(".", 1)
+            module_weight, module_scale = split_gguf_mxfp4_moe_weight(weight)
+            parts = mxfp4_gate_up_parts.setdefault(base_module, {})
+            parts[proj] = (module_weight, module_scale)
+            if "gate_proj" not in parts or "up_proj" not in parts:
+                return []
+
+            gate_weight, gate_scale = parts.pop("gate_proj")
+            up_weight, up_scale = parts.pop("up_proj")
+            if not parts:
+                del mxfp4_gate_up_parts[base_module]
+            fused_module = f"{base_module}.gate_up_proj"
+            return [
+                (
+                    f"{fused_module}.weight",
+                    torch.cat((gate_weight, up_weight), dim=1).contiguous(),
+                ),
+                (
+                    f"{fused_module}.weight_scale",
+                    torch.cat((gate_scale, up_scale), dim=1).contiguous(),
+                ),
+            ]
+
+        def collect_gate_up_bias_part(
+            module_name: str,
+            weight: torch.Tensor,
+        ) -> list[tuple[str, torch.Tensor]]:
+            base_module, proj = module_name.rsplit(".", 1)
+            parts = gate_up_bias_parts.setdefault(base_module, {})
+            parts[proj] = weight
+            if "gate_proj" not in parts or "up_proj" not in parts:
+                return []
+
+            gate_bias = parts.pop("gate_proj")
+            up_bias = parts.pop("up_proj")
+            if not parts:
+                del gate_up_bias_parts[base_module]
+            fused_module = f"{base_module}.gate_up_proj"
+            return [
+                (
+                    f"{fused_module}.bias",
+                    torch.cat((gate_bias, up_bias), dim=1).contiguous(),
+                )
+            ]
+
         for hf_name, weight in weights:
             sidecar_handled = False
             for suffix in _NVFP4_SIDECAR_SUFFIX_MAP.values():
@@ -687,8 +757,11 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
             if hf_name.endswith(_QWEIGHT_TYPE_SUFFIX):
                 module_name = hf_name.removesuffix(_QWEIGHT_TYPE_SUFFIX)
+                qweight_type = gguf.GGMLQuantizationType(int(weight.item()))
+                self._qweight_types[module_name] = qweight_type
                 if (
-                    module_name in self._native_nvfp4_modules
+                    module_name in self._forced_dequantized_modules
+                    or module_name in self._native_nvfp4_modules
                     or module_name in self._native_nvfp4_moe_projection_modules
                     or module_name in self._native_mxfp4_moe_projection_modules
                 ):
@@ -696,7 +769,26 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
             if hf_name.endswith(_QWEIGHT_SUFFIX):
                 module_name = hf_name.removesuffix(_QWEIGHT_SUFFIX)
-                if module_name in self._native_mxfp4_moe_projection_modules:
+                if module_name in self._forced_dequantized_modules:
+                    qweight_type = self._qweight_types.get(module_name)
+                    if qweight_type is None:
+                        raise ValueError(
+                            "Missing GGUF qweight_type for forced dense tensor "
+                            f"{hf_name}"
+                        )
+                    hf_name = f"{module_name}.weight"
+                    weight = _dequantize_gguf_weight(weight, qweight_type)
+                elif module_name in self._native_mxfp4_gate_up_projection_modules:
+                    for native_name, native_weight in collect_mxfp4_gate_up_part(
+                        module_name,
+                        weight,
+                    ):
+                        yield (
+                            native_name,
+                            self.transform_weight(native_name, native_weight),
+                        )
+                    continue
+                elif module_name in self._native_mxfp4_moe_projection_modules:
                     for (
                         native_name,
                         native_weight,
@@ -740,7 +832,53 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                         )
                     continue
 
+            if hf_name.endswith(".bias"):
+                module_name = hf_name.removesuffix(".bias")
+                if module_name in self._native_mxfp4_gate_up_projection_modules:
+                    for native_name, native_weight in collect_gate_up_bias_part(
+                        module_name,
+                        weight,
+                    ):
+                        yield (
+                            native_name,
+                            self.transform_weight(native_name, native_weight),
+                        )
+                    continue
+
             yield hf_name, self.transform_weight(hf_name, weight)
+
+    def _force_dequantized_module(
+        self,
+        load_spec: GGUFLoadSpec,
+        module_name: str,
+    ) -> None:
+        self._forced_dequantized_modules.add(module_name)
+        self._native_nvfp4_modules.discard(module_name)
+        if module_name in load_spec.nvfp4_modules:
+            load_spec.nvfp4_modules.remove(module_name)
+        if module_name not in load_spec.unquantized_modules:
+            load_spec.unquantized_modules.append(module_name)
+
+    def _force_gpt_oss_lm_head_dense(
+        self,
+        load_spec: GGUFLoadSpec,
+        weight_type_map: dict[str, str],
+        model_config: ModelConfig,
+    ) -> None:
+        if getattr(model_config.hf_config, "model_type", None) != "gpt_oss":
+            return
+        if "lm_head.weight" in weight_type_map:
+            self._force_dequantized_module(load_spec, "lm_head")
+
+    def _mark_gpt_oss_gate_up_mxfp4_modules(self, model_config: ModelConfig) -> None:
+        self._native_mxfp4_gate_up_projection_modules.clear()
+        if getattr(model_config.hf_config, "model_type", None) != "gpt_oss":
+            return
+        self._native_mxfp4_gate_up_projection_modules.update(
+            module_name
+            for module_name in self._native_mxfp4_moe_projection_modules
+            if module_name.endswith((".gate_proj", ".up_proj"))
+        )
 
     @staticmethod
     def _get_all_gguf_files(model_path: str) -> list[str]:
@@ -925,6 +1063,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             gguf_files, model_config.hf_config, gguf_to_hf_name_map
         )
         weight_type_map = self.get_weight_type_map(gguf_files, gguf_to_hf_name_map)
+        self._forced_dequantized_modules.clear()
         self._native_nvfp4_moe_modules = set(
             self.get_native_nvfp4_moe_modules(weight_type_map)
         )
@@ -941,6 +1080,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 weight_type_map, self._native_mxfp4_moe_modules
             )
         )
+        self._mark_gpt_oss_gate_up_mxfp4_modules(model_config)
         self._native_nvfp4_modules = set(self.get_native_nvfp4_modules(weight_type_map))
         self._native_nvfp4_sidecar_suffixes = self.get_native_nvfp4_sidecar_suffixes(
             weight_type_map
@@ -955,6 +1095,16 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             nvfp4_modules=sorted(self._native_nvfp4_modules),
             nvfp4_moe_modules=sorted(self._native_nvfp4_moe_modules),
             mxfp4_moe_modules=sorted(self._native_mxfp4_moe_modules),
+            gpt_oss_mxfp4_moe_modules=(
+                sorted(self._native_mxfp4_moe_modules)
+                if getattr(model_config.hf_config, "model_type", None) == "gpt_oss"
+                else []
+            ),
+        )
+        self._force_gpt_oss_lm_head_dense(
+            self.load_spec,
+            weight_type_map,
+            model_config,
         )
         return self.load_spec
 

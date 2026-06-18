@@ -40,12 +40,14 @@ class GGUFConfig(QuantizationConfig):
         nvfp4_modules: list[str] | None = None,
         nvfp4_moe_modules: list[str] | None = None,
         mxfp4_moe_modules: list[str] | None = None,
+        gpt_oss_mxfp4_moe_modules: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.unquantized_modules = unquantized_modules or []
         self.nvfp4_modules = nvfp4_modules or []
         self.nvfp4_moe_modules = nvfp4_moe_modules or []
         self.mxfp4_moe_modules = mxfp4_moe_modules or []
+        self.gpt_oss_mxfp4_moe_modules = gpt_oss_mxfp4_moe_modules or []
 
     def __repr__(self) -> str:
         return "GGUFConfig()"
@@ -88,7 +90,7 @@ class GGUFConfig(QuantizationConfig):
     ) -> "QuantizeMethodBase | None":
         from .fused_moe import GGUFMoEMethod
         from .linear import GGUFLinearMethod
-        from .mxfp4 import GGUFMxfp4FusedMoE
+        from .mxfp4 import GGUFGptOssMxfp4FusedMoE, GGUFMxfp4FusedMoE
         from .nvfp4 import GGUFModelOptNvFp4FusedMoE, GGUFNvFp4LinearMethod
         from .vocal_embeds import GGUFEmbeddingMethod
 
@@ -113,6 +115,12 @@ class GGUFConfig(QuantizationConfig):
                 prefix, self.nvfp4_moe_modules, self.packed_modules_mapping
             ):
                 return GGUFModelOptNvFp4FusedMoE(self, layer.moe_config)
+            if is_layer_skipped_gguf(
+                prefix,
+                self.gpt_oss_mxfp4_moe_modules,
+                self.packed_modules_mapping,
+            ):
+                return GGUFGptOssMxfp4FusedMoE(self, layer.moe_config)
             if is_layer_skipped_gguf(
                 prefix, self.mxfp4_moe_modules, self.packed_modules_mapping
             ):
@@ -141,4 +149,8 @@ class GGUFConfig(QuantizationConfig):
         if self.mxfp4_moe_modules is not None:
             self.mxfp4_moe_modules = hf_to_vllm_mapper.apply_list(
                 self.mxfp4_moe_modules
+            )
+        if self.gpt_oss_mxfp4_moe_modules is not None:
+            self.gpt_oss_mxfp4_moe_modules = hf_to_vllm_mapper.apply_list(
+                self.gpt_oss_mxfp4_moe_modules
             )

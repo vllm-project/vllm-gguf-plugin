@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -27,6 +27,21 @@ if TYPE_CHECKING:
     from .quantization import GGUFConfig
 
 logger = init_logger(__name__)
+
+
+def _ensure_gguf_quant_config(vllm_config: VllmConfig) -> "GGUFConfig":
+    from .quantization import GGUFConfig
+
+    quant_config = vllm_config.quant_config
+    if isinstance(quant_config, GGUFConfig):
+        return quant_config
+
+    gguf_quant_config = GGUFConfig.from_config({})
+    packed_modules_mapping = getattr(quant_config, "packed_modules_mapping", None)
+    if packed_modules_mapping is not None:
+        gguf_quant_config.packed_modules_mapping = packed_modules_mapping
+    vllm_config.quant_config = gguf_quant_config
+    return gguf_quant_config
 
 
 class GGUFModelLoader(BaseModelLoader):
@@ -99,16 +114,13 @@ class GGUFModelLoader(BaseModelLoader):
         logger.debug(
             "GGUF unquantized modules: %s", adapter.load_spec.unquantized_modules
         )
-        vllm_config.quant_config = cast("GGUFConfig", vllm_config.quant_config)
-        vllm_config.quant_config.unquantized_modules.extend(
-            adapter.load_spec.unquantized_modules
-        )
-        vllm_config.quant_config.nvfp4_modules.extend(adapter.load_spec.nvfp4_modules)
-        vllm_config.quant_config.nvfp4_moe_modules.extend(
-            adapter.load_spec.nvfp4_moe_modules
-        )
-        vllm_config.quant_config.mxfp4_moe_modules.extend(
-            adapter.load_spec.mxfp4_moe_modules
+        quant_config = _ensure_gguf_quant_config(vllm_config)
+        quant_config.unquantized_modules.extend(adapter.load_spec.unquantized_modules)
+        quant_config.nvfp4_modules.extend(adapter.load_spec.nvfp4_modules)
+        quant_config.nvfp4_moe_modules.extend(adapter.load_spec.nvfp4_moe_modules)
+        quant_config.mxfp4_moe_modules.extend(adapter.load_spec.mxfp4_moe_modules)
+        quant_config.gpt_oss_mxfp4_moe_modules.extend(
+            adapter.load_spec.gpt_oss_mxfp4_moe_modules
         )
 
         target_device = torch.device(device_config.device)

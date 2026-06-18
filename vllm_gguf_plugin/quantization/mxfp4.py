@@ -4,13 +4,28 @@
 import torch
 
 try:
-    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+    from vllm.model_executor.layers.quantization.mxfp4 import (
+        GptOssMxfp4MoEMethod,
+        Mxfp4MoEMethod,
+    )
 except ImportError:  # pragma: no cover - only for older vLLM builds.
+    GptOssMxfp4MoEMethod = None
     Mxfp4MoEMethod = None
 
 GGUF_MXFP4_BLOCK_SIZE = 32
 GGUF_MXFP4_BLOCK_BYTES = 17
 GGUF_MXFP4_SCALE_BYTES = 1
+
+
+class _GptOssMxfp4LayerQuantConfig:
+    def __init__(self, gguf_quant_config):
+        self.gguf_quant_config = gguf_quant_config
+
+    def get_name(self):
+        return "gpt_oss_mxfp4"
+
+    def __getattr__(self, name):
+        return getattr(self.gguf_quant_config, name)
 
 
 def _as_mxfp4_blocks(qweight: torch.Tensor) -> torch.Tensor:
@@ -103,3 +118,28 @@ else:
         def __init__(self, gguf_quant_config, moe_config):
             del gguf_quant_config
             super().__init__(moe_config)
+
+
+if GptOssMxfp4MoEMethod is None:
+
+    class GGUFGptOssMxfp4FusedMoE:  # pragma: no cover
+        """Native vLLM GPT-OSS MXFP4 MoE method for GGUF expert tensors."""
+
+        def __init__(self, gguf_quant_config, moe_config):
+            del gguf_quant_config, moe_config
+            raise RuntimeError("This vLLM build does not provide GptOssMxfp4MoEMethod.")
+
+
+else:
+
+    class GGUFGptOssMxfp4FusedMoE(GptOssMxfp4MoEMethod):
+        """Native vLLM GPT-OSS MXFP4 MoE method for GGUF expert tensors."""
+
+        def __init__(self, gguf_quant_config, moe_config):
+            self.gguf_quant_config = gguf_quant_config
+            del gguf_quant_config
+            super().__init__(moe_config)
+
+        def create_weights(self, layer, *args, **kwargs):
+            super().create_weights(layer, *args, **kwargs)
+            layer.quant_config = _GptOssMxfp4LayerQuantConfig(self.gguf_quant_config)
