@@ -20,7 +20,7 @@ from ..quantization.nvfp4 import (
     iter_gguf_nvfp4_native_weights,
 )
 from ..weight_utils import (
-    get_gguf_extra_tensor_names,
+    get_gguf_extra_tensor_names_multi,
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator_multi,
     resolve_gguf_file_set,
@@ -744,11 +744,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         if "lm_head.weight" not in gguf_to_hf_name_map.values():
             return
 
-        all_extra_names = []
-        for gguf_file in gguf_files:
-            all_extra_names.extend(
-                get_gguf_extra_tensor_names(gguf_file, gguf_to_hf_name_map)
-            )
+        all_extra_names = get_gguf_extra_tensor_names_multi(
+            gguf_files, gguf_to_hf_name_map
+        )
         hf_config.update({"tie_word_embeddings": "lm_head.weight" in all_extra_names})
 
     def get_weight_type_map(

@@ -429,14 +429,28 @@ def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     return resolve_gguf_file_set(matches[0])[0]
 
 
+def get_gguf_extra_tensor_names_multi(
+    gguf_files: list[str | Path],
+    gguf_to_hf_name_map: dict[str, str],
+) -> list[str]:
+    expected_gguf_keys = set(gguf_to_hf_name_map.keys())
+    exact_gguf_keys = {
+        tensor.name
+        for gguf_file in gguf_files
+        for tensor in gguf.GGUFReader(gguf_file).tensors
+    }
+    extra_keys = expected_gguf_keys - exact_gguf_keys
+    return [
+        hf_name
+        for gguf_key, hf_name in gguf_to_hf_name_map.items()
+        if gguf_key in extra_keys
+    ]
+
+
 def get_gguf_extra_tensor_names(
     gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
 ) -> list[str]:
-    reader = gguf.GGUFReader(gguf_file)
-    expected_gguf_keys = set(gguf_to_hf_name_map.keys())
-    exact_gguf_keys = {tensor.name for tensor in reader.tensors}
-    extra_keys = expected_gguf_keys - exact_gguf_keys
-    return [gguf_to_hf_name_map[key] for key in extra_keys]
+    return get_gguf_extra_tensor_names_multi([gguf_file], gguf_to_hf_name_map)
 
 
 def get_gguf_weight_type_map(

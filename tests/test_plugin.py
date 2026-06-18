@@ -45,6 +45,7 @@ import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 import vllm_gguf_plugin.quantization.config as gguf_config_module
+import vllm_gguf_plugin.weight_utils as weight_utils_module
 import vllm_gguf_plugin.weights_adapter.default as default_adapter_module
 import vllm_gguf_plugin.weights_adapter.qwen3_5 as qwen3_5_adapter_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
@@ -535,6 +536,34 @@ def test_qwen35_adapter_dequantizes_forced_token_embedding(monkeypatch):
     assert len(mapped) == 1
     assert mapped[0][0] == f"{module_name}.weight"
     assert torch.equal(mapped[0][1], torch.full((2, 2), 3.0, dtype=torch.float32))
+
+
+def test_update_tie_word_embeddings_uses_all_split_shards(monkeypatch):
+    tensors_by_file = {
+        "shard-1.gguf": ["token_embd.weight"],
+        "shard-2.gguf": ["output.weight"],
+    }
+
+    class FakeGGUFReader:
+        def __init__(self, path):
+            self.tensors = [
+                SimpleNamespace(name=name) for name in tensors_by_file[str(path)]
+            ]
+
+    monkeypatch.setattr(weight_utils_module.gguf, "GGUFReader", FakeGGUFReader)
+
+    config = PretrainedConfig(model_type="qwen3", tie_word_embeddings=True)
+    adapter = GGUFWeightsAdapter(config)
+    adapter.update_tie_word_embeddings(
+        ["shard-1.gguf", "shard-2.gguf"],
+        config,
+        {
+            "token_embd.weight": "model.embed_tokens.weight",
+            "output.weight": "lm_head.weight",
+        },
+    )
+
+    assert config.tie_word_embeddings is False
 
 
 def test_split_gguf_nvfp4_weight_to_native_tensors():
