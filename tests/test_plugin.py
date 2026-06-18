@@ -17,16 +17,17 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
 )
 from vllm.model_executor.layers.quantization import (
+    _CUSTOMIZED_METHOD_TO_QUANT_CONFIG,
     QUANTIZATION_METHODS,
-    get_quantization_config,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
 
-if "gguf" in QUANTIZATION_METHODS and os.environ.get(
-    "VLLM_GGUF_PLUGIN_OVERRIDE_IN_TREE"
-) != "1":
+if (
+    "gguf" in QUANTIZATION_METHODS
+    and os.environ.get("VLLM_GGUF_PLUGIN_OVERRIDE_IN_TREE") != "1"
+):
     pytest.skip(
         "override-mode plugin tests require vLLM without in-tree GGUF or "
         "VLLM_GGUF_PLUGIN_OVERRIDE_IN_TREE=1",
@@ -47,9 +48,7 @@ from vllm_gguf_plugin.quantization import (
 def test_register_overrides_gguf_config():
     register()
 
-    quant_config = get_quantization_config("gguf")
-
-    assert quant_config is OOTGGUFConfig
+    assert _CUSTOMIZED_METHOD_TO_QUANT_CONFIG["gguf"] is OOTGGUFConfig
 
 
 def test_register_overrides_gguf_loader():
@@ -64,7 +63,7 @@ def test_register_is_idempotent():
     register()
     register()
 
-    assert get_quantization_config("gguf") is OOTGGUFConfig
+    assert _CUSTOMIZED_METHOD_TO_QUANT_CONFIG["gguf"] is OOTGGUFConfig
     assert isinstance(
         get_model_loader(LoadConfig(load_format="gguf")), OOTGGUFModelLoader
     )

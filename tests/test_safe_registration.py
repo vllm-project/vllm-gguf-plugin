@@ -2,7 +2,6 @@
 
 import sys
 
-import vllm_gguf_plugin
 import vllm_gguf_plugin.plugin as plugin_module
 
 
@@ -73,14 +72,33 @@ def test_register_can_override_in_tree_when_explicit(monkeypatch):
     monkeypatch.setenv("VLLM_GGUF_PLUGIN_OVERRIDE_IN_TREE", "1")
     monkeypatch.setattr(plugin_module, "_load_oot_gguf_classes", fake_load)
     monkeypatch.setattr(plugin_module, "QUANTIZATION_METHODS", ["gguf"])
-    monkeypatch.setattr(plugin_module, "get_quantization_config", lambda name: object)
-    monkeypatch.setattr(plugin_module, "register_quantization_config", fake_register_quantization_config)
+    monkeypatch.setattr(
+        plugin_module,
+        "register_quantization_config",
+        fake_register_quantization_config,
+    )
     monkeypatch.setattr(plugin_module, "_LOAD_FORMAT_TO_MODEL_LOADER", {})
-    monkeypatch.setattr(plugin_module, "register_model_loader", fake_register_model_loader)
+    monkeypatch.setattr(
+        plugin_module,
+        "register_model_loader",
+        fake_register_model_loader,
+    )
     monkeypatch.setattr(plugin_module, "get_config_parser", lambda name: None)
-    monkeypatch.setattr(plugin_module, "register_config_parser", fake_register_config_parser)
-    monkeypatch.setattr(plugin_module, "_patch_engine_args", lambda: calls.append("engine_args"))
-    monkeypatch.setattr(plugin_module, "_patch_speculator_probe", lambda: calls.append("speculator"))
+    monkeypatch.setattr(
+        plugin_module,
+        "register_config_parser",
+        fake_register_config_parser,
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "_patch_engine_args",
+        lambda: calls.append("engine_args"),
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "_patch_speculator_probe",
+        lambda: calls.append("speculator"),
+    )
 
     plugin_module.register()
 
