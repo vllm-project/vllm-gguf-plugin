@@ -747,6 +747,18 @@ def test_default_adapter_marks_dequantizable_fallback_types_unquantized():
     ]
 
 
+def test_default_adapter_excludes_native_mxfp4_from_unquantized_modules():
+    modules = GGUFWeightsAdapter.get_unquantized_modules(
+        {
+            "model.layers.0.mlp.experts.0.gate_proj.weight": "MXFP4",
+            "model.layers.0.mlp.down_proj.weight": "MXFP4",
+        },
+        excluded_modules={"model.layers.0.mlp.experts.0.gate_proj"},
+    )
+
+    assert modules == ["model.layers.0.mlp.down_proj"]
+
+
 def test_gguf_iterator_dequantizes_dense_fallback_types(monkeypatch):
     weight_type = default_adapter_module.gguf.GGMLQuantizationType.MXFP4
     packed = np.arange(17, dtype=np.uint8).reshape(1, 17)
@@ -1886,6 +1898,61 @@ class _FakeGGUFReader:
 
     def get_field(self, key):
         return self.fields.get(key)
+
+
+def test_gguf_config_parser_falls_back_for_gpt_oss_gguf_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    fields = {
+        "general.architecture": "gpt-oss",
+        "gpt-oss.attention.head_count": 64,
+        "gpt-oss.attention.head_count_kv": 8,
+        "gpt-oss.attention.key_length": 64,
+        "gpt-oss.attention.layer_norm_rms_epsilon": 1e-5,
+        "gpt-oss.attention.sliding_window": 128,
+        "gpt-oss.block_count": 2,
+        "gpt-oss.context_length": 131072,
+        "gpt-oss.embedding_length": 2880,
+        "gpt-oss.expert_count": 32,
+        "gpt-oss.expert_feed_forward_length": 2880,
+        "gpt-oss.expert_used_count": 4,
+        "gpt-oss.rope.freq_base": 150000.0,
+        "gpt-oss.rope.scaling.factor": 32.0,
+        "gpt-oss.rope.scaling.original_context_length": 4096,
+        "gpt-oss.rope.scaling.type": "yarn",
+        "tokenizer.ggml.eos_token_id": 200002,
+        "tokenizer.ggml.padding_token_id": 199999,
+        "tokenizer.ggml.tokens": ["a", "b"],
+    }
+
+    class FakeGGUFReader(_FakeGGUFReader):
+        def __init__(self, path):
+            del path
+            super().__init__(fields)
+            self.tensors = [SimpleNamespace(name="output.weight")]
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        del self, model, trust_remote_code, revision, code_revision, kwargs
+        raise TypeError("Object of type memmap is not JSON serializable")
+
+    monkeypatch.setattr(gguf_config_parser_module.gguf, "GGUFReader", FakeGGUFReader)
+    monkeypatch.setattr(gguf_config_parser_module.HFConfigParser, "parse", fake_parse)
+
+    config_dict, config = GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
+
+    assert config_dict["model_type"] == "gpt_oss"
+    assert config_dict["architectures"] == ["GptOssForCausalLM"]
+    assert config_dict["vocab_size"] == 2
+    assert config_dict["rope_scaling"]["rope_type"] == "yarn"
+    assert config.model_type == "gpt_oss"
+    assert config.num_hidden_layers == 2
+    assert config.num_local_experts == 32
 
 
 def test_copy_local_processor_sidecars_searches_hf_snapshot_root(tmp_path):

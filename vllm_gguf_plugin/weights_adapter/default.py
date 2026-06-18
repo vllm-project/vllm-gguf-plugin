@@ -37,6 +37,7 @@ logger = init_logger(__name__)
 
 _GGUF_MODEL_TYPE_ALIASES = {
     "gemma4": "gemma3",
+    "gpt_oss": "gpt-oss",
 }
 
 _QWEIGHT_SUFFIX = ".qweight"
@@ -443,6 +444,25 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 )
         if model_type == "qwen3_5":
             model_type = "qwen35"
+        if model_type == "gpt_oss":
+            for idx in range(config.num_hidden_layers):
+                layer_prefix = f"model.layers.{idx}.mlp.experts.0"
+                for suffix in ("weight", "bias"):
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.{suffix}"] = (
+                        f"{layer_prefix}.down_proj.{suffix}"
+                    )
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.{suffix}"] = (
+                        f"{layer_prefix}.gate_proj.{suffix}"
+                    )
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.{suffix}"] = (
+                        f"{layer_prefix}.up_proj.{suffix}"
+                    )
+                sideload_params.append(
+                    regex.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.mlp\.experts\.(gate_up_proj|down_proj)(_bias)?"
+                    )
+                )
         if model_type in ("qwen2_moe", "qwen3_moe", "qwen3_5_moe"):
             model_type = model_type.replace("_", "")
             if is_multimodal and model_type == "qwen35moe":
@@ -780,7 +800,11 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         return weight_type_map
 
     @staticmethod
-    def get_unquantized_modules(weight_type_map: dict[str, str]) -> list[str]:
+    def get_unquantized_modules(
+        weight_type_map: dict[str, str],
+        excluded_modules: set[str] | None = None,
+    ) -> list[str]:
+        excluded_modules = excluded_modules or set()
         return [
             name.removesuffix(".weight")
             for name, weight_type in weight_type_map.items()
@@ -789,6 +813,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 or is_gguf_dense_fallback_type_name(weight_type)
             )
             and name.endswith(".weight")
+            and name.removesuffix(".weight") not in excluded_modules
         ]
 
     @staticmethod
@@ -923,7 +948,10 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         self.load_spec = GGUFLoadSpec(
             weights_source=gguf_files,
             gguf_to_hf_name_map=gguf_to_hf_name_map,
-            unquantized_modules=self.get_unquantized_modules(weight_type_map),
+            unquantized_modules=self.get_unquantized_modules(
+                weight_type_map,
+                excluded_modules=self._native_mxfp4_moe_projection_modules,
+            ),
             nvfp4_modules=sorted(self._native_nvfp4_modules),
             nvfp4_moe_modules=sorted(self._native_nvfp4_moe_modules),
             mxfp4_moe_modules=sorted(self._native_mxfp4_moe_modules),
