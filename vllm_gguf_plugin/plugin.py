@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
 from functools import wraps
 from pathlib import Path
 from typing import Any
 
 import vllm.engine.arg_utils as arg_utils_module
+import vllm.model_executor.layers.quantization as quantization_module
 import vllm.transformers_utils.config as config_module
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
@@ -82,6 +84,33 @@ def _get_gguf_config_source(
     return model
 
 
+def _patch_quantization_config_lookup() -> None:
+    if getattr(quantization_module, "_gguf_config_lookup_patched", False):
+        return
+
+    assert GGUFConfig is not None
+    original_get_quantization_config = quantization_module.get_quantization_config
+
+    @wraps(original_get_quantization_config)
+    def get_quantization_config(quantization: str):
+        if quantization == "gguf":
+            return GGUFConfig
+        return original_get_quantization_config(quantization)
+
+    quantization_module.get_quantization_config = get_quantization_config
+
+    for module_name in ("vllm.model_executor.model_loader.weight_utils",):
+        module = sys.modules.get(module_name)
+        if (
+            module is not None
+            and getattr(module, "get_quantization_config", None)
+            is original_get_quantization_config
+        ):
+            module.get_quantization_config = get_quantization_config
+
+    quantization_module._gguf_config_lookup_patched = True
+
+
 def _patch_engine_args() -> None:
     if getattr(EngineArgs, "_gguf_create_model_config_patched", False):
         return
@@ -147,6 +176,7 @@ def register() -> None:
     GGUFConfig, GGUFConfigParser, GGUFModelLoader = _load_oot_gguf_classes()
 
     register_quantization_config("gguf")(GGUFConfig)
+    _patch_quantization_config_lookup()
 
     if _LOAD_FORMAT_TO_MODEL_LOADER.get("gguf") is not GGUFModelLoader:
         register_model_loader("gguf")(GGUFModelLoader)

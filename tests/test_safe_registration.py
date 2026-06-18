@@ -77,6 +77,11 @@ def test_register_can_override_in_tree_when_explicit(monkeypatch):
         "register_quantization_config",
         fake_register_quantization_config,
     )
+    monkeypatch.setattr(
+        plugin_module,
+        "_patch_quantization_config_lookup",
+        lambda: calls.append("quant_lookup"),
+    )
     monkeypatch.setattr(plugin_module, "_LOAD_FORMAT_TO_MODEL_LOADER", {})
     monkeypatch.setattr(
         plugin_module,
@@ -105,6 +110,7 @@ def test_register_can_override_in_tree_when_explicit(monkeypatch):
     assert calls == [
         "load",
         ("quant", FakeConfig),
+        "quant_lookup",
         ("loader", FakeLoader),
         ("parser", FakeParser),
         "engine_args",

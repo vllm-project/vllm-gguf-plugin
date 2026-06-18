@@ -5,6 +5,7 @@ import os
 import pytest
 import torch
 import vllm.engine.arg_utils as arg_utils_module
+import vllm.model_executor.layers.quantization as quantization_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.transformers_utils.config as config_module
@@ -49,6 +50,7 @@ def test_register_overrides_gguf_config():
     register()
 
     assert _CUSTOMIZED_METHOD_TO_QUANT_CONFIG["gguf"] is OOTGGUFConfig
+    assert quantization_module.get_quantization_config("gguf") is OOTGGUFConfig
 
 
 def test_register_overrides_gguf_loader():
@@ -64,6 +66,7 @@ def test_register_is_idempotent():
     register()
 
     assert _CUSTOMIZED_METHOD_TO_QUANT_CONFIG["gguf"] is OOTGGUFConfig
+    assert quantization_module.get_quantization_config("gguf") is OOTGGUFConfig
     assert isinstance(
         get_model_loader(LoadConfig(load_format="gguf")), OOTGGUFModelLoader
     )
