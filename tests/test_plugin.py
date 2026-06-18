@@ -1368,6 +1368,44 @@ def test_copy_local_processor_sidecars_prefers_nearest_and_preserves_cache(tmp_p
     ) == {"source": "cache"}
 
 
+def test_local_config_special_tokens_search_hf_snapshot_root(tmp_path):
+    snapshot = tmp_path / "models--org--repo" / "snapshots" / "abc123"
+    model_dir = snapshot / "Q8_0" / "nested"
+    model_dir.mkdir(parents=True)
+    model_path = model_dir / "model.gguf"
+    model_path.touch()
+    (snapshot / "config.json").write_text(
+        json.dumps(
+            {
+                "eos_token_id": 4,
+                "text_config": {
+                    "bos_token_id": 1,
+                    "pad_token_id": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    tokenizer_dict = {
+        "tokens": [
+            "<pad>",
+            "<bos>",
+            "<eos>",
+            "hello",
+            "<turn|>",
+        ],
+    }
+
+    assert gguf_tokenizer_builder_module._local_config_special_token_kwargs(
+        model_path,
+        tokenizer_dict,
+    ) == {
+        "bos_token": "<bos>",
+        "eos_token": "<turn|>",
+        "pad_token": "<pad>",
+    }
+
+
 def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     tmp_path,
     monkeypatch,

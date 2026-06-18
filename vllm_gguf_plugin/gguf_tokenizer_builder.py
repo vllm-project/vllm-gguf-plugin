@@ -151,7 +151,7 @@ def _special_token_kwargs(tokenizer_dict: dict[str, Any]) -> dict[str, str]:
 
 def _local_config_path(model_path: Path) -> Path | None:
     """Return the nearest local HF config next to a GGUF file, if present."""
-    for candidate in (model_path.parent, model_path.parent.parent):
+    for candidate in gguf_sidecar_search_dirs(model_path):
         config_path = candidate / "config.json"
         if config_path.is_file():
             return config_path
