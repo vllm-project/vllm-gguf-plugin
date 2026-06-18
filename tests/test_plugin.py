@@ -591,6 +591,51 @@ def test_gguf_config_parser_uses_repo_for_exact_remote_file(monkeypatch):
     assert config.architectures == ["Qwen3ForCausalLM"]
 
 
+def test_gguf_config_parser_preserves_multimodal_architecture(monkeypatch):
+    calls = {}
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        calls["model"] = model
+        calls["trust_remote_code"] = trust_remote_code
+        calls["gguf_file"] = kwargs.get("gguf_file")
+        config = PretrainedConfig(model_type="qwen3_5")
+        config.architectures = ["Qwen3_5ForConditionalGeneration"]
+        return {
+            "model_type": "qwen3_5",
+            "architectures": ["Qwen3_5ForConditionalGeneration"],
+        }, config
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "resolve_gguf_config_source",
+        lambda model, revision=None: "Qwen/Qwen3.5-0.8B",
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+
+    config_dict, config = GGUFConfigParser().parse(
+        "unsloth/Qwen3.5-0.8B-GGUF:Q4_K_M",
+        trust_remote_code=True,
+        revision="main",
+    )
+
+    assert calls["model"] == "Qwen/Qwen3.5-0.8B"
+    assert calls["trust_remote_code"] is False
+    assert calls["gguf_file"] is None
+    assert config_dict["architectures"] == ["Qwen3_5ForConditionalGeneration"]
+    assert config.architectures == ["Qwen3_5ForConditionalGeneration"]
+
+
 def test_gguf_config_parser_passes_exact_remote_file_when_repo_has_no_config(
     monkeypatch,
 ):

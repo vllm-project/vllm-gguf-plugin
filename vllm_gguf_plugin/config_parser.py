@@ -83,12 +83,14 @@ class GGUFConfigParser(ConfigParserBase):
             config_dict["norm_topk_prob"] = True
             config.update({"norm_topk_prob": True})
 
-        if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+        if getattr(config, "architectures", None):
+            config_dict["architectures"] = config.architectures
+        elif config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+            model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
+            config_dict["architectures"] = [model_type]
+            config.update({"architectures": [model_type]})
+        else:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
-
-        model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
-        config_dict["architectures"] = [model_type]
-        config.update({"architectures": [model_type]})
 
         if is_gguf(original_model):
             config = maybe_patch_hf_config_from_gguf(str(original_model), config)
