@@ -20,7 +20,8 @@ from vllm.model_executor.model_loader import (
 )
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
 
-from .gguf_utils import is_gguf, is_remote_gguf
+from .gguf_tokenizer_builder import build_tokenizer_from_gguf
+from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf
 
 logger = init_logger(__name__)
 
@@ -115,6 +116,15 @@ def _patch_engine_args() -> None:
     def create_model_config(self, *args, **kwargs):
         if _is_gguf_reference(self.model):
             gguf_model = self.model
+            explicit_tokenizer = (
+                self.tokenizer if isinstance(self.tokenizer, str) else None
+            )
+            if (
+                self.tokenizer is None
+                and check_gguf_file(gguf_model)
+                and (tokenizer_path := build_tokenizer_from_gguf(gguf_model))
+            ):
+                self.tokenizer = tokenizer_path
             if self.quantization is None:
                 self.quantization = "gguf"
             if self.load_format == "auto":
@@ -127,7 +137,7 @@ def _patch_engine_args() -> None:
                 self.served_model_name = [gguf_model]
             config_source = _get_explicit_gguf_config_source(
                 gguf_model,
-                self.tokenizer if isinstance(self.tokenizer, str) else None,
+                explicit_tokenizer,
                 self.hf_config_path,
             )
             if config_source is not None:

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GGUF utility functions."""
 
+from contextlib import suppress
 from functools import cache
 from os import PathLike
 from pathlib import Path
@@ -205,6 +206,31 @@ def _gguf_field_value(field: Any) -> Any:
     except Exception as e:
         logger.debug("Failed to read GGUF metadata field: %s", e)
         return None
+
+
+def _gguf_reader_value(reader: gguf.GGUFReader, key: str) -> Any:
+    field = reader.get_field(key)
+    if field is None:
+        return None
+    return _gguf_field_value(field)
+
+
+def _gguf_scalar_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return value
+    try:
+        return value.item()
+    except (AttributeError, ValueError, TypeError):
+        pass
+    with suppress(AttributeError):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            return None
+        return _gguf_scalar_value(value[0])
+    return value
 
 
 @cache

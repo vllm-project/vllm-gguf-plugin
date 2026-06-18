@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
+from pathlib import Path
 
 import pytest
 import torch
@@ -36,10 +38,13 @@ if (
     )
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
+import vllm_gguf_plugin.gguf_tokenizer_builder as gguf_tokenizer_builder_module
 import vllm_gguf_plugin.gguf_utils as gguf_utils_module
+import vllm_gguf_plugin.plugin as gguf_plugin_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
+from vllm_gguf_plugin.gguf_tokenizer_builder import build_tokenizer_from_gguf
 from vllm_gguf_plugin.quantization import (
     GGUFUninitializedParameter,
     GGUFWeightParameter,
@@ -336,6 +341,277 @@ def test_gguf_config_parser_passes_exact_remote_file_when_repo_has_no_config(
     assert config.architectures == ["Qwen3ForCausalLM"]
 
 
+class _FakeGGUFField:
+    def __init__(self, value):
+        self.value = value
+        self.parts = [value]
+
+    def contents(self):
+        return self.value
+
+
+class _FakeGGUFReader:
+    def __init__(self, fields):
+        self.fields = {key: _FakeGGUFField(value) for key, value in fields.items()}
+        self.tensors = []
+
+    def get_field(self, key):
+        return self.fields.get(key)
+
+
+def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "model.gguf"
+    mmproj_path = tmp_path / "mmproj.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    mmproj_path.write_bytes(b"GGUF")
+    qwen_mm_tokens = [
+        "<|vision_start|>",
+        "<|vision_end|>",
+        "<|vision_pad|>",
+        "<|image_pad|>",
+        "<|video_pad|>",
+    ]
+    qwen_control_tokens = ["<tool_call>", "</tool_call>", "<think>", "</think>"]
+    main_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "qwen35moe",
+            "tokenizer.ggml.tokens": [
+                "<pad>",
+                "<bos>",
+                "<eos>",
+                "hello",
+                *qwen_mm_tokens,
+                *qwen_control_tokens,
+                "[PAD000]",
+            ],
+            "tokenizer.ggml.token_type": [
+                3,
+                3,
+                3,
+                1,
+                *([3] * len(qwen_mm_tokens)),
+                *([4] * len(qwen_control_tokens)),
+                5,
+            ],
+            "tokenizer.ggml.model": "gpt2",
+            "tokenizer.ggml.merges": ["h ello"],
+            "tokenizer.ggml.bos_token_id": 1,
+            "tokenizer.ggml.eos_token_id": 2,
+            "tokenizer.ggml.padding_token_id": 0,
+            "tokenizer.chat_template": "{{ messages }}",
+        }
+    )
+    mmproj_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "clip",
+            "general.type": "mmproj",
+            "clip.vision.patch_size": 16,
+            "clip.vision.spatial_merge_size": 2,
+            "clip.vision.temporal_patch_size": 2,
+        }
+    )
+    calls = []
+
+    class FakeTokenizer:
+        def __init__(self, *args, **kwargs):
+            calls.append(("fast", kwargs))
+            self.chat_template = None
+
+        def save_pretrained(self, path):
+            (path / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (path / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+    def fake_convert(architecture, tokenizer_dict):
+        calls.append(("convert", architecture, tokenizer_dict))
+        return object(), {}
+
+    def fake_gguf_reader(path):
+        return mmproj_reader if Path(path) == mmproj_path else main_reader
+
+    monkeypatch.setenv(
+        "VLLM_GGUF_TOKENIZER_CACHE",
+        str(tmp_path / "tokenizer-cache"),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module.gguf,
+        "GGUFReader",
+        fake_gguf_reader,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "convert_gguf_tokenizer",
+        fake_convert,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "PreTrainedTokenizerFast",
+        FakeTokenizer,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: mmproj_path,
+    )
+
+    tokenizer_path = build_tokenizer_from_gguf(gguf_path)
+
+    assert tokenizer_path is not None
+    tokenizer_cache = Path(tokenizer_path)
+    processor_config = json.loads(
+        (tokenizer_cache / "processor_config.json").read_text(encoding="utf-8")
+    )
+    preprocessor_config = json.loads(
+        (tokenizer_cache / "preprocessor_config.json").read_text(encoding="utf-8")
+    )
+    video_config = json.loads(
+        (tokenizer_cache / "video_preprocessor_config.json").read_text(encoding="utf-8")
+    )
+    assert processor_config["processor_class"] == "Qwen3VLProcessor"
+    assert preprocessor_config["image_processor_type"] == "Qwen2VLImageProcessor"
+    assert preprocessor_config["merge_size"] == 2
+    assert video_config["video_processor_type"] == "Qwen3VLVideoProcessor"
+
+    tokenizer_config = json.loads(
+        (tokenizer_cache / "tokenizer_config.json").read_text(encoding="utf-8")
+    )
+    assert tokenizer_config["additional_special_tokens"] == [
+        *qwen_mm_tokens,
+        *qwen_control_tokens,
+    ]
+    assert tokenizer_config["image_token"] == "<|image_pad|>"
+    assert tokenizer_config["video_token"] == "<|video_pad|>"
+    assert calls[0][0] == "convert"
+    assert calls[0][1] == "qwen3_moe"
+    assert calls[1][1]["bos_token"] == "<bos>"
+    assert calls[1][1]["eos_token"] == "<eos>"
+    assert calls[1][1]["pad_token"] == "<pad>"
+
+    def fail_convert(*args, **kwargs):
+        raise AssertionError("cached tokenizer should not call converter again")
+
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "convert_gguf_tokenizer",
+        fail_convert,
+    )
+    (tokenizer_cache / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (tokenizer_cache / "preprocessor_config.json").unlink()
+    assert build_tokenizer_from_gguf(gguf_path) == tokenizer_path
+    assert (tokenizer_cache / "preprocessor_config.json").is_file()
+
+
+def test_build_tokenizer_from_gguf_prefers_local_config_special_token_ids(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "eos_token_id": 4,
+                "pad_token_id": 0,
+                "text_config": {
+                    "bos_token_id": 1,
+                    "eos_token_id": 2,
+                    "pad_token_id": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_reader = _FakeGGUFReader(
+        {
+            "general.architecture": "gemma4",
+            "tokenizer.ggml.tokens": [
+                "<pad>",
+                "<bos>",
+                "<eos>",
+                "hello",
+                "<turn|>",
+            ],
+            "tokenizer.ggml.token_type": [3, 3, 3, 1, 3],
+            "tokenizer.ggml.model": "gpt2",
+            "tokenizer.ggml.merges": ["h ello"],
+            "tokenizer.ggml.bos_token_id": 1,
+            "tokenizer.ggml.eos_token_id": 2,
+            "tokenizer.ggml.padding_token_id": 0,
+        }
+    )
+    calls = []
+
+    class FakeTokenizer:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs)
+
+        def save_pretrained(self, path):
+            (path / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (path / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv(
+        "VLLM_GGUF_TOKENIZER_CACHE",
+        str(tmp_path / "tokenizer-cache"),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module.gguf,
+        "GGUFReader",
+        lambda path: fake_reader,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "convert_gguf_tokenizer",
+        lambda architecture, tokenizer_dict: (object(), {}),
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "PreTrainedTokenizerFast",
+        FakeTokenizer,
+    )
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "detect_gguf_multimodal",
+        lambda model: None,
+    )
+
+    tokenizer_path = build_tokenizer_from_gguf(gguf_path)
+
+    assert tokenizer_path is not None
+    assert calls[0]["bos_token"] == "<bos>"
+    assert calls[0]["eos_token"] == "<turn|>"
+    assert calls[0]["pad_token"] == "<pad>"
+    tokenizer_config_path = Path(tokenizer_path) / "tokenizer_config.json"
+    tokenizer_config = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
+    assert tokenizer_config["eos_token"] == "<turn|>"
+    assert "<turn|>" not in tokenizer_config.get("additional_special_tokens", [])
+
+
+def test_build_tokenizer_from_gguf_returns_none_when_cache_key_stat_fails(
+    tmp_path,
+    monkeypatch,
+):
+    gguf_path = tmp_path / "missing.gguf"
+
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module,
+        "check_gguf_file",
+        lambda model: True,
+    )
+
+    def fail_reader(*args, **kwargs):
+        raise AssertionError("stat failure must return before reading GGUF")
+
+    monkeypatch.setattr(
+        gguf_tokenizer_builder_module.gguf,
+        "GGUFReader",
+        fail_reader,
+    )
+
+    assert build_tokenizer_from_gguf(gguf_path) is None
+
+
 def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     register()
     captured = {}
@@ -354,6 +630,61 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     assert captured["model_weights"] == "/tmp/model.gguf"
     assert captured["quantization"] == "gguf"
     assert engine_args.load_format == "gguf"
+
+
+def test_register_sets_embedded_tokenizer_for_local_gguf(tmp_path, monkeypatch):
+    register()
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    captured = {}
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "build_tokenizer_from_gguf",
+        lambda model: "/tmp/gguf-tokenizer-cache",
+    )
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model=str(gguf_path))
+
+    engine_args.create_model_config()
+
+    assert captured["model"] == str(gguf_path)
+    assert captured["model_weights"] == str(gguf_path)
+    assert captured["tokenizer"] == "/tmp/gguf-tokenizer-cache"
+
+
+def test_register_preserves_explicit_tokenizer_for_local_gguf(tmp_path, monkeypatch):
+    register()
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    captured = {}
+
+    def fail_build_tokenizer(model):
+        raise AssertionError("explicit tokenizer must not be replaced")
+
+    monkeypatch.setattr(
+        gguf_plugin_module,
+        "build_tokenizer_from_gguf",
+        fail_build_tokenizer,
+    )
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model=str(gguf_path), tokenizer="/tmp/tokenizer")
+
+    engine_args.create_model_config()
+
+    assert captured["model"] == "/tmp/tokenizer"
+    assert captured["model_weights"] == str(gguf_path)
+    assert captured["tokenizer"] == "/tmp/tokenizer"
 
 
 def test_register_preserves_implicit_gguf_model_for_config_parser(monkeypatch):
