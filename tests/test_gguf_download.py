@@ -266,14 +266,23 @@ class TestGGUFDownload:
             revision=None,
         )
 
+    @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
     @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
-    def test_download_gguf_file_single_exact_file(self, mock_hf_download):
+    def test_download_gguf_file_single_exact_file(
+        self,
+        mock_hf_download,
+        mock_list_repo_files,
+    ):
         mock_hf_download.return_value = "/downloaded/Qwen.gguf"
 
         result = download_gguf_file(
             "unsloth/Qwen3-0.6B-GGUF",
             "Qwen3-0.6B-Q8_0.gguf",
             cache_dir="/cache",
+            revision="abc123",
+        )
+        mock_list_repo_files.assert_called_once_with(
+            "unsloth/Qwen3-0.6B-GGUF",
             revision="abc123",
         )
 
@@ -285,11 +294,63 @@ class TestGGUFDownload:
             revision="abc123",
         )
 
+    @patch(
+        "vllm_gguf_plugin.weight_utils.list_repo_files",
+        return_value=[
+            "Qwen3.6-35B-A3B-NVFP4.gguf",
+            "mmproj-BF16.gguf",
+        ],
+    )
+    @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
+    def test_download_gguf_file_single_exact_file_downloads_mmproj(
+        self,
+        mock_hf_download,
+        mock_list_repo_files,
+    ):
+        def fake_hf_download(**kwargs):
+            return f"/downloaded/{kwargs['filename']}"
+
+        mock_hf_download.side_effect = fake_hf_download
+
+        result = download_gguf_file(
+            "knoopx/Qwen3.6-35B-A3B-NVFP4-GGUF",
+            "Qwen3.6-35B-A3B-NVFP4.gguf",
+            cache_dir="/cache",
+            revision="abc123",
+        )
+
+        assert result == "/downloaded/Qwen3.6-35B-A3B-NVFP4.gguf"
+        mock_list_repo_files.assert_called_once_with(
+            "knoopx/Qwen3.6-35B-A3B-NVFP4-GGUF",
+            revision="abc123",
+        )
+        assert [
+            call.kwargs["filename"] for call in mock_hf_download.call_args_list
+        ] == [
+            "Qwen3.6-35B-A3B-NVFP4.gguf",
+            "mmproj-BF16.gguf",
+        ]
+
+    @patch(
+        "vllm_gguf_plugin.weight_utils.list_repo_files",
+        return_value=[
+            "Qwen-Q4_K_M-00001-of-00002.gguf",
+            "Qwen-Q4_K_M-00002-of-00002.gguf",
+            "mmproj-Q4_K_M.gguf",
+            "mmproj-F16.gguf",
+        ],
+    )
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    def test_download_gguf_file_split_exact_file_set(self, mock_download, tmp_path):
+    def test_download_gguf_file_split_exact_file_set(
+        self,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
+    ):
         mock_download.return_value = str(tmp_path)
         (tmp_path / "Qwen-Q4_K_M-00001-of-00002.gguf").touch()
         (tmp_path / "Qwen-Q4_K_M-00002-of-00002.gguf").touch()
+        (tmp_path / "mmproj-Q4_K_M.gguf").touch()
 
         result = download_gguf_file(
             "org/repo",
@@ -305,19 +366,26 @@ class TestGGUFDownload:
             allow_patterns=[
                 "Qwen-Q4_K_M-00001-of-00002.gguf",
                 "Qwen-Q4_K_M-00002-of-00002.gguf",
+                "mmproj-Q4_K_M.gguf",
             ],
             revision="abc123",
         )
+        mock_list_repo_files.assert_called_once_with("org/repo", revision="abc123")
 
+    @patch("vllm_gguf_plugin.weight_utils.list_repo_files", return_value=[])
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
     def test_download_gguf_file_split_missing_shard_fails(
-        self, mock_download, tmp_path
+        self,
+        mock_download,
+        mock_list_repo_files,
+        tmp_path,
     ):
         mock_download.return_value = str(tmp_path)
         (tmp_path / "Qwen-Q4_K_M-00001-of-00002.gguf").touch()
 
         with pytest.raises(ValueError, match="Incomplete split GGUF model"):
             download_gguf_file("org/repo", "Qwen-Q4_K_M-00001-of-00002.gguf")
+        mock_list_repo_files.assert_called_once_with("org/repo", revision=None)
 
     def test_resolve_local_gguf_validates_split_shards(self, tmp_path):
         (tmp_path / "model-Q4_K_M-00001-of-00002.gguf").touch()

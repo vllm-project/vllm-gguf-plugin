@@ -136,6 +136,19 @@ def _select_remote_mmproj_filename(
     )[0]
 
 
+def _select_remote_mmproj_for_gguf_file(
+    repo_id: str,
+    filename: str,
+    revision: str | None,
+) -> str | None:
+    quant_hint = Path(_SPLIT_GGUF_RE.sub(".gguf", filename)).stem
+    return _select_remote_mmproj_filename(
+        repo_id,
+        quant_hint,
+        revision,
+    )
+
+
 def download_gguf(
     repo_id: str,
     quant_type: str,
@@ -196,18 +209,34 @@ def download_gguf_file(
 ) -> str:
     """Download an exact GGUF file reference, including split shard sets."""
     filenames = expand_split_gguf_filenames(filename)
+    mmproj_filename = _select_remote_mmproj_for_gguf_file(
+        repo_id,
+        filename,
+        revision,
+    )
     if len(filenames) == 1:
-        return hf_hub_download(
+        local_file = hf_hub_download(
             repo_id=repo_id,
             filename=filename,
             cache_dir=cache_dir,
             revision=revision,
         )
+        if mmproj_filename is not None:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=mmproj_filename,
+                cache_dir=cache_dir,
+                revision=revision,
+            )
+        return local_file
 
+    allow_patterns = list(filenames)
+    if mmproj_filename is not None:
+        allow_patterns.append(mmproj_filename)
     folder = snapshot_download(
         repo_id=repo_id,
         cache_dir=cache_dir,
-        allow_patterns=filenames,
+        allow_patterns=allow_patterns,
         revision=revision,
     )
     return resolve_gguf_file_set(os.path.join(folder, filename))[0]
