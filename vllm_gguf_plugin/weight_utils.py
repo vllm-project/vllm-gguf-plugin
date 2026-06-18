@@ -128,19 +128,41 @@ def _list_remote_sidecar_files(repo_id: str, revision: str | None) -> list[str]:
 def _select_mmproj_filename_from_files(
     files: list[str],
     quant_type: str,
+    search_dirs: list[str] | None = None,
 ) -> str | None:
-    mmproj_files = [
-        filename
-        for filename in files
-        if filename.lower().endswith(".gguf")
-        and "mmproj" in Path(filename).name.lower()
-    ]
+    search_dir_distances = (
+        {directory: idx for idx, directory in enumerate(search_dirs)}
+        if search_dirs is not None
+        else None
+    )
+    mmproj_files: list[tuple[str, int]] = []
+    for filename in files:
+        if not (
+            filename.lower().endswith(".gguf")
+            and "mmproj" in Path(filename).name.lower()
+        ):
+            continue
+        distance = 0
+        if search_dir_distances is not None:
+            parent = PurePosixPath(filename).parent
+            directory = "" if parent == PurePosixPath(".") else parent.as_posix()
+            if directory not in search_dir_distances:
+                continue
+            distance = search_dir_distances[directory]
+        mmproj_files.append((filename, distance))
+
     if not mmproj_files:
         return None
-    return sorted(
+    filename, _distance = sorted(
         mmproj_files,
-        key=lambda name: _mmproj_candidate_sort_key(name, quant_type),
+        key=lambda item: (
+            _mmproj_candidate_sort_key(item[0], quant_type)[0],
+            item[1],
+            Path(item[0]).name,
+            item[0],
+        ),
     )[0]
+    return filename
 
 
 def _select_remote_mmproj_filename(
@@ -164,6 +186,7 @@ def _select_remote_mmproj_for_gguf_file(
     return _select_mmproj_filename_from_files(
         files,
         quant_hint,
+        search_dirs=_remote_sidecar_search_dirs(filename),
     )
 
 
