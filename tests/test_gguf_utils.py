@@ -7,6 +7,7 @@ import pytest
 
 import vllm_gguf_plugin.gguf_utils as gguf_utils_module
 from vllm_gguf_plugin.gguf_utils import (
+    detect_gguf_multimodal,
     extract_lm_head_from_gguf,
     is_gguf,
     is_local_gguf_quant,
@@ -236,6 +237,41 @@ class TestIsGGUF:
         assert not is_gguf("https://repo/model:Q2_K")
         assert not is_gguf("s3://bucket/repo/model:IQ1_S")
         assert not is_gguf("gs://bucket/repo/model:Q2_K")
+
+
+class TestDetectGGUFMultimodal:
+    def test_prefers_quant_matched_mmproj(self, tmp_path):
+        model = tmp_path / "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"
+        model.touch()
+        (tmp_path / "mmproj-BF16.gguf").touch()
+        (tmp_path / "mmproj-F16.gguf").touch()
+        quant_mmproj = tmp_path / "mmproj-Q4_K_XL.gguf"
+        quant_mmproj.touch()
+
+        assert detect_gguf_multimodal(str(model)) == quant_mmproj
+
+    def test_finds_hf_snapshot_root_mmproj_for_subdir_model(self, tmp_path):
+        snapshot = tmp_path / "models--org--repo" / "snapshots" / "abc123"
+        model_dir = snapshot / "Q4_K_M"
+        model_dir.mkdir(parents=True)
+        model = model_dir / "Qwen-Q4_K_M.gguf"
+        model.touch()
+        mmproj = snapshot / "mmproj-BF16.gguf"
+        mmproj.touch()
+
+        assert detect_gguf_multimodal(str(model)) == mmproj
+
+    def test_prefers_nearest_mmproj_when_rank_ties(self, tmp_path):
+        model_dir = tmp_path / "nested"
+        model_dir.mkdir()
+        model = model_dir / "model-Q4_K_M.gguf"
+        model.touch()
+        parent_mmproj = tmp_path / "mmproj-F16.gguf"
+        local_mmproj = model_dir / "mmproj-F16.gguf"
+        parent_mmproj.touch()
+        local_mmproj.touch()
+
+        assert detect_gguf_multimodal(str(model)) == local_mmproj
 
 
 class TestResolveGGUFConfigSource:

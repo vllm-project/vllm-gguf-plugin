@@ -20,7 +20,11 @@ from vllm.transformers_utils.repo_utils import (
     list_filtered_repo_files,
 )
 
-from .weight_utils import resolve_gguf_file_set, split_remote_gguf_file_ref
+from .weight_utils import (
+    _mmproj_candidate_sort_key,
+    resolve_gguf_file_set,
+    split_remote_gguf_file_ref,
+)
 
 logger = init_logger(__name__)
 
@@ -366,6 +370,35 @@ def is_gguf(model: str | Path) -> bool:
     return is_local_gguf_quant(model)
 
 
+def _hf_snapshot_root(path: Path) -> Path | None:
+    parts = path.parts
+    for idx, part in enumerate(parts):
+        if part == "snapshots" and idx + 1 < len(parts):
+            return Path(*parts[: idx + 2])
+    return None
+
+
+def _mmproj_search_dirs(model_path: Path) -> list[Path]:
+    dirs = [model_path.parent]
+    if model_path.parent.parent != model_path.parent:
+        dirs.append(model_path.parent.parent)
+    if snapshot_root := _hf_snapshot_root(model_path):
+        dirs.append(snapshot_root)
+
+    search_dirs: list[Path] = []
+    seen = set()
+    for directory in dirs:
+        if directory in seen or not directory.is_dir():
+            continue
+        seen.add(directory)
+        search_dirs.append(directory)
+    return search_dirs
+
+
+def _gguf_filename_rank_hint(model_path: Path) -> str:
+    return re.sub(r"-[0-9]+-of-[0-9]+$", "", model_path.stem)
+
+
 def detect_gguf_multimodal(model: str) -> Path | None:
     """Check if GGUF model has multimodal projector file.
 
@@ -383,13 +416,27 @@ def detect_gguf_multimodal(model: str) -> Path | None:
         if not model_path.is_file():
             return None
 
-        model_dir = model_path.parent
         mmproj_patterns = ["mmproj.gguf", "mmproj-*.gguf", "*mmproj*.gguf"]
-        for pattern in mmproj_patterns:
-            mmproj_files = list(model_dir.glob(pattern))
-            if mmproj_files:
-                return mmproj_files[0]
-        return None
+        candidates_by_path: dict[Path, int] = {}
+        for distance, directory in enumerate(_mmproj_search_dirs(model_path)):
+            for pattern in mmproj_patterns:
+                for candidate in directory.glob(pattern):
+                    if candidate == model_path or not candidate.is_file():
+                        continue
+                    candidates_by_path.setdefault(candidate, distance)
+        if not candidates_by_path:
+            return None
+
+        rank_hint = _gguf_filename_rank_hint(model_path)
+        return min(
+            candidates_by_path,
+            key=lambda path: (
+                _mmproj_candidate_sort_key(path.name, rank_hint)[0],
+                candidates_by_path[path],
+                path.name,
+                str(path),
+            ),
+        )
     except Exception:
         return None
 
