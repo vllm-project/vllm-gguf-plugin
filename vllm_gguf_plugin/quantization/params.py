@@ -7,7 +7,10 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.layers.fused_moe import RoutedExperts
+try:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+except ImportError:
+    from vllm.model_executor.layers.fused_moe import FusedMoE as RoutedExperts
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parameter import BasevLLMParameter
 

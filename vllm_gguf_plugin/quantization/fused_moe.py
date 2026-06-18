@@ -4,9 +4,10 @@
 from functools import partial
 
 import torch
-from vllm.model_executor.layers.fused_moe import (
-    RoutedExperts,
-)
+try:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+except ImportError:
+    from vllm.model_executor.layers.fused_moe import FusedMoE as RoutedExperts
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -19,9 +20,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from .. import ops
+from .custom_ops import register_or_get_vllm_custom_op
 from .params import (
     GGUFUninitializedWeightParameter,
     GGUFUninitializedWeightTypeParameter,
@@ -147,15 +148,11 @@ def _fused_moe_gguf_fake(
     return torch.empty_like(x)
 
 
-try:
-    direct_register_custom_op(
-        op_name="_fused_moe_gguf",
-        op_func=_fused_moe_gguf,
-        fake_impl=_fused_moe_gguf_fake,
-    )
-    fused_moe_gguf = torch.ops.vllm._fused_moe_gguf
-except AttributeError as error:
-    raise error
+fused_moe_gguf = register_or_get_vllm_custom_op(
+    op_name="_fused_moe_gguf",
+    op_func=_fused_moe_gguf,
+    fake_impl=_fused_moe_gguf_fake,
+)
 
 
 class GGUFMoEMethod(FusedMoEMethodBase):

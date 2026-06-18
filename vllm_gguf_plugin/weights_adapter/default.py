@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
@@ -19,6 +18,7 @@ from ..weight_utils import (
     get_gguf_extra_tensor_names,
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator_multi,
+    resolve_gguf_file_set,
 )
 from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
 
@@ -239,21 +239,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
     @staticmethod
     def _get_all_gguf_files(model_path: str) -> list[str]:
-        match = re.search(r"-(\d+)-of-(\d+)\.gguf$", model_path)
-        if not match:
-            return [model_path]
-        total = int(match.group(2))
-        num_digits = len(match.group(1))
-        prefix = model_path[: match.start(1)]
-        suffix = model_path[match.end(2) :]
-        files = []
-        for i in range(1, total + 1):
-            shard_path = f"{prefix}{i:0{num_digits}d}-of-{total:0{num_digits}d}{suffix}"
-            if os.path.isfile(shard_path):
-                files.append(shard_path)
-        if files:
-            logger.info("Discovered %d GGUF shard files", len(files))
-        return files if files else [model_path]
+        return resolve_gguf_file_set(model_path)
 
     def update_tie_word_embeddings(
         self,

@@ -9,9 +9,9 @@ from vllm.model_executor.layers.linear import (
     register_weight_loader_v2_supported_method,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from .. import ops
+from .custom_ops import register_or_get_vllm_custom_op
 from .params import (
     GGUFUninitializedWeightParameter,
     GGUFUninitializedWeightTypeParameter,
@@ -65,15 +65,11 @@ def _fused_mul_mat_gguf_fake(
     return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
 
 
-try:
-    direct_register_custom_op(
-        op_name="_fused_mul_mat_gguf",
-        op_func=_fused_mul_mat_gguf,
-        fake_impl=_fused_mul_mat_gguf_fake,
-    )
-    fused_mul_mat_gguf = torch.ops.vllm._fused_mul_mat_gguf
-except AttributeError as error:
-    raise error
+fused_mul_mat_gguf = register_or_get_vllm_custom_op(
+    op_name="_fused_mul_mat_gguf",
+    op_func=_fused_mul_mat_gguf,
+    fake_impl=_fused_mul_mat_gguf_fake,
+)
 
 
 @register_weight_loader_v2_supported_method

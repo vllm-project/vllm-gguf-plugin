@@ -8,9 +8,9 @@ import torch
 from gguf import GGMLQuantizationType as WeightType
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from .. import ops
+from .custom_ops import register_or_get_vllm_custom_op
 from .linear import GGUFLinearMethod
 from .params import (
     GGUFUninitializedWeightParameter,
@@ -56,15 +56,11 @@ def _apply_gguf_embedding_fake(
     return torch.empty(*x.shape, hidden_size, dtype=dtype, device=x.device)
 
 
-try:
-    direct_register_custom_op(
-        op_name="_apply_gguf_embedding",
-        op_func=_apply_gguf_embedding,
-        fake_impl=_apply_gguf_embedding_fake,
-    )
-    apply_gguf_embedding = torch.ops.vllm._apply_gguf_embedding
-except AttributeError as error:
-    raise error
+apply_gguf_embedding = register_or_get_vllm_custom_op(
+    op_name="_apply_gguf_embedding",
+    op_func=_apply_gguf_embedding,
+    fake_impl=_apply_gguf_embedding_fake,
+)
 
 
 class GGUFEmbeddingMethod(GGUFLinearMethod):

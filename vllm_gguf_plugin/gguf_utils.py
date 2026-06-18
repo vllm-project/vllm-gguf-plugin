@@ -14,6 +14,8 @@ from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
+from .weight_utils import resolve_gguf_file_set
+
 logger = init_logger(__name__)
 
 
@@ -297,8 +299,11 @@ def extract_lm_head_from_gguf(model_path: str | Path) -> bool:
     if not check_gguf_file(model_path):
         return None
 
-    reader = gguf.GGUFReader(str(model_path))
-    return any(tensor.name == "output.weight" for tensor in reader.tensors)
+    return any(
+        tensor.name == "output.weight"
+        for gguf_file in resolve_gguf_file_set(model_path)
+        for tensor in gguf.GGUFReader(str(gguf_file)).tensors
+    )
 
 
 def maybe_patch_hf_config_from_gguf(

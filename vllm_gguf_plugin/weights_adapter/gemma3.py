@@ -13,6 +13,7 @@ from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
 from ..weight_utils import (
     get_gguf_unquantized_params,
     gguf_quant_weights_iterator_multi,
+    resolve_gguf_file_set,
 )
 from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
 
@@ -96,10 +97,10 @@ class Gemma3GGUFAdapter(BaseGGUFWeightsAdapter):
         model_config.hf_config = self.patch_hf_config(
             model_path, model_config.hf_config
         )
-        gguf_files = [model_path]
+        gguf_files = resolve_gguf_file_set(model_path)
         mm_proj_path = detect_gguf_multimodal(model_path)
         if mm_proj_path:
-            gguf_files.append(mm_proj_path)
+            gguf_files.extend(resolve_gguf_file_set(mm_proj_path))
         self.mapper = build_gemma3_mapper(is_multimodal=mm_proj_path is not None)
         unquantized_params = get_gguf_unquantized_params(gguf_files)
         unquantized_modules = list(

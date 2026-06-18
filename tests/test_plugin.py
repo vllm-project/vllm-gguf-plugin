@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
+import pytest
 import torch
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
@@ -13,10 +16,22 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
 )
-from vllm.model_executor.layers.quantization import get_quantization_config
+from vllm.model_executor.layers.quantization import (
+    QUANTIZATION_METHODS,
+    get_quantization_config,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
+
+if "gguf" in QUANTIZATION_METHODS and os.environ.get(
+    "VLLM_GGUF_PLUGIN_OVERRIDE_IN_TREE"
+) != "1":
+    pytest.skip(
+        "override-mode plugin tests require vLLM without in-tree GGUF or "
+        "VLLM_GGUF_PLUGIN_OVERRIDE_IN_TREE=1",
+        allow_module_level=True,
+    )
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
 import vllm_gguf_plugin.quantization as gguf_quantization

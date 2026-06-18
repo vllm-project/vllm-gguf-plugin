@@ -3,6 +3,7 @@
 import glob
 import itertools
 import os
+import re
 from collections.abc import Generator
 from pathlib import Path
 
@@ -15,6 +16,53 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+_SPLIT_GGUF_RE = re.compile(r"-(\d+)-of-(\d+)\.gguf$")
+
+
+def _split_gguf_match(path: str | Path) -> re.Match[str] | None:
+    return _SPLIT_GGUF_RE.search(str(path))
+
+
+def resolve_gguf_file_set(model_path: str | Path) -> list[str]:
+    """Return the ordered GGUF files needed to load ``model_path``.
+
+    Split GGUF files use names such as ``model-00001-of-00003.gguf``.  vLLM's
+    loader should never silently continue with a partial split set, because
+    that produces missing weights later in model load with much worse errors.
+    """
+    model_path = str(model_path)
+    match = _split_gguf_match(model_path)
+    if match is None:
+        return [model_path]
+
+    total = int(match.group(2))
+    shard_digits = len(match.group(1))
+    total_digits = len(match.group(2))
+    prefix = model_path[: match.start(1)]
+    suffix = model_path[match.end(2) :]
+    files = [
+        f"{prefix}{idx:0{shard_digits}d}-of-{total:0{total_digits}d}{suffix}"
+        for idx in range(1, total + 1)
+    ]
+    missing = [path for path in files if not os.path.isfile(path)]
+    if missing:
+        raise ValueError(
+            "Incomplete split GGUF model: expected "
+            f"{total} shards for {model_path}, missing {len(missing)}: "
+            + ", ".join(missing)
+        )
+    logger.info("Resolved split GGUF model to %d shard files", len(files))
+    return files
+
+
+def _download_candidate_sort_key(path: str) -> tuple[bool, int, str, int, str]:
+    match = _split_gguf_match(path)
+    if match is None:
+        return (False, path.count("-"), path, 0, path)
+    normalized = _SPLIT_GGUF_RE.sub(".gguf", path)
+    return (True, normalized.count("-"), normalized, int(match.group(1)), path)
+
+
 def download_gguf(
     repo_id: str,
     quant_type: str,
@@ -24,11 +72,16 @@ def download_gguf(
 ) -> str:
     prefix_list = ["*.", "*-"]
     suffix_list = ["-*", ""]
-    allow_patterns = [
+    base_patterns = [
         f"{prefix}{qt}{suffix}.gguf"
         for qt in (quant_type.upper(), quant_type.lower())
         for prefix, suffix in itertools.product(prefix_list, suffix_list)
     ]
+    allow_patterns = list(
+        itertools.chain.from_iterable(
+            (pattern, f"*/{pattern}") for pattern in base_patterns
+        )
+    )
 
     folder = snapshot_download(
         repo_id=repo_id,
@@ -47,8 +100,8 @@ def download_gguf(
             f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
         )
 
-    local_files.sort(key=lambda x: (x.count("-"), x))
-    return local_files[0]
+    local_files = sorted(set(local_files), key=_download_candidate_sort_key)
+    return resolve_gguf_file_set(local_files[0])[0]
 
 
 def resolve_local_gguf(local_dir: str, quant_type: str) -> str:

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from functools import wraps
 from pathlib import Path
+from typing import Any
 
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.transformers_utils.config as config_module
@@ -18,14 +20,46 @@ from vllm.model_executor.model_loader import (
     register_model_loader,
 )
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
+from vllm.logger import init_logger
 
-from .config_parser import GGUFConfigParser
 from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
-from .loader import GGUFModelLoader
-from .quantization import GGUFConfig
 
-OOTGGUFConfig = GGUFConfig
-OOTGGUFModelLoader = GGUFModelLoader
+logger = init_logger(__name__)
+
+GGUFConfig: Any | None = None
+GGUFConfigParser: Any | None = None
+GGUFModelLoader: Any | None = None
+OOTGGUFConfig: Any | None = None
+OOTGGUFModelLoader: Any | None = None
+
+
+def _load_oot_gguf_classes() -> tuple[type, type, type]:
+    """Load plugin classes lazily to avoid custom-op registration on import.
+
+    Importing ``vllm_gguf_plugin.quantization`` registers plugin custom ops.
+    On vLLM builds that still include in-tree GGUF, those names already exist
+    and importing the plugin package can fail before ``register()`` has a chance
+    to decide whether the plugin should be active. Keep these imports behind the
+    registration decision.
+    """
+    global GGUFConfig, GGUFConfigParser, GGUFModelLoader
+    global OOTGGUFConfig, OOTGGUFModelLoader
+
+    if GGUFConfig is None:
+        from .config_parser import GGUFConfigParser as _GGUFConfigParser
+        from .loader import GGUFModelLoader as _GGUFModelLoader
+        from .quantization import GGUFConfig as _GGUFConfig
+
+        GGUFConfig = _GGUFConfig
+        GGUFConfigParser = _GGUFConfigParser
+        GGUFModelLoader = _GGUFModelLoader
+        OOTGGUFConfig = _GGUFConfig
+        OOTGGUFModelLoader = _GGUFModelLoader
+
+    assert GGUFConfig is not None
+    assert GGUFConfigParser is not None
+    assert GGUFModelLoader is not None
+    return GGUFConfig, GGUFConfigParser, GGUFModelLoader
 
 
 def _is_gguf_reference(model: str | None) -> bool:
@@ -102,6 +136,19 @@ def _patch_speculator_probe() -> None:
 
 def register() -> None:
     """Register the out-of-tree GGUF integration."""
+    if (
+        "gguf" in QUANTIZATION_METHODS
+        and os.environ.get("VLLM_GGUF_PLUGIN_OVERRIDE_IN_TREE") != "1"
+    ):
+        logger.warning(
+            "Skipping vllm-gguf-plugin registration because vLLM already has "
+            "a GGUF quantization method. Set VLLM_GGUF_PLUGIN_OVERRIDE_IN_TREE=1 "
+            "to force plugin registration."
+        )
+        return
+
+    GGUFConfig, GGUFConfigParser, GGUFModelLoader = _load_oot_gguf_classes()
+
     if (
         "gguf" not in QUANTIZATION_METHODS
         or get_quantization_config("gguf") is not GGUFConfig

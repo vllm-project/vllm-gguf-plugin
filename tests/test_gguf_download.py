@@ -7,7 +7,37 @@ import pytest
 from vllm.config.load import LoadConfig
 
 from vllm_gguf_plugin.loader import GGUFModelLoader
-from vllm_gguf_plugin.weight_utils import download_gguf
+from vllm_gguf_plugin.weight_utils import download_gguf, resolve_gguf_file_set
+
+
+class TestSplitGGUFResolution:
+    """Test split GGUF shard discovery and validation."""
+
+    def test_non_split_file_returns_single_path(self):
+        assert resolve_gguf_file_set("/models/model-Q4_K_M.gguf") == [
+            "/models/model-Q4_K_M.gguf"
+        ]
+
+    def test_split_file_resolves_all_shards_from_any_entry_shard(self, tmp_path):
+        for idx in range(1, 4):
+            (tmp_path / f"model-Q4_K_M-0000{idx}-of-00003.gguf").touch()
+
+        result = resolve_gguf_file_set(
+            tmp_path / "model-Q4_K_M-00002-of-00003.gguf"
+        )
+
+        assert result == [
+            str(tmp_path / "model-Q4_K_M-00001-of-00003.gguf"),
+            str(tmp_path / "model-Q4_K_M-00002-of-00003.gguf"),
+            str(tmp_path / "model-Q4_K_M-00003-of-00003.gguf"),
+        ]
+
+    def test_split_file_missing_shard_fails_closed(self, tmp_path):
+        (tmp_path / "model-Q4_K_M-00001-of-00003.gguf").touch()
+        (tmp_path / "model-Q4_K_M-00003-of-00003.gguf").touch()
+
+        with pytest.raises(ValueError, match="Incomplete split GGUF model"):
+            resolve_gguf_file_set(tmp_path / "model-Q4_K_M-00001-of-00003.gguf")
 
 
 class TestGGUFDownload:
@@ -31,13 +61,21 @@ class TestGGUFDownload:
                 cache_dir=None,
                 allow_patterns=[
                     "*.IQ1_S-*.gguf",
+                    "*/*.IQ1_S-*.gguf",
                     "*.IQ1_S.gguf",
+                    "*/*.IQ1_S.gguf",
                     "*-IQ1_S-*.gguf",
+                    "*/*-IQ1_S-*.gguf",
                     "*-IQ1_S.gguf",
+                    "*/*-IQ1_S.gguf",
                     "*.iq1_s-*.gguf",
+                    "*/*.iq1_s-*.gguf",
                     "*.iq1_s.gguf",
+                    "*/*.iq1_s.gguf",
                     "*-iq1_s-*.gguf",
+                    "*/*-iq1_s-*.gguf",
                     "*-iq1_s.gguf",
+                    "*/*-iq1_s.gguf",
                 ],
                 revision=None,
                 ignore_patterns=None,
@@ -46,41 +84,28 @@ class TestGGUFDownload:
             assert result == f"{mock_folder}/model-IQ1_S.gguf"
 
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    def test_download_gguf_sharded_files(self, mock_download):
+    def test_download_gguf_sharded_files(self, mock_download, tmp_path):
         """Test downloading sharded GGUF files."""
-        mock_folder = "/tmp/mock_cache"
+        mock_folder = str(tmp_path)
         mock_download.return_value = mock_folder
+        (tmp_path / "model-Q2_K-00001-of-00002.gguf").touch()
+        (tmp_path / "model-Q2_K-00002-of-00002.gguf").touch()
 
-        with patch("glob.glob") as mock_glob:
-            mock_glob.side_effect = lambda pattern, **kwargs: (
-                [
-                    f"{mock_folder}/model-Q2_K-00001-of-00002.gguf",
-                    f"{mock_folder}/model-Q2_K-00002-of-00002.gguf",
-                ]
-                if "Q2_K" in pattern
-                else []
-            )
+        result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
 
-            result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
-
-            assert result == f"{mock_folder}/model-Q2_K-00001-of-00002.gguf"
+        assert result == f"{mock_folder}/model-Q2_K-00001-of-00002.gguf"
 
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    def test_download_gguf_subdir(self, mock_download):
+    def test_download_gguf_subdir(self, mock_download, tmp_path):
         """Test downloading GGUF files from subdirectory."""
-        mock_folder = "/tmp/mock_cache"
+        mock_folder = str(tmp_path)
         mock_download.return_value = mock_folder
+        (tmp_path / "Q2_K").mkdir()
+        (tmp_path / "Q2_K" / "model-Q2_K.gguf").touch()
 
-        with patch("glob.glob") as mock_glob:
-            mock_glob.side_effect = lambda pattern, **kwargs: (
-                [f"{mock_folder}/Q2_K/model-Q2_K.gguf"]
-                if "Q2_K" in pattern or "**/*.gguf" in pattern
-                else []
-            )
+        result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
 
-            result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
-
-            assert result == f"{mock_folder}/Q2_K/model-Q2_K.gguf"
+        assert result == f"{mock_folder}/Q2_K/model-Q2_K.gguf"
 
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
     @patch("glob.glob", return_value=[])

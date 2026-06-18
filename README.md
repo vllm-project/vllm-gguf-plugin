@@ -53,3 +53,33 @@ The same hooks also run in GitHub Actions on every push and pull request.
 ```bash
 vllm serve Qwen/Qwen3-0.6B-GGUF:Q8_0 --tokenizer Qwen/Qwen3-0.6B
 ```
+
+## Smoke Tests
+
+Check registration behavior without loading a model:
+
+```bash
+python scripts/plugin_gguf_smoke.py --json
+```
+
+Force the plugin to take ownership from an in-tree GGUF vLLM build:
+
+```bash
+python scripts/plugin_gguf_smoke.py --override-in-tree --expect active --json
+```
+
+Exercise the real vLLM GGUF load path with a local model:
+
+```bash
+python scripts/plugin_gguf_smoke.py \
+  --override-in-tree \
+  --expect active \
+  --generate \
+  --model /path/to/model.gguf \
+  --tokenizer /path/to/tokenizer \
+  --hf-config-path /path/to/hf-config \
+  --max-model-len 1024 \
+  --gpu-memory-utilization 0.25 \
+  --enforce-eager \
+  --json
+```

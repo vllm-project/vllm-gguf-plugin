@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
@@ -16,9 +16,11 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from .quantization import GGUFConfig
 from .weight_utils import download_gguf, resolve_local_gguf
 from .weights_adapter import get_weights_adapter
+
+if TYPE_CHECKING:
+    from .quantization import GGUFConfig
 
 logger = init_logger(__name__)
 
@@ -88,7 +90,7 @@ class GGUFModelLoader(BaseModelLoader):
         logger.debug(
             "GGUF unquantized modules: %s", adapter.load_spec.unquantized_modules
         )
-        vllm_config.quant_config = cast(GGUFConfig, vllm_config.quant_config)
+        vllm_config.quant_config = cast("GGUFConfig", vllm_config.quant_config)
         vllm_config.quant_config.unquantized_modules.extend(
             adapter.load_spec.unquantized_modules
         )

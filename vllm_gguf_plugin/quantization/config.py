@@ -4,7 +4,10 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from vllm.model_executor.layers.fused_moe import RoutedExperts
+try:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+except ImportError:
+    from vllm.model_executor.layers.fused_moe import FusedMoE as RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
