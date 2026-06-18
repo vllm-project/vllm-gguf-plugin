@@ -378,13 +378,37 @@ def _hf_snapshot_root(path: Path) -> Path | None:
     return None
 
 
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    with suppress(ValueError):
+        path.relative_to(root)
+        return True
+    return False
+
+
+def _ancestor_dirs(start: Path, stop: Path | None = None) -> list[Path]:
+    dirs = []
+    directory = start
+    while True:
+        dirs.append(directory)
+        if stop is not None and directory == stop:
+            break
+        parent = directory.parent
+        if parent == directory:
+            break
+        directory = parent
+    return dirs
+
+
 def gguf_sidecar_search_dirs(model_path: Path) -> list[Path]:
     """Return local directories that may contain sidecars for a GGUF file."""
-    dirs = [model_path.parent]
-    if model_path.parent.parent != model_path.parent:
-        dirs.append(model_path.parent.parent)
-    if snapshot_root := _hf_snapshot_root(model_path):
-        dirs.append(snapshot_root)
+    snapshot_root = _hf_snapshot_root(model_path)
+    stop = (
+        snapshot_root
+        if snapshot_root is not None
+        and _path_is_relative_to(model_path.parent, snapshot_root)
+        else None
+    )
+    dirs = _ancestor_dirs(model_path.parent, stop=stop)
 
     search_dirs: list[Path] = []
     seen = set()

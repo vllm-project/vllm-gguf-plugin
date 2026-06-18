@@ -1481,6 +1481,30 @@ def test_copy_local_processor_sidecars_searches_hf_snapshot_root(tmp_path):
     ) == {"source": "snapshot"}
 
 
+def test_copy_local_processor_sidecars_searches_intermediate_ancestor(tmp_path):
+    snapshot = tmp_path / "models--org--repo" / "snapshots" / "abc123"
+    config_dir = snapshot / "Q8_0"
+    model_dir = config_dir / "nested" / "deep"
+    model_dir.mkdir(parents=True)
+    model_path = model_dir / "model.gguf"
+    model_path.touch()
+    (config_dir / "processor_config.json").write_text(
+        '{"source":"quant-dir"}',
+        encoding="utf-8",
+    )
+
+    cache_dir = tmp_path / "cache"
+
+    gguf_tokenizer_builder_module._copy_local_processor_sidecars(
+        model_path,
+        cache_dir,
+    )
+
+    assert json.loads(
+        (cache_dir / "processor_config.json").read_text(encoding="utf-8")
+    ) == {"source": "quant-dir"}
+
+
 def test_copy_local_processor_sidecars_prefers_nearest_and_preserves_cache(tmp_path):
     model_dir = tmp_path / "nested"
     model_dir.mkdir()

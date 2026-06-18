@@ -197,10 +197,16 @@ def _remote_processor_sidecar_patterns() -> list[str]:
 
 def _remote_sidecar_search_dirs(filename: str) -> list[str]:
     path = PurePosixPath(filename)
-    dirs = [path.parent]
-    if path.parent.parent != path.parent:
-        dirs.append(path.parent.parent)
-    dirs.append(PurePosixPath("."))
+    dirs = []
+    directory = path.parent
+    while True:
+        dirs.append(directory)
+        if directory == PurePosixPath("."):
+            break
+        parent = directory.parent
+        if parent == directory:
+            break
+        directory = parent
 
     search_dirs: list[str] = []
     seen = set()
