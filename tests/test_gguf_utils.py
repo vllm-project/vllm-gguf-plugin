@@ -260,6 +260,17 @@ class TestDetectGGUFMultimodal:
 
         assert detect_gguf_multimodal(str(model)) == quant_mmproj
 
+    def test_prefers_quant_matched_mmproj_from_parent_dir_hint(self, tmp_path):
+        model_dir = tmp_path / "Q4_K_M"
+        model_dir.mkdir()
+        model = model_dir / "model.gguf"
+        model.touch()
+        (model_dir / "mmproj-F16.gguf").touch()
+        quant_mmproj = model_dir / "mmproj-Q4_K_M.gguf"
+        quant_mmproj.touch()
+
+        assert detect_gguf_multimodal(str(model)) == quant_mmproj
+
     def test_finds_hf_snapshot_root_mmproj_for_subdir_model(self, tmp_path):
         snapshot = tmp_path / "models--org--repo" / "snapshots" / "abc123"
         model_dir = snapshot / "Q4_K_M"

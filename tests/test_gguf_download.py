@@ -559,6 +559,41 @@ class TestGGUFDownload:
     @patch(
         "vllm_gguf_plugin.weight_utils.list_repo_files",
         return_value=[
+            "Q4_K_M/model.gguf",
+            "Q4_K_M/mmproj-Q4_K_M.gguf",
+            "Q4_K_M/mmproj-F16.gguf",
+        ],
+    )
+    @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
+    def test_download_gguf_file_prefers_quant_mmproj_from_parent_dir_hint(
+        self,
+        mock_hf_download,
+        mock_list_repo_files,
+    ):
+        def fake_hf_download(**kwargs):
+            return f"/downloaded/{kwargs['filename']}"
+
+        mock_hf_download.side_effect = fake_hf_download
+
+        result = download_gguf_file(
+            "org/repo",
+            "Q4_K_M/model.gguf",
+            cache_dir="/cache",
+            revision="abc123",
+        )
+
+        assert result == "/downloaded/Q4_K_M/model.gguf"
+        mock_list_repo_files.assert_called_once_with("org/repo", revision="abc123")
+        assert [
+            call.kwargs["filename"] for call in mock_hf_download.call_args_list
+        ] == [
+            "Q4_K_M/model.gguf",
+            "Q4_K_M/mmproj-Q4_K_M.gguf",
+        ]
+
+    @patch(
+        "vllm_gguf_plugin.weight_utils.list_repo_files",
+        return_value=[
             "Qwen-Q4_K_M-00001-of-00002.gguf",
             "Qwen-Q4_K_M-00002-of-00002.gguf",
             "mmproj-Q4_K_M.gguf",

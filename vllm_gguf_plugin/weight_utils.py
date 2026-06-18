@@ -96,12 +96,24 @@ def _download_candidate_sort_key(path: str) -> tuple[bool, int, str, int, str]:
     return (True, normalized.count("-"), normalized, int(match.group(1)), path)
 
 
+def gguf_filename_rank_hint(filename: str | Path) -> str:
+    path = PurePosixPath(str(filename))
+    normalized_name = _SPLIT_GGUF_RE.sub(".gguf", path.name)
+    hint_parts = [
+        part
+        for part in (*path.parent.parts, PurePosixPath(normalized_name).stem)
+        if part not in ("", ".", "/")
+    ]
+    return ".".join(hint_parts)
+
+
 def _mmproj_quant_tokens(quant_type: str) -> tuple[str, ...]:
     quant_type = quant_type.upper()
     tokens = [quant_type]
     for separator in ("-", "."):
         if separator in quant_type:
             tokens.append(quant_type.rsplit(separator, 1)[1])
+    tokens.extend(token for token in re.split(r"[-.]", quant_type) if token)
     return tuple(dict.fromkeys(tokens))
 
 
@@ -179,7 +191,7 @@ def _select_remote_mmproj_for_gguf_file(
 ) -> str | None:
     if files is None:
         files = _list_remote_sidecar_files(repo_id, revision)
-    quant_hint = Path(_SPLIT_GGUF_RE.sub(".gguf", filename)).stem
+    quant_hint = gguf_filename_rank_hint(filename)
     return _select_mmproj_filename_from_files(
         files,
         quant_hint,

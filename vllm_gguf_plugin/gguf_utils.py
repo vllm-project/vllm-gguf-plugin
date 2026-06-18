@@ -22,6 +22,7 @@ from vllm.transformers_utils.repo_utils import (
 
 from .weight_utils import (
     _mmproj_candidate_sort_key,
+    gguf_filename_rank_hint,
     remote_gguf_quant_allow_patterns,
     resolve_gguf_file_set,
     select_remote_gguf_filename,
@@ -430,10 +431,6 @@ def _mmproj_search_dirs(model_path: Path) -> list[Path]:
     return gguf_sidecar_search_dirs(model_path)
 
 
-def _gguf_filename_rank_hint(model_path: Path) -> str:
-    return re.sub(r"-[0-9]+-of-[0-9]+$", "", model_path.stem)
-
-
 def detect_gguf_multimodal(model: str) -> Path | None:
     """Check if GGUF model has multimodal projector file.
 
@@ -462,7 +459,7 @@ def detect_gguf_multimodal(model: str) -> Path | None:
         if not candidates_by_path:
             return None
 
-        rank_hint = _gguf_filename_rank_hint(model_path)
+        rank_hint = gguf_filename_rank_hint(model_path)
         return min(
             candidates_by_path,
             key=lambda path: (
