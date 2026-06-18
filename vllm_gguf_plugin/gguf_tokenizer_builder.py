@@ -24,6 +24,7 @@ from .gguf_utils import (
     _gguf_scalar_value,
     check_gguf_file,
     detect_gguf_multimodal,
+    gguf_sidecar_search_dirs,
 )
 
 logger = init_logger(__name__)
@@ -429,17 +430,21 @@ def _read_int(reader: gguf.GGUFReader, key: str) -> int | None:
 
 
 def _copy_local_processor_sidecars(model_path: Path, cache_dir: Path) -> None:
-    """Copy local sidecar files next to the GGUF, without network fallback."""
+    """Copy local sidecar files for the GGUF, without network fallback."""
     for filename in _PROCESSOR_SIDECAR_FILES:
-        source = model_path.parent / filename
         target = cache_dir / filename
-        if target.is_file() or not source.is_file():
+        if target.is_file():
             continue
-        try:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            copyfile(source, target)
-        except Exception as e:
-            logger.debug("Failed to copy local GGUF sidecar %s: %s", source, e)
+        for directory in gguf_sidecar_search_dirs(model_path):
+            source = directory / filename
+            if not source.is_file():
+                continue
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                copyfile(source, target)
+            except Exception as e:
+                logger.debug("Failed to copy local GGUF sidecar %s: %s", source, e)
+            break
 
 
 def _write_json_if_missing(

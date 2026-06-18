@@ -1308,6 +1308,66 @@ class _FakeGGUFReader:
         return self.fields.get(key)
 
 
+def test_copy_local_processor_sidecars_searches_hf_snapshot_root(tmp_path):
+    snapshot = tmp_path / "models--org--repo" / "snapshots" / "abc123"
+    model_dir = snapshot / "subdir"
+    model_dir.mkdir(parents=True)
+    model_path = model_dir / "model.gguf"
+    model_path.touch()
+    (snapshot / "processor_config.json").write_text(
+        '{"source":"snapshot"}',
+        encoding="utf-8",
+    )
+
+    cache_dir = tmp_path / "cache"
+
+    gguf_tokenizer_builder_module._copy_local_processor_sidecars(
+        model_path,
+        cache_dir,
+    )
+
+    assert json.loads(
+        (cache_dir / "processor_config.json").read_text(encoding="utf-8")
+    ) == {"source": "snapshot"}
+
+
+def test_copy_local_processor_sidecars_prefers_nearest_and_preserves_cache(tmp_path):
+    model_dir = tmp_path / "nested"
+    model_dir.mkdir()
+    model_path = model_dir / "model.gguf"
+    model_path.touch()
+    (tmp_path / "processor_config.json").write_text(
+        '{"source":"parent"}',
+        encoding="utf-8",
+    )
+    (model_dir / "processor_config.json").write_text(
+        '{"source":"model-dir"}',
+        encoding="utf-8",
+    )
+    (model_dir / "preprocessor_config.json").write_text(
+        '{"source":"model-dir"}',
+        encoding="utf-8",
+    )
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    (cache_dir / "preprocessor_config.json").write_text(
+        '{"source":"cache"}',
+        encoding="utf-8",
+    )
+
+    gguf_tokenizer_builder_module._copy_local_processor_sidecars(
+        model_path,
+        cache_dir,
+    )
+
+    assert json.loads(
+        (cache_dir / "processor_config.json").read_text(encoding="utf-8")
+    ) == {"source": "model-dir"}
+    assert json.loads(
+        (cache_dir / "preprocessor_config.json").read_text(encoding="utf-8")
+    ) == {"source": "cache"}
+
+
 def test_build_tokenizer_from_gguf_metadata_uses_arch_alias_and_cache(
     tmp_path,
     monkeypatch,

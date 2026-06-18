@@ -378,7 +378,8 @@ def _hf_snapshot_root(path: Path) -> Path | None:
     return None
 
 
-def _mmproj_search_dirs(model_path: Path) -> list[Path]:
+def gguf_sidecar_search_dirs(model_path: Path) -> list[Path]:
+    """Return local directories that may contain sidecars for a GGUF file."""
     dirs = [model_path.parent]
     if model_path.parent.parent != model_path.parent:
         dirs.append(model_path.parent.parent)
@@ -393,6 +394,10 @@ def _mmproj_search_dirs(model_path: Path) -> list[Path]:
         seen.add(directory)
         search_dirs.append(directory)
     return search_dirs
+
+
+def _mmproj_search_dirs(model_path: Path) -> list[Path]:
+    return gguf_sidecar_search_dirs(model_path)
 
 
 def _gguf_filename_rank_hint(model_path: Path) -> str:
