@@ -221,10 +221,54 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     engine_args.create_model_config()
 
     assert captured["config_format"] == "gguf"
-    assert captured["model"] == "/tmp/tokenizer"
+    assert captured["model"] == "/tmp/model.gguf"
+    assert captured["hf_config_path"] == "/tmp/tokenizer"
     assert captured["model_weights"] == "/tmp/model.gguf"
     assert captured["quantization"] == "gguf"
     assert engine_args.load_format == "gguf"
+
+
+def test_register_sets_parent_source_for_local_gguf_model(monkeypatch, tmp_path):
+    register()
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    captured = {}
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(model=str(gguf_path))
+
+    engine_args.create_model_config()
+
+    assert captured["model"] == str(gguf_path)
+    assert captured["model_weights"] == str(gguf_path)
+    assert captured["hf_config_path"] == str(tmp_path)
+    assert captured["tokenizer"] == str(tmp_path)
+
+
+def test_register_preserves_explicit_hf_config_path_for_gguf(monkeypatch):
+    register()
+    captured = {}
+
+    def fake_model_config(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_module, "ModelConfig", fake_model_config)
+    engine_args = EngineArgs(
+        model="/tmp/model.gguf",
+        hf_config_path="/tmp/config",
+    )
+
+    engine_args.create_model_config()
+
+    assert captured["model"] == "/tmp/model.gguf"
+    assert captured["model_weights"] == "/tmp/model.gguf"
+    assert captured["hf_config_path"] == "/tmp/config"
+    assert captured["tokenizer"] == "/tmp/config"
 
 
 def test_register_skips_speculator_probe_for_gguf():
