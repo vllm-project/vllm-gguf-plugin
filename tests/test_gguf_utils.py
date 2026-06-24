@@ -3,10 +3,13 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pytest
+from gguf.constants import Keys
 
 from vllm_gguf_plugin.gguf_utils import (
     extract_lm_head_from_gguf,
+    extract_vision_config_from_gguf,
     is_gguf,
     is_local_gguf_quant,
     is_remote_gguf,
@@ -251,3 +254,44 @@ class TestExtractLMHeadFromGGUF:
         ]
 
         assert extract_lm_head_from_gguf("/tmp/model.gguf")
+
+
+class TestExtractVisionConfigFromGGUF:
+    @patch("vllm_gguf_plugin.gguf_utils.gguf.GGUFReader")
+    def test_extracts_single_element_array_metadata(self, mock_reader_cls):
+        class FakeField:
+            def __init__(self, value):
+                self.parts = [value]
+
+        fields = {
+            Keys.Clip.PROJECTOR_TYPE: FakeField(
+                np.frombuffer(b"gemma3", dtype=np.uint8)
+            ),
+            Keys.ClipVision.EMBEDDING_LENGTH: FakeField(
+                np.array([1152], dtype=np.uint32)
+            ),
+            Keys.ClipVision.FEED_FORWARD_LENGTH: FakeField(
+                np.array([4304], dtype=np.uint32)
+            ),
+            Keys.ClipVision.BLOCK_COUNT: FakeField(np.array([27], dtype=np.uint32)),
+            Keys.ClipVision.Attention.HEAD_COUNT: FakeField(
+                np.array([16], dtype=np.uint32)
+            ),
+            Keys.ClipVision.IMAGE_SIZE: FakeField(np.array([896], dtype=np.uint32)),
+            Keys.ClipVision.PATCH_SIZE: FakeField(np.array([14], dtype=np.uint32)),
+            Keys.ClipVision.Attention.LAYERNORM_EPS: FakeField(
+                np.array([1e-6], dtype=np.float32)
+            ),
+        }
+        mock_reader_cls.return_value.get_field.side_effect = fields.get
+
+        config = extract_vision_config_from_gguf("/tmp/mmproj.gguf")
+
+        assert config.hidden_size == 1152
+        assert config.intermediate_size == 4304
+        assert config.num_hidden_layers == 27
+        assert config.num_attention_heads == 16
+        assert config.image_size == 896
+        assert config.patch_size == 14
+        assert config.layer_norm_eps == pytest.approx(1e-6)
+        assert config.vision_use_head is False
