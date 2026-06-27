@@ -18,7 +18,7 @@ from vllm.transformers_utils.config import get_config_parser, register_config_pa
 from .config_parser import GGUFConfigParser
 from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 from .loader import GGUFModelLoader
-from .quantization import GGUFConfig
+from .quantization import DiffusionGGUFConfig, GGUFConfig
 from .weights_adapter.diffusion.integration import _patch_diffusers_loader
 
 OOTGGUFConfig = GGUFConfig
@@ -97,9 +97,19 @@ def _patch_speculator_probe() -> None:
     config_module._gguf_speculator_probe_patched = True
 
 
+def _register_omni_diffusion_quantization() -> None:
+    try:
+        from vllm_omni.quantization import register_quantization_override
+    except ImportError:
+        return
+
+    register_quantization_override("gguf", lambda **kw: DiffusionGGUFConfig(**kw))
+
+
 def register() -> None:
     """Register the out-of-tree GGUF integration."""
     register_quantization_config("gguf")(GGUFConfig)
+    _register_omni_diffusion_quantization()
 
     if "gguf" not in _LOAD_FORMAT_TO_MODEL_LOADER or not isinstance(
         get_model_loader(LoadConfig(load_format="gguf")), GGUFModelLoader
