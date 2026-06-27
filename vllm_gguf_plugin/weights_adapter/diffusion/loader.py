@@ -18,7 +18,6 @@ from huggingface_hub import hf_hub_download
 from torch import nn
 
 from ...weight_utils import download_gguf
-from . import get_diffusion_gguf_adapter
 
 
 @dataclass
@@ -144,6 +143,8 @@ def load_diffusion_gguf_weights(
     Returns:
         Set of loaded weight names.
     """
+    from . import get_diffusion_gguf_adapter
+
     gguf_file = resolve_gguf_model_path(
         gguf_model, revision, download_dir, ignore_patterns
     )

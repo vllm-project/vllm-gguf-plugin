@@ -7,11 +7,7 @@ import vllm.engine.arg_utils as arg_utils_module
 import vllm.transformers_utils.config as config_module
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.model_executor.layers.quantization import (
-    QUANTIZATION_METHODS,
-    get_quantization_config,
-    register_quantization_config,
-)
+from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.model_loader import (
     _LOAD_FORMAT_TO_MODEL_LOADER,
     get_model_loader,
@@ -103,11 +99,7 @@ def _patch_speculator_probe() -> None:
 
 def register() -> None:
     """Register the out-of-tree GGUF integration."""
-    if (
-        "gguf" not in QUANTIZATION_METHODS
-        or get_quantization_config("gguf") is not GGUFConfig
-    ):
-        register_quantization_config("gguf")(GGUFConfig)
+    register_quantization_config("gguf")(GGUFConfig)
 
     if "gguf" not in _LOAD_FORMAT_TO_MODEL_LOADER or not isinstance(
         get_model_loader(LoadConfig(load_format="gguf")), GGUFModelLoader

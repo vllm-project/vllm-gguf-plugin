@@ -43,7 +43,10 @@ def _patch_diffusers_loader() -> None:
         logger.debug("vllm-omni not installed, skipping diffusion GGUF patch")
         return
 
-    if getattr(DiffusersPipelineLoader, "_gguf_load_weights_patched", False):
+    if (
+        getattr(DiffusersPipelineLoader.load_weights, "_gguf_plugin_patched", False)
+        and getattr(DiffusersPipelineLoader.load_model, "_gguf_plugin_patched", False)
+    ):
         return
 
     _original_load_weights = DiffusersPipelineLoader.load_weights
@@ -175,6 +178,8 @@ def _patch_diffusers_loader() -> None:
 
         return model.eval()
 
+    _gguf_load_weights._gguf_plugin_patched = True
+    _gguf_load_model._gguf_plugin_patched = True
     DiffusersPipelineLoader.load_weights = _gguf_load_weights
     DiffusersPipelineLoader.load_model = _gguf_load_model
     DiffusersPipelineLoader._gguf_load_weights_patched = True
