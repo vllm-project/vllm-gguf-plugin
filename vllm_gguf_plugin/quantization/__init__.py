@@ -1,4 +1,9 @@
 from .config import GGUFConfig
+from .diffusion_config import (
+    DiffusionGGUFConfig,
+    DiffusionGGUFLinearMethod,
+    dequant_gemm_gguf,
+)
 from .fused_moe import GGUFMoEMethod, fused_moe_gguf
 from .linear import GGUFLinearMethod, fused_mul_mat_gguf
 from .params import (
@@ -22,6 +27,9 @@ from .vocal_embeds import GGUFEmbeddingMethod, apply_gguf_embedding
 
 __all__ = [
     "DEQUANT_TYPES",
+    "DiffusionGGUFConfig",
+    "DiffusionGGUFLinearMethod",
+    "dequant_gemm_gguf",
     "GGUFConfig",
     "GGUFEmbeddingMethod",
     "GGUFLinearMethod",

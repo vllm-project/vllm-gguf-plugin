@@ -3,6 +3,13 @@
 
 from .base import BaseGGUFWeightsAdapter
 from .default import GGUFWeightsAdapter
+from .diffusion import (
+    DiffusionGGUFAdapter,
+    Flux2KleinDiffusionGGUFAdapter,
+    QwenImageDiffusionGGUFAdapter,
+    ZImageDiffusionGGUFAdapter,
+    get_diffusion_gguf_adapter,
+)
 from .gemma3 import Gemma3GGUFAdapter
 
 _ADAPTER_REGISTRY: list[type[GGUFWeightsAdapter]] = [
@@ -20,7 +27,12 @@ def get_weights_adapter(config) -> GGUFWeightsAdapter:
 
 __all__ = [
     "BaseGGUFWeightsAdapter",
+    "DiffusionGGUFAdapter",
+    "Flux2KleinDiffusionGGUFAdapter",
     "GGUFWeightsAdapter",
     "Gemma3GGUFAdapter",
+    "QwenImageDiffusionGGUFAdapter",
+    "ZImageDiffusionGGUFAdapter",
+    "get_diffusion_gguf_adapter",
     "get_weights_adapter",
 ]

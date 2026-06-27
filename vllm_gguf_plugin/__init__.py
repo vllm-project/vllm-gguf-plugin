@@ -3,11 +3,12 @@
 from .config_parser import GGUFConfigParser
 from .loader import GGUFModelLoader
 from .plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
-from .quantization import GGUFConfig
+from .quantization import DiffusionGGUFConfig, GGUFConfig
 
 __all__ = [
-    "GGUFConfigParser",
+    "DiffusionGGUFConfig",
     "GGUFConfig",
+    "GGUFConfigParser",
     "GGUFModelLoader",
     "OOTGGUFConfig",
     "OOTGGUFModelLoader",
