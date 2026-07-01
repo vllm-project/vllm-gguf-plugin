@@ -24,6 +24,7 @@ from .params import (
 )
 from .utils import (
     DEQUANT_TYPES,
+    GGUF_PLUGIN_TORCH_LIB,
     IMATRIX_QUANT_TYPES,
     MMQ_QUANT_TYPES,
     MMVQ_QUANT_TYPES,
@@ -44,6 +45,8 @@ def _fused_mul_mat_gguf(
         return x @ qweight.T
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
+    elif qweight_type == WeightType.IQ4_XS:
+        y = ops.ggml_mul_mat_a8_iq4_xs_mmq_v2(qweight, x, qweight.shape[0])
     elif qweight_type in MMQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
     elif qweight_type in DEQUANT_TYPES:
@@ -70,8 +73,9 @@ try:
         op_name="_fused_mul_mat_gguf",
         op_func=_fused_mul_mat_gguf,
         fake_impl=_fused_mul_mat_gguf_fake,
+        target_lib=GGUF_PLUGIN_TORCH_LIB,
     )
-    fused_mul_mat_gguf = torch.ops.vllm._fused_mul_mat_gguf
+    fused_mul_mat_gguf = torch.ops.vllm_gguf_plugin._fused_mul_mat_gguf
 except AttributeError as error:
     raise error
 
@@ -143,7 +147,7 @@ class GGUFLinearMethod(LinearMethodBase):
             raise ValueError(
                 f"Unsupported GGUF quantization type {qweight_type} in layer {layer}."
             )
-        self._create_padded_weight_param(layer)
+        self._create_multi_shard_weight_param(layer)
 
     def _materialize_gguf_parameters(self, layer: torch.nn.Module) -> None:
         self._materialize_qweight(layer)
@@ -155,8 +159,8 @@ class GGUFLinearMethod(LinearMethodBase):
     def _materialize_qweight_type(self, layer: torch.nn.Module) -> None:
         _materialize_gguf_weight_type_parameter(layer, "qweight_type")
 
-    def _create_padded_weight_param(self, layer: torch.nn.Module):
-        """Create padded weight parameter for GGUF MergedLinear layer."""
+    def _create_multi_shard_weight_param(self, layer: torch.nn.Module):
+        """Keep GGUF MergedLinear shards separate to avoid GPU peak memory spikes."""
         qweight = layer.qweight
         shard_id_map = qweight.shard_id_map
         shard_id = qweight.shard_id
@@ -166,43 +170,38 @@ class GGUFLinearMethod(LinearMethodBase):
                 f"Data container has mixed dtypes: {dtype}"
             )
             dtype = next(iter(dtype))
-            padded_side = max(x.size(1) for x in data_container)
-            concat_side = sum(x.size(0) for x in data_container)
-            padded_data = torch.zeros(
-                (concat_side, padded_side), dtype=dtype, device=qweight.device
-            )
+            target_device = qweight.device
             shard_offset_map = dict[str, tuple[int, int, int]]()
             ordered_shard_ids = _gguf_ordered_shard_ids(shard_id)
+            ordered_data_container = []
+            ordered_shard_id_map = dict[int | str, int]()
             current_offset = 0
             for idx in ordered_shard_ids:
                 id_in_container = shard_id_map[idx]
+                ordered_data_container.append(data_container[id_in_container])
+                ordered_shard_id_map[idx] = len(ordered_data_container) - 1
                 start = current_offset
                 end = start + data_container[id_in_container].size(0)
                 size = data_container[id_in_container].size(1)
-                padded_data[start:end, :size] = data_container[id_in_container]
                 shard_offset_map[idx] = (start, end, size)
                 current_offset = end
-            padded_param = GGUFWeightParameter(
-                data=padded_data,
+            qweight.data_container.clear()
+            qweight.shard_id.clear()
+            qweight.shard_id_map.clear()
+            sharded_param = GGUFWeightParameter(
+                data=torch.empty(0, dtype=dtype, device=target_device),
                 weight_loader=qweight.weight_loader,
                 input_dim=qweight.input_dim,
                 output_dim=qweight.output_dim,
                 tensor_shape=qweight.tensor_shape,
             )
-            padded_param.data_container = []
-            padded_param.shard_id = ordered_shard_ids
-            padded_param.shard_id_map = dict(qweight.shard_id_map)
+            sharded_param.data_container = ordered_data_container
+            sharded_param.shard_id = ordered_shard_ids
+            sharded_param.shard_id_map = ordered_shard_id_map
             if hasattr(qweight, "ignore_warning"):
-                padded_param.ignore_warning = qweight.ignore_warning
-            set_weight_attrs(padded_param, {"shard_offset_map": shard_offset_map})
-            qweight.data_container.clear()
-            qweight.shard_id.clear()
-            qweight.shard_id_map.clear()
-            if qweight.data.numel() > 0:
-                qweight.data = torch.empty(
-                    0, dtype=qweight.dtype, device=qweight.device
-                )
-            layer.register_parameter("qweight", padded_param)
+                sharded_param.ignore_warning = qweight.ignore_warning
+            set_weight_attrs(sharded_param, {"shard_offset_map": shard_offset_map})
+            layer.register_parameter("qweight", sharded_param)
 
     def apply(
         self,
@@ -217,6 +216,19 @@ class GGUFLinearMethod(LinearMethodBase):
             shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
             qweight = layer.qweight
             fallback_wtype = layer.qweight_type.weight_type
+            if qweight.data_container:
+                result = []
+                for idx in shard_id:
+                    qweight_type = layer.qweight_type.shard_weight_type.get(
+                        idx, fallback_wtype
+                    )
+                    shard = qweight.data_container[qweight.shard_id_map[idx]]
+                    result.append(fused_mul_mat_gguf_op(x, shard, qweight_type))
+                out = torch.cat(result, axis=1)
+                if bias is not None:
+                    out.add_(bias)
+                return out
+
             shard_weight_types = [
                 layer.qweight_type.shard_weight_type.get(idx, fallback_wtype)
                 for idx in shard_id

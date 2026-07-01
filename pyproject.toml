@@ -68,6 +68,8 @@ extend-exclude = [
     "vllm_gguf_plugin/csrc/gguf/dequantize.cuh",
     "vllm_gguf_plugin/csrc/gguf/vecdotq.cuh",
     "vllm_gguf_plugin/csrc/gguf/mmq.cuh",
+    "vllm_gguf_plugin/csrc/gguf/mma_v2.cuh",
+    "vllm_gguf_plugin/csrc/gguf/mmq_v2.cuh",
     "vllm_gguf_plugin/csrc/gguf/mmvq.cuh",
 ]
 ignore-hidden = false

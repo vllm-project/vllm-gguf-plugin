@@ -5,9 +5,12 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from gguf import GGMLQuantizationType as WeightType
+from torch.library import Library
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+GGUF_PLUGIN_TORCH_LIB = Library("vllm_gguf_plugin", "FRAGMENT")
 
 
 def is_layer_skipped_gguf(

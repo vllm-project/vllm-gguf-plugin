@@ -8,6 +8,7 @@ import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
+from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
@@ -84,7 +85,7 @@ class GGUFModelLoader(BaseModelLoader):
     ) -> nn.Module:
         device_config = vllm_config.device_config
         adapter = self._prepare_adapter(model_config)
-        vllm_config.model_config.hf_config = model_config.hf_config
+        vllm_config = replace(vllm_config, model_config=model_config)
         logger.debug(
             "GGUF unquantized modules: %s", adapter.load_spec.unquantized_modules
         )
@@ -96,7 +97,10 @@ class GGUFModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(vllm_config=vllm_config, prefix=prefix)
+                model = initialize_model(
+                    vllm_config=vllm_config,
+                    prefix=prefix,
+                )
             model.load_weights(
                 adapter.prepare_weights(model_config),
             )

@@ -20,7 +20,7 @@ from .params import (
     _materialize_gguf_weight_parameter,
     _materialize_gguf_weight_type_parameter,
 )
-from .utils import DEQUANT_TYPES, UNQUANTIZED_TYPES
+from .utils import DEQUANT_TYPES, GGUF_PLUGIN_TORCH_LIB, UNQUANTIZED_TYPES
 
 
 def _apply_gguf_embedding(
@@ -61,8 +61,9 @@ try:
         op_name="_apply_gguf_embedding",
         op_func=_apply_gguf_embedding,
         fake_impl=_apply_gguf_embedding_fake,
+        target_lib=GGUF_PLUGIN_TORCH_LIB,
     )
-    apply_gguf_embedding = torch.ops.vllm._apply_gguf_embedding
+    apply_gguf_embedding = torch.ops.vllm_gguf_plugin._apply_gguf_embedding
 except AttributeError as error:
     raise error
 

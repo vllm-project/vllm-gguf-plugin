@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GGUF utility functions."""
 
+from contextlib import suppress
 from functools import cache
 from os import PathLike
 from pathlib import Path
+from typing import Any
 
 import gguf
 import regex as re
@@ -12,7 +14,11 @@ from gguf.constants import Keys, LlamaFileType, VisionProjectorType
 from gguf.quants import GGMLQuantizationType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 from vllm.logger import init_logger
-from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+from vllm.transformers_utils.repo_utils import (
+    file_or_path_exists,
+    hf_api,
+    list_filtered_repo_files,
+)
 
 logger = init_logger(__name__)
 
@@ -83,6 +89,14 @@ def is_nonstandard_gguf_quant_type(quant_type: str) -> bool:
 # Common suffixes used in GGUF file naming conventions
 # e.g., Q4_K_M, Q3_K_S, Q5_K_L, Q2_K_XL
 _GGUF_QUANT_SUFFIXES = ("_M", "_S", "_L", "_XL", "_XS", "_XXS")
+_HF_CONFIG_FILES = ("config.json",)
+_HF_REPO_ID_PATTERN = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+)
+_HF_REPO_URL_PATTERN = re.compile(
+    r"^https?://huggingface\.co/"
+    r"([a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*)"
+)
 
 
 def is_valid_gguf_quant_type(gguf_quant_type: str) -> bool:
@@ -127,6 +141,308 @@ def split_remote_gguf(model: str | Path) -> tuple[str, str]:
         "- Non-standard GGUF quant types also supported: "
         "dash-separated prefixes (e.g. UD-Q4_K_XL, Custom-Q8_0)",
     )
+
+
+def _normalize_base_model_ids(base_model: Any) -> list[str]:
+    if base_model is None:
+        return []
+    if isinstance(base_model, str):
+        return [base_model] if base_model else []
+    if isinstance(base_model, (list, tuple, set)):
+        return [model_id for model_id in base_model if isinstance(model_id, str)]
+    return []
+
+
+def _normalize_hf_repo_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    value = value.strip()
+    if value.endswith(".git"):
+        value = value[:-4]
+
+    if _HF_REPO_ID_PATTERN.fullmatch(value):
+        return value
+
+    match = _HF_REPO_URL_PATTERN.match(value)
+    if match:
+        repo_id = match.group(1)
+        if repo_id.endswith(".git"):
+            repo_id = repo_id[:-4]
+        return repo_id
+
+    return None
+
+
+@cache
+def _get_remote_gguf_base_model_ids(
+    repo_id: str,
+    revision: str | None = None,
+) -> tuple[str, ...]:
+    try:
+        info = hf_api().model_info(repo_id, revision=revision)
+    except Exception as e:
+        logger.debug("Failed to inspect GGUF model card for %s: %s", repo_id, e)
+        return ()
+
+    card_data = getattr(info, "card_data", None)
+    base_model = getattr(card_data, "base_model", None)
+    if base_model is None and isinstance(card_data, dict):
+        base_model = card_data.get("base_model")
+
+    base_model_ids: list[str] = []
+    for value in _normalize_base_model_ids(base_model):
+        if normalized_repo_id := _normalize_hf_repo_id(value):
+            base_model_ids.append(normalized_repo_id)
+
+    return tuple(dict.fromkeys(base_model_ids))
+
+
+def _gguf_field_value(field: Any) -> Any:
+    try:
+        return field.contents()
+    except Exception as e:
+        logger.debug("Failed to read GGUF metadata field: %s", e)
+        return None
+
+
+def _gguf_reader_value(reader: gguf.GGUFReader, key: str) -> Any:
+    field = reader.get_field(key)
+    if field is None:
+        return None
+    return _gguf_field_value(field)
+
+
+def _gguf_scalar_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return value
+    try:
+        return value.item()
+    except (AttributeError, ValueError, TypeError):
+        pass
+    with suppress(AttributeError):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            return None
+        return _gguf_scalar_value(value[0])
+    return value
+
+
+def _update_config(config: PretrainedConfig, values: dict[str, Any]) -> None:
+    values = {key: value for key, value in values.items() if value is not None}
+    if values:
+        config.update(values)
+
+
+def _gguf_sequence_edge(value: Any, *, first: bool) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return value
+    try:
+        return value[0] if first else value[-1]
+    except (TypeError, KeyError, IndexError):
+        return value
+
+
+def _gguf_int_value(reader: gguf.GGUFReader, key: str) -> int | None:
+    value = _gguf_scalar_value(_gguf_reader_value(reader, key))
+    if value is None:
+        return None
+    with suppress(TypeError, ValueError):
+        return int(value)
+    return None
+
+
+def _gguf_float_value(reader: gguf.GGUFReader, key: str) -> float | None:
+    value = _gguf_scalar_value(_gguf_reader_value(reader, key))
+    if value is None:
+        return None
+    with suppress(TypeError, ValueError):
+        return float(value)
+    return None
+
+
+def _gguf_string_value(reader: gguf.GGUFReader, key: str) -> str | None:
+    value = _gguf_scalar_value(_gguf_reader_value(reader, key))
+    if isinstance(value, bytes):
+        with suppress(UnicodeDecodeError):
+            return value.decode("utf-8")
+        return None
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return None
+    return str(value)
+
+
+def _gguf_int_list_value(reader: gguf.GGUFReader, key: str) -> list[int] | None:
+    value = _gguf_reader_value(reader, key)
+    if value is None or isinstance(value, (str, bytes)):
+        return None
+    with suppress(AttributeError):
+        value = value.tolist()
+    if isinstance(value, tuple):
+        value = list(value)
+    if not isinstance(value, list):
+        return None
+
+    values: list[int] = []
+    for item in value:
+        scalar = _gguf_scalar_value(item)
+        with suppress(TypeError, ValueError):
+            values.append(int(scalar))
+            continue
+        return None
+    return values
+
+
+def _qwen35_rope_parameters_from_gguf(
+    reader: gguf.GGUFReader,
+    prefix: str,
+    partial_rotary_factor: float | None,
+) -> dict[str, Any]:
+    rope_parameters: dict[str, Any] = {
+        "rope_type": "default",
+        "rope_theta": _gguf_float_value(reader, f"{prefix}.rope.freq_base"),
+        "partial_rotary_factor": partial_rotary_factor,
+    }
+
+    mrope_section = _gguf_int_list_value(
+        reader,
+        f"{prefix}.rope.dimension_sections",
+    )
+    if mrope_section:
+        mrope_section = list(mrope_section)
+        while mrope_section and mrope_section[-1] == 0:
+            mrope_section.pop()
+        if mrope_section:
+            rope_parameters["mrope_section"] = mrope_section
+            rope_parameters["mrope_interleaved"] = True
+
+    return {key: value for key, value in rope_parameters.items() if value is not None}
+
+
+def _qwen35_text_config_updates_from_gguf(
+    reader: gguf.GGUFReader,
+    prefix: str,
+) -> dict[str, Any]:
+    head_dim = _gguf_int_value(reader, f"{prefix}.attention.key_length")
+    rope_dim = _gguf_int_value(reader, f"{prefix}.rope.dimension_count")
+    partial_rotary_factor = None
+    if head_dim and rope_dim:
+        partial_rotary_factor = rope_dim / head_dim
+
+    rope_parameters = _qwen35_rope_parameters_from_gguf(
+        reader,
+        prefix,
+        partial_rotary_factor,
+    )
+    updates: dict[str, Any] = {
+        # These are Qwen3.5 HF/vLLM config defaults. Current GGUF metadata does
+        # not carry them, while llama.cpp handles the same behavior in model
+        # code. Keep the defaults explicit so the GGUF-derived config preserves
+        # the base model contract.
+        "attn_output_gate": True,
+        "mamba_ssm_dtype": "float32",
+        "mtp_use_dedicated_embeddings": False,
+        "partial_rotary_factor": partial_rotary_factor,
+        "rope_theta": _gguf_float_value(reader, f"{prefix}.rope.freq_base"),
+        "full_attention_interval": _gguf_int_value(
+            reader,
+            f"{prefix}.full_attention_interval",
+        ),
+        "output_gate_type": _gguf_string_value(reader, f"{prefix}.output_gate_type"),
+    }
+    if "mrope_section" in rope_parameters:
+        updates["rope_parameters"] = rope_parameters
+    return updates
+
+
+@cache
+def _get_local_gguf_base_model_ids(model: str | Path) -> tuple[str, ...]:
+    try:
+        reader = gguf.GGUFReader(str(model))
+    except Exception as e:
+        logger.debug("Failed to inspect GGUF metadata for %s: %s", model, e)
+        return ()
+
+    base_model_ids: list[str] = []
+    for key, field in reader.fields.items():
+        if not (key.startswith("general.base_model.") and key.endswith(".repo_url")):
+            continue
+        if repo_id := _normalize_hf_repo_id(_gguf_field_value(field)):
+            base_model_ids.append(repo_id)
+
+    return tuple(dict.fromkeys(base_model_ids))
+
+
+def _source_has_any_file(
+    model: str | Path,
+    filenames: tuple[str, ...],
+    revision: str | None = None,
+) -> bool:
+    return any(file_or_path_exists(model, filename, revision) for filename in filenames)
+
+
+def _local_gguf_source_candidates(source: Path) -> tuple[Path, ...]:
+    parent = source.parent
+    if parent == source:
+        return (source,)
+    return (source, parent)
+
+
+def _resolve_gguf_hf_source(
+    model: str | Path,
+    filenames: tuple[str, ...],
+    revision: str | None = None,
+) -> str | Path:
+    local_sources: tuple[Path, ...] = ()
+    if is_remote_gguf(model):
+        source: str | Path
+        source, _ = split_remote_gguf(model)
+        base_model_ids = list(
+            _get_remote_gguf_base_model_ids(source, revision=revision)
+        )
+    elif check_gguf_file(model):
+        source = Path(model).parent
+        local_sources = _local_gguf_source_candidates(source)
+        base_model_ids = list(_get_local_gguf_base_model_ids(model))
+    else:
+        return model
+
+    for local_source in local_sources:
+        if _source_has_any_file(local_source, filenames, revision=revision):
+            return local_source
+    if not local_sources and _source_has_any_file(source, filenames, revision=revision):
+        return source
+
+    for base_model in base_model_ids:
+        if _source_has_any_file(base_model, filenames, revision=None):
+            logger.warning_once(
+                "GGUF metadata redirects HF config loading from %s to base "
+                "model '%s'. `trust_remote_code` is not inherited across "
+                "implicit GGUF base-model redirects; pass an explicit "
+                "`--hf-config-path` to opt in for that repository.",
+                model,
+                base_model,
+            )
+            return base_model
+
+    return source
+
+
+def resolve_gguf_config_source(
+    model: str | Path,
+    revision: str | None = None,
+) -> str | Path:
+    """Resolve where a GGUF model should load its HF config from."""
+    if is_gguf(model):
+        return _resolve_gguf_hf_source(model, _HF_CONFIG_FILES, revision=revision)
+    return model
 
 
 def is_local_gguf_quant(model: str | Path) -> bool:
@@ -220,11 +536,16 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
 
     # Detect projector type to apply model-specific parameters
     projector_type = None
-    projector_type_field = reader.get_field(Keys.Clip.PROJECTOR_TYPE)
-    if projector_type_field:
+    projector_type_value = _gguf_scalar_value(
+        _gguf_reader_value(reader, Keys.Clip.PROJECTOR_TYPE)
+    )
+    if projector_type_value is not None:
         try:
-            projector_type = bytes(projector_type_field.parts[-1]).decode("utf-8")
-        except (AttributeError, UnicodeDecodeError) as e:
+            if isinstance(projector_type_value, bytes):
+                projector_type = projector_type_value.decode("utf-8")
+            else:
+                projector_type = str(projector_type_value)
+        except UnicodeDecodeError as e:
             logger.warning("Failed to decode projector type from GGUF: %s", e)
 
     # Map GGUF field constants to SiglipVisionConfig parameters.
@@ -243,15 +564,23 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
     # Extract and validate all required fields
     config_params = {}
     for gguf_key, (param_name, dtype) in VISION_CONFIG_FIELDS.items():
-        field = reader.get_field(gguf_key)
-        if field is None:
+        value = _gguf_scalar_value(_gguf_reader_value(reader, gguf_key))
+        if value is None:
             logger.warning(
                 "Missing required vision config field '%s' in mmproj.gguf",
                 gguf_key,
             )
             return None
         # Extract scalar value from GGUF field and convert to target type
-        config_params[param_name] = dtype(field.parts[-1])
+        try:
+            config_params[param_name] = dtype(value)
+        except (TypeError, ValueError) as e:
+            logger.warning(
+                "Invalid vision config field '%s' in mmproj.gguf: %s",
+                gguf_key,
+                e,
+            )
+            return None
 
     # Apply model-specific parameters based on projector type
     if projector_type == VisionProjectorType.GEMMA3:
@@ -334,6 +663,188 @@ def maybe_patch_hf_config_from_gguf(
     if has_lm_head is not None:
         text_config = hf_config.get_text_config()
         text_config.update({"tie_word_embeddings": not has_lm_head})
+
+    if check_gguf_file(model):
+        try:
+            reader = gguf.GGUFReader(str(model))
+        except Exception as e:
+            logger.debug("Failed to inspect GGUF metadata for %s: %s", model, e)
+        else:
+            architecture = _gguf_reader_value(reader, "general.architecture")
+            if architecture == "qwen35":
+                text_config = hf_config.get_text_config()
+                is_multimodal = (
+                    detect_gguf_multimodal(model) is not None
+                    or getattr(hf_config, "vision_config", None) is not None
+                )
+                _update_config(
+                    hf_config,
+                    {
+                        "model_type": "qwen3_5",
+                        "architectures": [
+                            "Qwen3_5ForConditionalGeneration"
+                            if is_multimodal
+                            else "Qwen3_5ForCausalLM"
+                        ],
+                    },
+                )
+                if text_config is not hf_config:
+                    _update_config(
+                        text_config,
+                        {
+                            "model_type": "qwen3_5_text",
+                        },
+                    )
+                _update_config(
+                    text_config,
+                    _qwen35_text_config_updates_from_gguf(reader, "qwen35"),
+                )
+                nextn_layers = _gguf_reader_value(
+                    reader, "qwen35.nextn_predict_layers"
+                )
+                block_count = _gguf_reader_value(reader, "qwen35.block_count")
+                if nextn_layers:
+                    updates: dict[str, Any] = {
+                        "mtp_num_hidden_layers": int(nextn_layers),
+                        "num_nextn_predict_layers": int(nextn_layers),
+                    }
+                    if block_count is not None:
+                        updates["num_hidden_layers"] = max(
+                            int(block_count) - int(nextn_layers),
+                            0,
+                        )
+                    _update_config(text_config, updates)
+            elif architecture == "qwen35moe":
+                text_config = hf_config.get_text_config()
+                is_multimodal = (
+                    detect_gguf_multimodal(model) is not None
+                    or getattr(hf_config, "vision_config", None) is not None
+                )
+                _update_config(
+                    hf_config,
+                    {
+                        "model_type": "qwen3_5_moe",
+                        "architectures": [
+                            "Qwen3_5MoeForConditionalGeneration"
+                            if is_multimodal
+                            else "Qwen3_5MoeForCausalLM"
+                        ],
+                    },
+                )
+                if text_config is not hf_config:
+                    _update_config(
+                        text_config,
+                        {
+                            "model_type": "qwen3_5_moe_text",
+                        },
+                    )
+                _update_config(
+                    text_config,
+                    _qwen35_text_config_updates_from_gguf(reader, "qwen35moe"),
+                )
+                nextn_layers = _gguf_reader_value(
+                    reader, "qwen35moe.nextn_predict_layers"
+                )
+                block_count = _gguf_reader_value(reader, "qwen35moe.block_count")
+                if nextn_layers:
+                    updates: dict[str, Any] = {
+                        "mtp_num_hidden_layers": int(nextn_layers),
+                        "num_nextn_predict_layers": int(nextn_layers),
+                    }
+                    if block_count is not None:
+                        updates["num_hidden_layers"] = max(
+                            int(block_count) - int(nextn_layers),
+                            0,
+                        )
+                    _update_config(text_config, updates)
+            elif architecture == "gemma4-assistant":
+                prefix = "gemma4-assistant"
+                text_config = hf_config.get_text_config()
+                nextn_layers = _gguf_reader_value(
+                    reader, f"{prefix}.nextn_predict_layers"
+                )
+                block_count = _gguf_reader_value(reader, f"{prefix}.block_count")
+                head_count_kv = _gguf_reader_value(
+                    reader, f"{prefix}.attention.head_count_kv"
+                )
+                layer_types = None
+                sliding_pattern = _gguf_reader_value(
+                    reader, f"{prefix}.attention.sliding_window_pattern"
+                )
+                if sliding_pattern:
+                    layer_types = [
+                        "sliding_attention" if is_sliding else "full_attention"
+                        for is_sliding in sliding_pattern
+                    ]
+                rope_theta = _gguf_reader_value(reader, f"{prefix}.rope.freq_base")
+                rope_theta_swa = _gguf_reader_value(
+                    reader, f"{prefix}.rope.freq_base_swa"
+                )
+
+                _update_config(
+                    hf_config,
+                    {
+                        "model_type": "gemma4_assistant",
+                        "architectures": ["Gemma4MTPModel"],
+                        "backbone_hidden_size": _gguf_reader_value(
+                            reader, f"{prefix}.embedding_length_out"
+                        ),
+                        "n_predict": 1,
+                    },
+                )
+                _update_config(
+                    text_config,
+                    {
+                        "model_type": "gemma4_assistant",
+                        "hidden_size": _gguf_reader_value(
+                            reader, f"{prefix}.embedding_length"
+                        ),
+                        "backbone_hidden_size": _gguf_reader_value(
+                            reader, f"{prefix}.embedding_length_out"
+                        ),
+                        "num_hidden_layers": block_count,
+                        "num_nextn_predict_layers": nextn_layers,
+                        "mtp_num_hidden_layers": nextn_layers,
+                        "intermediate_size": _gguf_reader_value(
+                            reader, f"{prefix}.feed_forward_length"
+                        ),
+                        "num_attention_heads": _gguf_reader_value(
+                            reader, f"{prefix}.attention.head_count"
+                        ),
+                        "num_key_value_heads": _gguf_sequence_edge(
+                            head_count_kv,
+                            first=True,
+                        ),
+                        "num_global_key_value_heads": _gguf_sequence_edge(
+                            head_count_kv,
+                            first=False,
+                        ),
+                        "head_dim": _gguf_reader_value(
+                            reader, f"{prefix}.attention.key_length_swa"
+                        ),
+                        "global_head_dim": _gguf_reader_value(
+                            reader, f"{prefix}.attention.key_length"
+                        ),
+                        "sliding_window": _gguf_reader_value(
+                            reader, f"{prefix}.attention.sliding_window"
+                        ),
+                        "layer_types": layer_types,
+                        "attention_k_eq_v": True,
+                        "attention_bias": False,
+                        "num_kv_shared_layers": 0,
+                        "rope_local_base_freq": rope_theta_swa,
+                        "rope_parameters": {
+                            "sliding_attention": {
+                                "rope_type": "default",
+                                "rope_theta": rope_theta_swa,
+                            },
+                            "full_attention": {
+                                "rope_type": "default",
+                                "rope_theta": rope_theta,
+                            },
+                        },
+                    },
+                )
 
     # Patch multimodal config if mmproj.gguf exists
     mmproj_path = detect_gguf_multimodal(model)

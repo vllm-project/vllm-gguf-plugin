@@ -18,15 +18,85 @@ def _clone_loaded_weight(loaded_weight: torch.Tensor) -> torch.Tensor:
     return loaded_weight.detach().clone()
 
 
+def _split_gguf_tuple_shard_weight(
+    layer: torch.nn.Module,
+    param,
+    loaded_weight: torch.Tensor,
+    loaded_shard_id: tuple[int, ...],
+) -> tuple[torch.Tensor, ...] | None:
+    output_dim = getattr(param, "output_dim", None)
+    output_sizes = getattr(layer, "output_sizes", None)
+    if output_dim is None or output_sizes is None:
+        return None
+
+    shard_sizes = [output_sizes[idx] for idx in loaded_shard_id]
+    packed_dim = getattr(param, "packed_dim", None)
+    packed_factor = getattr(param, "packed_factor", 1)
+    if packed_dim == output_dim:
+        if any(size % packed_factor != 0 for size in shard_sizes):
+            return None
+        shard_sizes = [size // packed_factor for size in shard_sizes]
+
+    if loaded_weight.size(output_dim) != sum(shard_sizes):
+        return None
+    return torch.split(loaded_weight, shard_sizes, dim=output_dim)
+
+
+def _call_gguf_base_loader(
+    base_loader,
+    param,
+    loaded_weight: torch.Tensor,
+    loaded_shard_id=None,
+):
+    if loaded_shard_id is None:
+        base_loader(param, loaded_weight)
+    else:
+        base_loader(param, loaded_weight, loaded_shard_id)
+
+
 def _resolve_gguf_weight_loader(
     layer: torch.nn.Module,
     fallback_weight_loader=None,
 ):
-    return (
+    base_loader = (
         layer.weight_loader_v2
         if hasattr(layer, "weight_loader_v2")
         else fallback_weight_loader
     )
+    if base_loader is None:
+        return fallback_weight_loader
+
+    def _gguf_weight_loader_v2(param, loaded_weight, loaded_shard_id=None):
+        if not isinstance(loaded_shard_id, tuple):
+            _call_gguf_base_loader(
+                base_loader, param, loaded_weight, loaded_shard_id
+            )
+            return
+
+        if hasattr(layer, "validate_shard_id"):
+            layer.validate_shard_id(loaded_shard_id)
+
+        if hasattr(param, "shard_weight_type"):
+            for shard_id in loaded_shard_id:
+                _call_gguf_base_loader(base_loader, param, loaded_weight, shard_id)
+            return
+
+        if hasattr(param, "data_container"):
+            weight_shards = _split_gguf_tuple_shard_weight(
+                layer, param, loaded_weight, loaded_shard_id
+            )
+            if weight_shards is not None:
+                for shard_id, weight_shard in zip(
+                    loaded_shard_id, weight_shards, strict=True
+                ):
+                    _call_gguf_base_loader(
+                        base_loader, param, weight_shard, shard_id
+                    )
+                return
+
+        _call_gguf_base_loader(base_loader, param, loaded_weight, loaded_shard_id)
+
+    return _gguf_weight_loader_v2
 
 
 def _resolve_gguf_weight_type_loader(
@@ -178,11 +248,15 @@ def _gguf_moe_weight_loader(
     base_weight_loader,
     param: Parameter | UninitializedParameter,
     loaded_weight: torch.Tensor,
-    weight_name: str,
-    shard_id: str,
-    expert_id: int,
+    weight_name: str | None = None,
+    shard_id: str | None = None,
+    expert_id: int | None = None,
     return_success: bool = False,
 ) -> bool | None:
+    if shard_id is None:
+        _store_gguf_loaded_weight(param, loaded_weight)
+        return True if return_success else None
+
     _materialize_gguf_moe_param(layer, param, loaded_weight, shard_id)
     return base_weight_loader(
         param,
@@ -197,9 +271,9 @@ def _gguf_moe_weight_loader(
 def _gguf_moe_weight_type_loader(
     param: Parameter | UninitializedParameter,
     loaded_weight: torch.Tensor,
-    weight_name: str,
-    shard_id: str,
-    expert_id: int,
+    weight_name: str | None = None,
+    shard_id: str | None = None,
+    expert_id: int | None = None,
     return_success: bool = False,
 ) -> bool | None:
     del weight_name, expert_id
