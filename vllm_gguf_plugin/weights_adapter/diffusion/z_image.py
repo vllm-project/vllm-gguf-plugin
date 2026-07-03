@@ -33,6 +33,8 @@ class ZImageDiffusionGGUFAdapter(DiffusionGGUFAdapter):
             model_type and model_type.lower() in {"z_image", "zimage", "z-image"}
         )
 
+    unquantized_modules = ("model", "lm_head")
+
     gguf_to_hf_mapper = WeightsMapper(
         orig_to_new_substr=Z_IMAGE_KEYS_RENAME_DICT,
     )

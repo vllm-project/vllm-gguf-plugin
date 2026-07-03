@@ -25,6 +25,10 @@ def test_z_image_adapter_selected_for_z_image_family():
     assert isinstance(adapter, ZImageDiffusionGGUFAdapter)
 
 
+def test_z_image_adapter_declares_hf_text_encoder_modules_unquantized():
+    assert ZImageDiffusionGGUFAdapter.unquantized_modules == ("model", "lm_head")
+
+
 def test_z_image_adapter_matches_model_type_variants():
     for model_type in ("z_image", "zimage", "z-image"):
         assert ZImageDiffusionGGUFAdapter.is_compatible(

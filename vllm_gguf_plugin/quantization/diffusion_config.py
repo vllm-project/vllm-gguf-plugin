@@ -39,11 +39,15 @@ class DiffusionGGUFLinearMethod(GGUFLinearMethod):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        shard_id = layer.qweight.shard_id
+        shard_id = getattr(layer.qweight, "shard_id", [])
         if shard_id:
             shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
             qweight = layer.qweight
-            fallback_wtype = layer.qweight_type.weight_type
+            fallback_wtype = getattr(layer.qweight_type, "weight_type", None)
+            if fallback_wtype is None:
+                fallback_wtype = next(
+                    iter(layer.qweight_type.shard_weight_type.values())
+                )
             shard_weight_types = [
                 layer.qweight_type.shard_weight_type.get(idx, fallback_wtype)
                 for idx in shard_id
@@ -89,6 +93,8 @@ class DiffusionGGUFConfig(GGUFConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
         if isinstance(layer, LinearBase):
+            if any(module_name in prefix for module_name in self.unquantized_modules):
+                return UnquantizedLinearMethod()
             if is_layer_skipped_gguf(
                 prefix, self.unquantized_modules, self.packed_modules_mapping
             ):

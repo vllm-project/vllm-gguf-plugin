@@ -30,6 +30,26 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _extend_unquantized_modules(
+    quant_config: object,
+    module_names: tuple[str, ...],
+) -> None:
+    if not module_names:
+        return
+
+    if isinstance(quant_config, dict):
+        unquantized_modules = quant_config.setdefault("unquantized_modules", [])
+    else:
+        unquantized_modules = getattr(quant_config, "unquantized_modules", None)
+        if unquantized_modules is None:
+            unquantized_modules = []
+            setattr(quant_config, "unquantized_modules", unquantized_modules)
+
+    for module_name in module_names:
+        if module_name not in unquantized_modules:
+            unquantized_modules.append(module_name)
+
+
 def _patch_diffusers_loader() -> None:
     """Patch ``DiffusersPipelineLoader.load_weights`` with GGUF support.
 
@@ -129,7 +149,23 @@ def _patch_diffusers_loader() -> None:
 
         import torch
 
+        from . import get_diffusion_gguf_adapter
+
         target_device = torch.device(load_device)
+        gguf_model = get_gguf_model_from_config(self.quant_config)
+        if not gguf_model:
+            raise ValueError("GGUF quantization requires gguf_model")
+        model_type = (
+            self.od_config.tf_model_config.get("model_type")
+            if self.od_config.tf_model_config is not None
+            else None
+        )
+        adapter = get_diffusion_gguf_adapter(
+            gguf_model, self.od_config.model_class_name, model_type
+        )
+        _extend_unquantized_modules(
+            self.quant_config, getattr(adapter, "unquantized_modules", ())
+        )
 
         # Handle CPU offload — same logic as original load_model
         offload_after_quant = False

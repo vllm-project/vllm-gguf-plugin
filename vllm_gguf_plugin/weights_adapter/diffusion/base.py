@@ -28,6 +28,9 @@ class DiffusionGGUFAdapter(ABC):
     ``OmniDiffusionConfig``.
     """
 
+    source_prefix = "transformer."
+    source_subfolder = "transformer"
+
     def __init__(self, gguf_file: str) -> None:
         self.gguf_file = gguf_file
 

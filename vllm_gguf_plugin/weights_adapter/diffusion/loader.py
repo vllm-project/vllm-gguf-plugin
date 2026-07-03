@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GGUF loader for diffusion models.
 
-Provides the complete GGUF weight-loading path (resolve, iterate, load, HF
-fallback) so that the calling framework (e.g. vllm-omni) only needs thin glue.
-Zero dependency on vllm-omni.
+Provides the complete GGUF weight-loading path (resolve, iterate, load) so
+that the calling framework (e.g. vllm-omni) only needs thin glue. Zero
+dependency on vllm-omni.
 """
 
 from __future__ import annotations
@@ -13,11 +13,21 @@ import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
+from gguf import GGMLQuantizationType as WeightType, dequantize
+import gguf
 import torch
 from huggingface_hub import hf_hub_download
 from torch import nn
 
+from ... import ops
+from ...quantization.utils import UNQUANTIZED_TYPES
 from ...weight_utils import download_gguf
+
+
+def get_diffusion_gguf_adapter(*args, **kwargs):
+    from . import get_diffusion_gguf_adapter as _get_adapter
+
+    return _get_adapter(*args, **kwargs)
 
 
 @dataclass
@@ -88,10 +98,10 @@ def resolve_gguf_model_path(
     )
 
 
-def _is_transformer_source(source: DiffusionWeightSource) -> bool:
-    if source.subfolder == "transformer":
-        return True
-    return source.prefix.startswith("transformer.")
+def _is_gguf_source(source: DiffusionWeightSource, adapter: object) -> bool:
+    source_prefix = getattr(adapter, "source_prefix", "transformer.")
+    source_subfolder = getattr(adapter, "source_subfolder", "transformer")
+    return source.prefix == source_prefix or source.subfolder == source_subfolder
 
 
 def _get_loadable_names(model: nn.Module) -> set[str]:
@@ -103,6 +113,82 @@ def _get_loadable_names(model: nn.Module) -> set[str]:
     return {name for name, _ in model.named_parameters()} | {
         name for name, _ in model.named_buffers()
     }
+
+
+_STACKED_LOAD_MAPPINGS = (
+    (".to_qkv.", ".to_q."),
+    (".to_qkv.", ".to_k."),
+    (".to_qkv.", ".to_v."),
+    (".w13", ".w1"),
+    (".w13", ".w3"),
+)
+
+
+def _mapped_loadable_name(name: str) -> str:
+    for param_name, weight_name in _STACKED_LOAD_MAPPINGS:
+        if weight_name in name:
+            return name.replace(weight_name, param_name)
+    return name
+
+
+def _is_loadable_weight_name(name: str, loadable_names: set[str]) -> bool:
+    return name in loadable_names or _mapped_loadable_name(name) in loadable_names
+
+
+def _dense_weight_from_gguf_qweight(
+    qweight: torch.Tensor,
+    qweight_type: int,
+) -> torch.Tensor:
+    qtype = WeightType(qweight_type)
+    if qtype in UNQUANTIZED_TYPES:
+        return qweight
+
+    if not qweight.is_cuda:
+        weight = dequantize(qweight.detach().cpu().numpy(), qtype)
+        return torch.from_numpy(weight).to(dtype=torch.float32)
+
+    block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
+    shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
+    return ops.ggml_dequantize(qweight, int(qtype), *shape, torch.float32)
+
+
+def _gguf_weights_for_loadable_names(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    loadable_names: set[str],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    qweight_types: dict[str, int] = {}
+
+    for name, tensor in weights:
+        if _is_loadable_weight_name(name, loadable_names):
+            yield name, tensor
+            continue
+
+        if name.endswith(".qweight_type"):
+            qweight_types[name[: -len(".qweight_type")]] = int(tensor.item())
+            continue
+
+        if not name.endswith(".qweight"):
+            continue
+
+        base_name = name[: -len(".qweight")]
+        weight_name = f"{base_name}.weight"
+        if not _is_loadable_weight_name(weight_name, loadable_names):
+            continue
+        if base_name not in qweight_types:
+            raise ValueError(f"Missing GGUF qweight_type for {name}")
+
+        yield weight_name, _dense_weight_from_gguf_qweight(
+            tensor, qweight_types[base_name]
+        )
+
+
+def _hf_weights_for_loadable_names(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    loadable_names: set[str],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    for name, tensor in weights:
+        if name in loadable_names:
+            yield name, tensor
 
 
 def load_diffusion_gguf_weights(
@@ -118,14 +204,13 @@ def load_diffusion_gguf_weights(
     download_dir: str | None = None,
     ignore_patterns: str | list[str] | None = None,
 ) -> set[str]:
-    """Load diffusion-model weights from a GGUF file with HF fallback.
+    """Load diffusion-model weights from a GGUF file.
 
     For each source:
-      - **Transformer sources**: load from GGUF first. If some weights are
-        still missing (partial quantization), fall back to HF safetensors
-        for only those missing weights.
-      - **Non-transformer sources** (text encoder, VAE, etc.): load
-        entirely from HF.
+      - The adapter-selected GGUF source loads exclusively from GGUF.
+        GGUF qweights may be restored to dense tensors when the host module
+        intentionally keeps that parameter unquantized.
+      - All other sources (text encoder, VAE, etc.) load exclusively from HF.
 
     Args:
         gguf_model: GGUF model reference (local path, ``repo/file.gguf``, or
@@ -135,7 +220,7 @@ def load_diffusion_gguf_weights(
         model_type: Model type string from config (e.g. ``"qwen_image"``).
         sources: Weight sources to load.
         hf_weights_fn: Callback that returns an HF weight iterator for a
-            given source (used for non-transformer components and GGUF fallback).
+            given non-transformer source.
         revision: Optional HuggingFace revision.
         download_dir: Optional download cache directory.
         ignore_patterns: Optional patterns to ignore during download.
@@ -143,42 +228,38 @@ def load_diffusion_gguf_weights(
     Returns:
         Set of loaded weight names.
     """
-    from . import get_diffusion_gguf_adapter
-
     gguf_file = resolve_gguf_model_path(
-        gguf_model, revision, download_dir, ignore_patterns
+        gguf_model=gguf_model,
+        revision=revision,
+        download_dir=download_dir,
+        ignore_patterns=ignore_patterns,
     )
     adapter = get_diffusion_gguf_adapter(gguf_file, model_class_name, model_type)
     loaded: set[str] = set()
     loadable_names: set[str] | None = None
 
     for source in sources:
-        if _is_transformer_source(source):
-            # Load transformer from GGUF first
+        if _is_gguf_source(source, adapter):
+            loadable_names = loadable_names or _get_loadable_names(model)
             gguf_iter = (
                 (source.prefix + name, tensor)
                 for name, tensor in adapter.weights_iterator()
             )
-            loaded |= model.load_weights(gguf_iter)
-
-            # GGUF checkpoints can be transformer-only or partially quantized.
-            # Only fall back to HF if this source still has missing loadable weights.
-            loadable_names = loadable_names or _get_loadable_names(model)
-            has_missing = any(
-                name.startswith(source.prefix) and name not in loaded
-                for name in loadable_names
+            loaded |= model.load_weights(
+                _gguf_weights_for_loadable_names(gguf_iter, loadable_names)
             )
-            if not has_missing:
-                continue
-
-            hf_iter = (
-                (name, tensor)
-                for name, tensor in hf_weights_fn(source)
-                if name in loadable_names and name not in loaded
-            )
-            loaded |= model.load_weights(hf_iter)
         else:
-            # Non-transformer components always load from HF
-            loaded |= model.load_weights(hf_weights_fn(source))
+            # Non-transformer components always load from HF.
+            loadable_names = loadable_names or _get_loadable_names(model)
+            loaded |= model.load_weights(
+                _hf_weights_for_loadable_names(
+                    (
+                        (name, tensor)
+                        for name, tensor in hf_weights_fn(source)
+                        if not source.prefix or name.startswith(source.prefix)
+                    ),
+                    loadable_names,
+                )
+            )
 
     return loaded
