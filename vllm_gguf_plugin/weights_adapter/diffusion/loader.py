@@ -115,24 +115,8 @@ def _get_loadable_names(model: nn.Module) -> set[str]:
     }
 
 
-_STACKED_LOAD_MAPPINGS = (
-    (".to_qkv.", ".to_q."),
-    (".to_qkv.", ".to_k."),
-    (".to_qkv.", ".to_v."),
-    (".w13", ".w1"),
-    (".w13", ".w3"),
-)
-
-
-def _mapped_loadable_name(name: str) -> str:
-    for param_name, weight_name in _STACKED_LOAD_MAPPINGS:
-        if weight_name in name:
-            return name.replace(weight_name, param_name)
-    return name
-
-
 def _is_loadable_weight_name(name: str, loadable_names: set[str]) -> bool:
-    return name in loadable_names or _mapped_loadable_name(name) in loadable_names
+    return name in loadable_names
 
 
 def _dense_weight_from_gguf_qweight(
@@ -159,21 +143,24 @@ def _gguf_weights_for_loadable_names(
     qweight_types: dict[str, int] = {}
 
     for name, tensor in weights:
-        if _is_loadable_weight_name(name, loadable_names):
-            yield name, tensor
-            continue
-
         if name.endswith(".qweight_type"):
-            qweight_types[name[: -len(".qweight_type")]] = int(tensor.item())
+            base_name = name[: -len(".qweight_type")]
+            qweight_types[base_name] = int(tensor.item())
+            if f"{base_name}.weight" not in loadable_names:
+                yield name, tensor
             continue
 
         if not name.endswith(".qweight"):
+            if _is_loadable_weight_name(name, loadable_names):
+                yield name, tensor
             continue
 
         base_name = name[: -len(".qweight")]
         weight_name = f"{base_name}.weight"
-        if not _is_loadable_weight_name(weight_name, loadable_names):
+        if weight_name not in loadable_names:
+            yield name, tensor
             continue
+
         if base_name not in qweight_types:
             raise ValueError(f"Missing GGUF qweight_type for {name}")
 
