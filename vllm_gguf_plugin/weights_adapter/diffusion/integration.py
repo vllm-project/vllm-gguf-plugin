@@ -44,7 +44,7 @@ def _extend_unquantized_modules(
         unquantized_modules = getattr(quant_config, "unquantized_modules", None)
         if unquantized_modules is None:
             unquantized_modules = []
-            setattr(quant_config, "unquantized_modules", unquantized_modules)
+            quant_config.unquantized_modules = unquantized_modules
 
     for module_name in module_names:
         if module_name not in unquantized_modules:
@@ -64,10 +64,9 @@ def _patch_diffusers_loader() -> None:
         logger.debug("vllm-omni not installed, skipping diffusion GGUF patch")
         return
 
-    if (
-        getattr(DiffusersPipelineLoader.load_weights, "_gguf_plugin_patched", False)
-        and getattr(DiffusersPipelineLoader.load_model, "_gguf_plugin_patched", False)
-    ):
+    if getattr(
+        DiffusersPipelineLoader.load_weights, "_gguf_plugin_patched", False
+    ) and getattr(DiffusersPipelineLoader.load_model, "_gguf_plugin_patched", False):
         return
 
     _original_load_weights = DiffusersPipelineLoader.load_weights

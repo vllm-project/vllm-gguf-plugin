@@ -13,9 +13,10 @@ import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from gguf import GGMLQuantizationType as WeightType, dequantize
 import gguf
 import torch
+from gguf import GGMLQuantizationType as WeightType
+from gguf import dequantize
 from huggingface_hub import hf_hub_download
 from torch import nn
 
@@ -161,8 +162,9 @@ def _gguf_weights_for_loadable_names(
         if base_name not in qweight_types:
             raise ValueError(f"Missing GGUF qweight_type for {name}")
 
-        yield weight_name, _dense_weight_from_gguf_qweight(
-            tensor, qweight_types[base_name]
+        yield (
+            weight_name,
+            _dense_weight_from_gguf_qweight(tensor, qweight_types[base_name]),
         )
 
 

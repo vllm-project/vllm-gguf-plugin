@@ -60,9 +60,7 @@ def _image_cosine_similarity(hf_image, gguf_image) -> float:
     gguf_tensor = torch.as_tensor(
         np.array(gguf_image.convert("RGB"), copy=True), dtype=torch.float32
     ).flatten()
-    return torch.nn.functional.cosine_similarity(
-        hf_tensor, gguf_tensor, dim=0
-    ).item()
+    return torch.nn.functional.cosine_similarity(hf_tensor, gguf_tensor, dim=0).item()
 
 
 @dataclass
@@ -84,7 +82,7 @@ class _GpuMemoryMonitor:
         self._baseline_bytes = 0
         self._peak_bytes = 0
 
-    def __enter__(self) -> "_GpuMemoryMonitor":
+    def __enter__(self) -> _GpuMemoryMonitor:
         pynvml.nvmlInit()
         device_index = torch.cuda.current_device() if torch.cuda.is_available() else 0
         self._handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
@@ -227,6 +225,5 @@ def test_single_stage_diffusion_gguf(
     reduction = (mem_bf16 - mem_gguf) / mem_bf16 * 100
     print(f"VRAM reduction: {reduction:.1f}%")
     assert mem_gguf < mem_bf16, (
-        f"GGUF ({mem_gguf:.2f} GiB) should use less VRAM than "
-        f"BF16 ({mem_bf16:.2f} GiB)"
-)
+        f"GGUF ({mem_gguf:.2f} GiB) should use less VRAM than BF16 ({mem_bf16:.2f} GiB)"
+    )

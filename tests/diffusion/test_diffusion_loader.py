@@ -6,11 +6,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from gguf import GGMLQuantizationType as WeightType
-
 import pytest
 import torch
 import torch.nn as nn
+from gguf import GGMLQuantizationType as WeightType
 
 from vllm_gguf_plugin.weights_adapter.diffusion import (
     DiffusionWeightSource,
@@ -239,7 +238,6 @@ def test_load_gguf_restores_plain_weight_from_gguf_qweight(
     assert "transformer.weight" in loaded
     assert torch.allclose(model.transformer.weight, torch.full((2, 2), 3.0))
     assert hf_calls == []
-
 
 
 def test_load_gguf_source_is_selected_by_adapter(monkeypatch: pytest.MonkeyPatch):
