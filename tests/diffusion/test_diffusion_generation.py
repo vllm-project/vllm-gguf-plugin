@@ -14,13 +14,9 @@ Usage:
 from __future__ import annotations
 
 import gc
-import threading
-from dataclasses import dataclass
 
 import pytest
 import torch
-
-pynvml = pytest.importorskip("pynvml")
 
 vllm_omni = pytest.importorskip("vllm_omni")
 
@@ -29,66 +25,22 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams  # noqa: E402
 from vllm_omni.outputs import OmniRequestOutput  # noqa: E402
 from vllm_omni.platforms import current_omni_platform  # noqa: E402
 
-GGUF_REPO = "/mnt/data0/LLM"
-GGUF_FILENAME = "z-image-turbo-Q4_0.gguf"
-GGUF_MODEL_REF = f"{GGUF_REPO}/{GGUF_FILENAME}"
-HF_MODEL = "/mnt/data0/LLM/Z-Image-Turbo"
+
+class DiffusionGGUFTestConfig:
+    gguf_model: str
+    hf_model: str
 
 
-@dataclass
-class _GpuMemoryStats:
-    baseline_gib: float
-    peak_used_gib: float
-
-    @property
-    def peak_delta_gib(self) -> float:
-        return max(0.0, self.peak_used_gib - self.baseline_gib)
+Z_IMAGE_CONFIG = DiffusionGGUFTestConfig(
+    hf_model="Tongyi-MAI/Z-Image-Turbo",
+    gguf_model="unsloth/Z-Image-Turbo-GGUF:Q4_0",
+)
 
 
-class _GpuMemoryMonitor:
-    def __init__(self, interval_s: float = 0.05) -> None:
-        self.interval_s = interval_s
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._handle = None
-        self._baseline_bytes = 0
-        self._peak_bytes = 0
-
-    def __enter__(self) -> "_GpuMemoryMonitor":
-        pynvml.nvmlInit()
-        device_index = torch.cuda.current_device() if torch.cuda.is_available() else 0
-        self._handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
-        used = pynvml.nvmlDeviceGetMemoryInfo(self._handle).used
-        self._baseline_bytes = used
-        self._peak_bytes = used
-        self._thread = threading.Thread(target=self._sample_loop, daemon=True)
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self._sample_once()
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=1.0)
-        self._sample_once()
-        pynvml.nvmlShutdown()
-
-    def _sample_loop(self) -> None:
-        while not self._stop.wait(self.interval_s):
-            self._sample_once()
-
-    def _sample_once(self) -> None:
-        if self._handle is None:
-            return
-        used = pynvml.nvmlDeviceGetMemoryInfo(self._handle).used
-        self._peak_bytes = max(self._peak_bytes, used)
-
-    def stats(self) -> _GpuMemoryStats:
-        gib = 1024**3
-        return _GpuMemoryStats(
-            baseline_gib=self._baseline_bytes / gib,
-            peak_used_gib=self._peak_bytes / gib,
-        )
+FLUX_CONFIG = DiffusionGGUFTestConfig(
+    hf_model="black-forest-labs/FLUX.2-klein-9B",
+    gguf_model="unsloth/FLUX.2-klein-4B-GGUF:Q4_0",
+)
 
 
 def _generate_single_stage_image(
@@ -105,22 +57,24 @@ def _generate_single_stage_image(
     """
     omni_kwargs = dict(extra_kwargs)
 
-    with _GpuMemoryMonitor() as memory_monitor:
-        omni = Omni(model, **omni_kwargs)
-        generator = torch.Generator(
-            device=current_omni_platform.device_type,
-        ).manual_seed(seed)
-        outputs = omni.generate(
-            "a photo of a cat sitting on a laptop keyboard",
-            OmniDiffusionSamplingParams(
-                height=height,
-                width=width,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=0.0,
-                generator=generator,
-            ),
-        )
-    peak_mem = memory_monitor.stats().peak_delta_gib
+    omni = Omni(model, **omni_kwargs)
+    torch.accelerator.reset_peak_memory_stats()
+
+    generator = torch.Generator(
+        device=current_omni_platform.device_type,
+    ).manual_seed(seed)
+    outputs = omni.generate(
+        "a photo of a cat sitting on a laptop keyboard",
+        OmniDiffusionSamplingParams(
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=0.0,
+            generator=generator,
+        ),
+    )
+
+    peak_mem = torch.accelerator.max_memory_allocated() / (1024**3)
 
     first_output = outputs[0]
     assert first_output.final_output_type == "image"
@@ -150,21 +104,24 @@ def _generate_single_stage_image(
 @pytest.mark.full_model
 @pytest.mark.diffusion
 @pytest.mark.slow
-def test_single_stage_zimage_gguf(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "model", [Z_IMAGE_CONFIG, FLUX_CONFIG], ids=["Z-Image-Turbo", "FLUX.2-klein"]
+)
+def test_single_stage_zimage_gguf(model: DiffusionGGUFTestConfig, monkeypatch: pytest.MonkeyPatch) -> None:
     """Z-Image-Turbo GGUF generates valid images and uses less memory than BF16."""
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     # BF16 baseline
     hf_images, mem_bf16 = _generate_single_stage_image(
-        model=HF_MODEL,
+        model=model.hf_model,
     )
 
     # GGUF
     images, mem_gguf = _generate_single_stage_image(
-        model=HF_MODEL,
+        model=model.hf_model,
         diffusion_quantization_config={
             "method": "gguf",
-            "gguf_model": GGUF_MODEL_REF,
+            "gguf_model": model.gguf_model,
         },
     )
 
@@ -182,4 +139,4 @@ def test_single_stage_zimage_gguf(monkeypatch: pytest.MonkeyPatch) -> None:
     assert mem_gguf < mem_bf16, (
         f"GGUF ({mem_gguf:.2f} GiB) should use less VRAM than "
         f"BF16 ({mem_bf16:.2f} GiB)"
-    )
+)
