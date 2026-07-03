@@ -21,7 +21,7 @@ from torch import nn
 
 from ... import ops
 from ...quantization.utils import UNQUANTIZED_TYPES
-from ...weight_utils import download_gguf
+from ...weight_utils import download_gguf, resolve_local_gguf
 
 
 def get_diffusion_gguf_adapter(*args, **kwargs):
@@ -69,7 +69,7 @@ def resolve_gguf_model_path(
     Accepts three formats:
       1. Local file path (``/path/to/model.gguf``)
       2. HuggingFace file (``repo_id/filename.gguf``)
-      3. HuggingFace quant-type selector (``repo_id:Q4_K_M``)
+      3. Quant-type selector (``repo_id:Q4_K_M`` or ``/local/dir:Q4_K_M``)
     """
     if os.path.isfile(gguf_model):
         return gguf_model
@@ -82,9 +82,11 @@ def resolve_gguf_model_path(
             revision=revision,
             cache_dir=download_dir,
         )
-    # repo_id:quant_type
+    # repo_id:quant_type or local_dir:quant_type
     if "/" in gguf_model and ":" in gguf_model:
         repo_id, quant_type = gguf_model.rsplit(":", 1)
+        if os.path.isdir(repo_id):
+            return resolve_local_gguf(repo_id, quant_type)
         return download_gguf(
             repo_id,
             quant_type,

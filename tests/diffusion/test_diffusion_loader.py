@@ -76,6 +76,12 @@ def test_resolve_returns_local_file(tmp_path):
     assert resolve_gguf_model_path(str(gguf_file)) == str(gguf_file)
 
 
+def test_resolve_returns_local_quant_selector(tmp_path):
+    gguf_file = tmp_path / "model-Q4_0.gguf"
+    gguf_file.write_bytes(b"gguf")
+    assert resolve_gguf_model_path(f"{tmp_path}:Q4_0") == str(gguf_file)
+
+
 def test_resolve_raises_on_unrecognized_format():
     with pytest.raises(ValueError, match="Unrecognized GGUF reference"):
         resolve_gguf_model_path("not-a-valid-ref")
