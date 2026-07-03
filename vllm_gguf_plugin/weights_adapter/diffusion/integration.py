@@ -22,6 +22,7 @@ from .loader import (
     get_gguf_model_from_config,
     is_gguf_quant_config,
     load_diffusion_gguf_weights,
+    resolve_gguf_model_path,
 )
 
 if TYPE_CHECKING:
@@ -160,11 +161,17 @@ def _patch_diffusers_loader() -> None:
             if self.od_config.tf_model_config is not None
             else None
         )
+        gguf_file = resolve_gguf_model_path(
+            gguf_model=gguf_model,
+            revision=self.od_config.revision,
+            download_dir=self.load_config.download_dir,
+            ignore_patterns=self.load_config.ignore_patterns,
+        )
         adapter = get_diffusion_gguf_adapter(
-            gguf_model, self.od_config.model_class_name, model_type
+            gguf_file, self.od_config.model_class_name, model_type
         )
         _extend_unquantized_modules(
-            self.quant_config, getattr(adapter, "unquantized_modules", ())
+            self.quant_config, adapter.unquantized_module_names()
         )
 
         # Handle CPU offload — same logic as original load_model

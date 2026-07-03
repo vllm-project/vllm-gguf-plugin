@@ -18,6 +18,7 @@ import threading
 from dataclasses import dataclass
 from typing import NamedTuple
 
+import numpy as np
 import pytest
 import torch
 
@@ -35,20 +36,33 @@ class DiffusionGGUFTestConfig(NamedTuple):
     artifact_prefix: str
     gguf_model: str
     hf_model: str
+    min_cosine_similarity: float = 0.95
 
 
 Z_IMAGE_CONFIG = DiffusionGGUFTestConfig(
     artifact_prefix="zimage",
-    hf_model="/mnt/data0/LLM/Z-Image-Turbo",
-    gguf_model="/mnt/data0/LLM/Z-Image-Turbo-GGUF:Q4_0",
+    hf_model="Tongyi-MAI/Z-Image-Turbo",
+    gguf_model="unsloth/Z-Image-Turbo-GGUF:Q4_0",
 )
 
 
 FLUX_CONFIG = DiffusionGGUFTestConfig(
     artifact_prefix="flux2_klein",
-    hf_model="/mnt/data0/LLM/FLUX.2-klein-4B",
-    gguf_model="/mnt/data0/LLM/FLUX.2-klein-4B-GGUF:Q8_0",
+    hf_model="black-forest-labs/FLUX.2-klein-4B",
+    gguf_model="unsloth/FLUX.2-klein-4B-GGUF:Q8_0",
 )
+
+
+def _image_cosine_similarity(hf_image, gguf_image) -> float:
+    hf_tensor = torch.as_tensor(
+        np.array(hf_image.convert("RGB"), copy=True), dtype=torch.float32
+    ).flatten()
+    gguf_tensor = torch.as_tensor(
+        np.array(gguf_image.convert("RGB"), copy=True), dtype=torch.float32
+    ).flatten()
+    return torch.nn.functional.cosine_similarity(
+        hf_tensor, gguf_tensor, dim=0
+    ).item()
 
 
 @dataclass
@@ -197,6 +211,16 @@ def test_single_stage_diffusion_gguf(
     images[0].save(gguf_image_path)
     print(f"Saved HF image: {hf_image_path}")
     print(f"Saved GGUF image: {gguf_image_path}")
+
+    image_cosine_similarity = _image_cosine_similarity(hf_images[0], images[0])
+    print(
+        f"{model.artifact_prefix} image cosine similarity: "
+        f"{image_cosine_similarity:.4f}"
+    )
+    assert image_cosine_similarity >= model.min_cosine_similarity, (
+        f"GGUF image cosine similarity ({image_cosine_similarity:.4f}) should be "
+        f">= {model.min_cosine_similarity:.4f}"
+    )
 
     print(f"{model.artifact_prefix} BF16 peak VRAM delta: {mem_bf16:.2f} GiB")
     print(f"{model.artifact_prefix} GGUF peak VRAM delta: {mem_gguf:.2f} GiB")

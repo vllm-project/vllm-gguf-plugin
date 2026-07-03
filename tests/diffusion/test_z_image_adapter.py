@@ -51,6 +51,8 @@ def test_z_image_adapter_renames_known_gguf_tensor_paths(
                 ("model.diffusion_model.x_embedder.qweight_type", torch.tensor(1)),
                 ("transformer_blocks.0.attention.out.weight", torch.full((1, 1), 2.0)),
                 ("transformer_blocks.0.attention.qkv.qweight", torch.full((1, 1), 3.0)),
+                ("context_refiner.0.feed_forward.w1.weight", torch.full((1, 2), 4.0)),
+                ("context_refiner.0.feed_forward.w3.weight", torch.full((1, 2), 5.0)),
             ]
         ),
     )
@@ -64,3 +66,5 @@ def test_z_image_adapter_renames_known_gguf_tensor_paths(
     assert "all_x_embedder.2-1.qweight_type" in names
     assert "transformer_blocks.0.attention.to_out.0.weight" in names
     assert "transformer_blocks.0.attention.to_qkv.qweight" in names
+    assert "context_refiner.0.feed_forward.w1.weight" in names
+    assert "context_refiner.0.feed_forward.w3.weight" in names

@@ -117,10 +117,6 @@ def _get_loadable_names(model: nn.Module) -> set[str]:
     }
 
 
-def _is_loadable_weight_name(name: str, loadable_names: set[str]) -> bool:
-    return name in loadable_names
-
-
 def _dense_weight_from_gguf_qweight(
     qweight: torch.Tensor,
     qweight_type: int,
@@ -153,8 +149,7 @@ def _gguf_weights_for_loadable_names(
             continue
 
         if not name.endswith(".qweight"):
-            if _is_loadable_weight_name(name, loadable_names):
-                yield name, tensor
+            yield name, tensor
             continue
 
         base_name = name[: -len(".qweight")]

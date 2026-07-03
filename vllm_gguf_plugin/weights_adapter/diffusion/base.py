@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from dataclasses import dataclass
 from typing import Any
 
 import gguf
 import numpy as np
 import torch
+from vllm.model_executor.models.utils import WeightsMapper
+
+UNQUANTIZED_GGUF_TYPE_NAMES = {"F32", "F16", "BF16"}
 
 
 @dataclass
@@ -30,6 +33,7 @@ class DiffusionGGUFAdapter(ABC):
 
     source_prefix = "transformer."
     source_subfolder = "transformer"
+    unquantized_modules: tuple[str, ...] = ()
 
     def __init__(self, gguf_file: str) -> None:
         self.gguf_file = gguf_file
@@ -45,13 +49,35 @@ class DiffusionGGUFAdapter(ABC):
     def weights_iterator(self) -> Generator[tuple[str, torch.Tensor], None, None]:
         raise NotImplementedError
 
+    def unquantized_weight_names(self) -> Iterable[str]:
+        weights: Iterable[tuple[str, None]] = (
+            (tensor.name, None)
+            for tensor in gguf.GGUFReader(self.gguf_file).tensors
+            if tensor.tensor_type.name in UNQUANTIZED_GGUF_TYPE_NAMES
+        )
+        mapper = getattr(self, "gguf_to_hf_mapper", None)
+        if isinstance(mapper, WeightsMapper):
+            weights = mapper.apply(weights)
+
+        for name, _ in weights:
+            yield name
+
+    def unquantized_module_names(self) -> tuple[str, ...]:
+        module_names = set(self.unquantized_modules)
+        module_names.update(
+            name.removesuffix(".weight")
+            for name in self.unquantized_weight_names()
+            if name.endswith(".weight")
+        )
+        return tuple(sorted(module_names))
+
 
 def gguf_quant_weights_iterator(
     gguf_file: str,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Two-pass iterator over GGUF quantized weights.
 
-    Pass 1 yields all ``qweight_type`` tensors first — weight types MUST
+    Pass 1 yields all ``qweight_type`` tensors first - weight types MUST
     come before weight data for packed layers with mixed quant types.
     Pass 2 yields all weight data (``qweight`` for quantized, original
     name for unquantized).
@@ -64,7 +90,7 @@ def gguf_quant_weights_iterator(
         weight_type = tensor.tensor_type
         name = tensor.name
 
-        if weight_type.name not in ("F32", "F16"):
+        if weight_type.name not in UNQUANTIZED_GGUF_TYPE_NAMES:
             weight_type_name = name.replace("weight", "qweight_type")
             weight_type = torch.tensor(weight_type)
             yield weight_type_name, weight_type
@@ -74,7 +100,7 @@ def gguf_quant_weights_iterator(
         weight = tensor.data
         weight_type = tensor.tensor_type
         name = tensor.name
-        if weight_type.name not in ("F32", "F16"):
+        if weight_type.name not in UNQUANTIZED_GGUF_TYPE_NAMES:
             name = name.replace("weight", "qweight")
         if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
             # BF16 is currently the only "quantization" type that isn't
