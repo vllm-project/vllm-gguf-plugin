@@ -22,7 +22,7 @@ where = ["."]
 include = ["vllm_gguf_plugin*"]
 
 [tool.vllm_gguf_plugin]
-base_version = "0.0.2"
+base_version = "0.0.3"
 
 [tool.ruff.lint]
 select = [
