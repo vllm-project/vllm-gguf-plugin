@@ -20,7 +20,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 
-from .utils import is_layer_skipped_gguf, logger
+from .utils import is_layer_skipped_gguf
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
