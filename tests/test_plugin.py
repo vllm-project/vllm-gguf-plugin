@@ -64,6 +64,15 @@ def test_oot_config_reuses_in_tree_behavior():
     assert repr(quant_config) == "GGUFConfig()"
 
 
+def test_supported_act_dtypes_includes_bfloat16():
+    quant_config = OOTGGUFConfig.from_config({})
+    supported = quant_config.get_supported_act_dtypes()
+
+    assert torch.half in supported
+    assert torch.bfloat16 in supported
+    assert torch.float32 in supported
+
+
 def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)

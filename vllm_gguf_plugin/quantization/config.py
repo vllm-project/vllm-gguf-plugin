@@ -19,9 +19,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.platforms import current_platform
 
-from .utils import is_layer_skipped_gguf, logger
+from .utils import is_layer_skipped_gguf
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -41,11 +40,6 @@ class GGUFConfig(QuantizationConfig):
         return "gguf"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
-        # GGUF dequantization kernels use half precision (fp16) internally.
-        # bfloat16 has precision issues on Blackwell devices.
-        if current_platform.has_device_capability(100):
-            logger.warning_once("GGUF has precision issues with bfloat16 on Blackwell.")
-            return [torch.half, torch.float32]
         return [torch.half, torch.bfloat16, torch.float32]
 
     @classmethod
