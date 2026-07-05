@@ -230,8 +230,10 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     engine_args.create_model_config()
 
     assert captured["config_format"] == "gguf"
-    assert captured["model"] == "/tmp/tokenizer"
+    assert captured["model"] == "/tmp/model.gguf"
+    assert captured["hf_config_path"] == "/tmp/tokenizer"
     assert captured["model_weights"] == "/tmp/model.gguf"
+    assert captured["tokenizer"] == "/tmp/tokenizer"
     assert captured["quantization"] == "gguf"
     assert engine_args.load_format == "gguf"
 

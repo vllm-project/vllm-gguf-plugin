@@ -68,11 +68,12 @@ def _patch_engine_args() -> None:
                 self.model_weights = gguf_model
             if self.served_model_name is None:
                 self.served_model_name = [gguf_model]
-            self.model = _get_gguf_config_source(
-                gguf_model,
-                self.tokenizer if isinstance(self.tokenizer, str) else None,
-                self.hf_config_path,
-            )
+            if self.hf_config_path is None:
+                self.hf_config_path = _get_gguf_config_source(
+                    gguf_model,
+                    self.tokenizer if isinstance(self.tokenizer, str) else None,
+                    None,
+                )
         return original_create_model_config(self, *args, **kwargs)
 
     EngineArgs.create_model_config = create_model_config
