@@ -24,6 +24,8 @@ from .weights_adapter.diffusion.integration import _patch_diffusers_loader
 OOTGGUFConfig = GGUFConfig
 OOTGGUFModelLoader = GGUFModelLoader
 
+_HF_CONFIG_FILENAME = "config.json"
+
 
 def _is_gguf_reference(model: str | None) -> bool:
     if not model:
@@ -44,7 +46,14 @@ def _get_gguf_config_source(
         repo_id, _ = split_remote_gguf(model)
         return repo_id
     if check_gguf_file(model):
-        return str(Path(model).parent)
+        config_dir = Path(model).parent
+        if not (config_dir / _HF_CONFIG_FILENAME).is_file():
+            raise ValueError(
+                "GGUF serving needs companion Hugging Face config files next "
+                f"to {model!r}. Add config.json alongside the GGUF file, or "
+                "pass the original model/tokenizer repo."
+            )
+        return str(config_dir)
     return model
 
 

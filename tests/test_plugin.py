@@ -19,6 +19,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
+import vllm_gguf_plugin.plugin as gguf_plugin
 import vllm_gguf_plugin.quantization as gguf_quantization
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
@@ -234,6 +235,20 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     assert captured["model_weights"] == "/tmp/model.gguf"
     assert captured["quantization"] == "gguf"
     assert engine_args.load_format == "gguf"
+
+
+def test_get_gguf_config_source_requires_local_config_bundle(
+    tmp_path, monkeypatch
+):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    monkeypatch.setattr(gguf_plugin, "check_gguf_file", lambda _model: True)
+    monkeypatch.setattr(gguf_plugin, "is_remote_gguf", lambda _model: False)
+    monkeypatch.setattr(gguf_plugin, "is_gguf", lambda _model: False)
+
+    with pytest.raises(ValueError, match="companion Hugging Face config files"):
+        gguf_plugin._get_gguf_config_source(str(gguf_path), None, None)
 
 
 def test_register_skips_speculator_probe_for_gguf():
