@@ -153,8 +153,10 @@ if (
         top_k: torch.SymInt,
         tokens: torch.SymInt,
     ) -> torch.Tensor:
+        # match the CUDA kernel, which allocates its output with X's dtype
+        # (see csrc/gguf/gguf_kernel.cu ggml_moe_a8: new_empty(..., X.scalar_type()))
         return torch.empty(
-            (X.size(0) * top_k, row), dtype=torch.float16, device=W.device
+            (X.size(0) * top_k, row), dtype=X.dtype, device=W.device
         )
 
 
