@@ -153,24 +153,33 @@ def _materialize_gguf_moe_param(
     loaded_weight: torch.Tensor,
     shard_id: str,
 ) -> None:
-    if not isinstance(param, UninitializedParameter):
+    is_uninitialized = isinstance(param, UninitializedParameter)
+    if not is_uninitialized and param.data.numel() != 0:
         return
 
     shard_dim = {"w1": 0, "w2": 1, "w3": 0}[shard_id]
     if getattr(param, "is_transposed", False):
         shard_dim = int(not shard_dim)
 
-    if len(loaded_weight.shape) != 3:
+    if loaded_weight.ndim == 3:
+        final_shape = list(loaded_weight.shape)
+    elif loaded_weight.ndim == 2:
+        final_shape = [param.tensor_shape[0], *loaded_weight.shape]
+    else:
         return
 
     shard_dim += 1
-    final_shape = list(loaded_weight.shape)
     if shard_id in {"w1", "w3"}:
         final_shape[1] *= 2
     final_shape[shard_dim] = (
         final_shape[shard_dim] // layer.moe_config.moe_parallel_config.tp_size
     )
-    param.materialize(tuple(final_shape), dtype=loaded_weight.dtype)
+    if is_uninitialized:
+        param.materialize(tuple(final_shape), dtype=loaded_weight.dtype)
+    else:
+        param.data = torch.empty(
+            tuple(final_shape), dtype=loaded_weight.dtype, device=param.device
+        )
 
 
 def _gguf_moe_weight_loader(

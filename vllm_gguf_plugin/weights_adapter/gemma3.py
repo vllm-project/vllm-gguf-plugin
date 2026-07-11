@@ -119,7 +119,7 @@ class Gemma3GGUFAdapter(BaseGGUFWeightsAdapter):
     ) -> Iterable[tuple[str, torch.Tensor]]:
         """Transform raw GGUF weights to HF-style weights."""
         for name, weight in weights:
-            if name.endswith("norm.weight"):
+            if name.endswith("norm.weight") and not name.startswith("vision_tower"):
                 weight = weight - 1
             elif name.startswith("vision_tower") and "mlp.up_proj." in name:
                 name = name.replace("mlp.up_proj.", "mlp.fc2.")
