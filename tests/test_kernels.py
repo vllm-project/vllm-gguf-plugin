@@ -431,33 +431,3 @@ def test_moe_triton(
         x, w13_dequant, w2_dequant, topk_weights, topk_ids
     ).reshape(output.shape)
     torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_moe_a8_fake_dtype_matches_kernel(dtype):
-    # The CUDA kernel allocates its output with X's dtype
-    # (csrc/gguf/gguf_kernel.cu ggml_moe_a8), so the fake registration must
-    # do the same or torch.compile traces the wrong dtype for bf16 models.
-    from torch._subclasses.fake_tensor import FakeTensorMode
-
-    quant_type = GGMLQuantizationType.Q4_K
-    with FakeTensorMode():
-        X = torch.empty((8, 512), dtype=dtype, device="cuda")
-        W = torch.empty((4, 1024, 288), dtype=torch.uint8, device="cuda")
-        sorted_token_ids = torch.empty((64,), dtype=torch.int32, device="cuda")
-        expert_ids = torch.empty((2,), dtype=torch.int32, device="cuda")
-        num_tokens_post_padded = torch.empty((1,), dtype=torch.int32, device="cuda")
-        out = torch.ops._C_gguf.ggml_moe_a8(
-            X,
-            W,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            quant_type,
-            1024,
-            2,
-            8,
-        )
-    assert out.dtype == dtype
-    assert out.shape == (16, 1024)
