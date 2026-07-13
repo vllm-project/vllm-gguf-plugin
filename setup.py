@@ -26,7 +26,20 @@ def _should_build_extension() -> bool:
 setup_kwargs: dict = {"version": _package_version()}
 
 if _should_build_extension():
+    import torch
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+    is_rocm = getattr(torch.version, "hip", None) is not None
+
+    nvcc_args = [
+        "-O3",
+        "-std=c++17",
+        # Exposes aoti_torch_get_current_cuda_stream in the AOTI shim.
+        "-DUSE_CUDA",
+    ]
+    if not is_rocm:
+        # hipcc (ROCm 7.x) rejects nvcc-only flags like --use_fast_math.
+        nvcc_args.insert(2, "--use_fast_math")
 
     setup_kwargs.update(
         ext_modules=[
@@ -43,13 +56,7 @@ if _should_build_extension():
                 py_limited_api=True,
                 extra_compile_args={
                     "cxx": ["-O3", "-std=c++17"],
-                    "nvcc": [
-                        "-O3",
-                        "-std=c++17",
-                        "--use_fast_math",
-                        # Exposes aoti_torch_get_current_cuda_stream in the AOTI shim.
-                        "-DUSE_CUDA",
-                    ],
+                    "nvcc": nvcc_args,
                 },
             )
         ],
