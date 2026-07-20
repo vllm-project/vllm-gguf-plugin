@@ -50,8 +50,14 @@ The same hooks also run in GitHub Actions on every push and pull request.
 
 ## Usage
 
+Serve text-generation model through vLLM:
 ```bash
 vllm serve Qwen/Qwen3-0.6B-GGUF:Q8_0 --tokenizer Qwen/Qwen3-0.6B
+```
+
+Serve diffusion model through vLLM-Omni:
+```
+vllm serve black-forest-labs/FLUX.2-klein-4B --omni --diffusion-quantization-config.method=gguf --diffusion-quantization-config.gguf_model='unsloth/FLUX.2-klein-4B-GGUF:Q8_0'
 ```
 
 ## Tested model coverage
