@@ -16,6 +16,14 @@ from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
+# Qwen3.5 has no ForCausalLM entry in the vLLM model registry.
+QWEN35_CONDITIONAL_ARCHS = {
+    "qwen3_5": "Qwen3_5ForConditionalGeneration",
+    "qwen3_5_text": "Qwen3_5ForConditionalGeneration",
+    "qwen3_5_moe": "Qwen3_5MoeForConditionalGeneration",
+    "qwen3_5_moe_text": "Qwen3_5MoeForConditionalGeneration",
+}
+
 
 @cache
 def check_gguf_file(model: str | PathLike) -> bool:
@@ -352,6 +360,33 @@ def maybe_patch_hf_config_from_gguf(
             if vocab_size is not None:
                 new_hf_config.text_config.update({"vocab_size": vocab_size})
             hf_config = new_hf_config
+
+        # Qwen3.5: upgrade text-only config to multimodal when mmproj found
+        if getattr(hf_config, "vision_config", None) is None:
+            if hf_config.model_type in ("qwen3_5", "qwen3_5_text"):
+                from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
+
+                hf_config = Qwen3_5Config(
+                    text_config=hf_config.to_dict(),
+                    architectures=["Qwen3_5ForConditionalGeneration"],
+                )
+            elif hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
+                from vllm.transformers_utils.configs.qwen3_5_moe import (
+                    Qwen3_5MoeConfig,
+                )
+
+                hf_config = Qwen3_5MoeConfig(
+                    text_config=hf_config.to_dict(),
+                    architectures=["Qwen3_5MoeForConditionalGeneration"],
+                )
+
+    # Qwen3.5 has no ForCausalLM entry in the vLLM model registry — always
+    # serve through the ConditionalGeneration architecture.
+    conditional_arch = QWEN35_CONDITIONAL_ARCHS.get(hf_config.model_type)
+    if conditional_arch is not None:
+        archs = getattr(hf_config, "architectures", None) or []
+        if not any("ConditionalGeneration" in arch for arch in archs):
+            hf_config.architectures = [conditional_arch]
 
     return hf_config
 

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import gguf
 import regex
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from vllm.logger import init_logger
 
 from ..gguf_utils import maybe_patch_hf_config_from_gguf
@@ -119,6 +119,77 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                         ),
                     ]
                 )
+        if model_type in ("qwen3_5", "qwen3_5_text"):
+            model_type = "qwen35"
+            # dt_bias may not exist in GGUF (can be folded into dt_proj)
+            sideload_params.append(
+                regex.compile(
+                    r"model\.(language_model\.)?layers\.\d+\.linear_attn\.dt_bias"
+                )
+            )
+            if is_multimodal:
+                # Manual GGUF→HF mappings for the Qwen3.5 merger (mmproj);
+                # gguf-py's MMPROJ map has no linear_fc1/fc2 patterns
+                gguf_to_hf_name_map["mm.0.weight"] = (
+                    "model.visual.merger.linear_fc1.weight"
+                )
+                gguf_to_hf_name_map["mm.0.bias"] = "model.visual.merger.linear_fc1.bias"
+                gguf_to_hf_name_map["mm.2.weight"] = (
+                    "model.visual.merger.linear_fc2.weight"
+                )
+                gguf_to_hf_name_map["mm.2.bias"] = "model.visual.merger.linear_fc2.bias"
+                gguf_to_hf_name_map["mm.input_norm.weight"] = (
+                    "model.visual.merger.norm.weight"
+                )
+                gguf_to_hf_name_map["mm.input_norm.bias"] = (
+                    "model.visual.merger.norm.bias"
+                )
+        if model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
+            model_type = "qwen35moe"
+            # dt_bias may not exist in GGUF (can be folded into dt_proj)
+            sideload_params.append(
+                regex.compile(
+                    r"model\.(language_model\.)?layers\.\d+\.linear_attn\.dt_bias"
+                )
+            )
+            if is_multimodal:
+                # Same merger mappings for the MoE variant
+                gguf_to_hf_name_map["mm.0.weight"] = (
+                    "model.visual.merger.linear_fc1.weight"
+                )
+                gguf_to_hf_name_map["mm.0.bias"] = "model.visual.merger.linear_fc1.bias"
+                gguf_to_hf_name_map["mm.2.weight"] = (
+                    "model.visual.merger.linear_fc2.weight"
+                )
+                gguf_to_hf_name_map["mm.2.bias"] = "model.visual.merger.linear_fc2.bias"
+                gguf_to_hf_name_map["mm.input_norm.weight"] = (
+                    "model.visual.merger.norm.weight"
+                )
+                gguf_to_hf_name_map["mm.input_norm.bias"] = (
+                    "model.visual.merger.norm.bias"
+                )
+            # GGUF layer map assumes merged expert weights.
+            # Multimodal uses the model.language_model.layers prefix.
+            layer_prefix = (
+                "model.language_model.layers" if is_multimodal else "model.layers"
+            )
+            layer_prefix_re = layer_prefix.replace(".", "\\.")
+            for idx in range(text_config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
+                    f"{layer_prefix}.{idx}.mlp.experts.0.down_proj.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
+                    f"{layer_prefix}.{idx}.mlp.experts.0.gate_proj.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
+                    f"{layer_prefix}.{idx}.mlp.experts.0.up_proj.weight"
+                )
+                sideload_params.append(
+                    regex.compile(
+                        f"{layer_prefix_re}\\.{idx}"
+                        r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
+                )
         if model_type == "minimax_m2":
             model_type = "minimax-m2"
             for idx in range(config.num_hidden_layers):
@@ -153,14 +224,22 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
 
         if is_multimodal:
             mm_proj_arch = gguf.MODEL_ARCH.MMPROJ
-            vision_name_map = gguf.get_tensor_name_map(
-                mm_proj_arch, config.vision_config.num_hidden_layers
+            # Some vision configs use 'depth' instead of 'num_hidden_layers'
+            # (e.g. Qwen3_5VisionConfig)
+            vision_num_layers = getattr(
+                config.vision_config,
+                "num_hidden_layers",
+                getattr(config.vision_config, "depth", 0),
             )
+            vision_name_map = gguf.get_tensor_name_map(mm_proj_arch, vision_num_layers)
         else:
             vision_name_map = None
 
+        auto_cls = (
+            AutoModelForImageTextToText if is_multimodal else AutoModelForCausalLM
+        )
         with torch.device("meta"):
-            dummy_model = AutoModelForCausalLM.from_config(
+            dummy_model = auto_cls.from_config(
                 config, trust_remote_code=model_config.trust_remote_code
             )
 

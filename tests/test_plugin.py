@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
@@ -214,6 +215,44 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     assert calls["trust_remote_code"] is False
     assert config_dict["norm_topk_prob"] is True
     assert config.architectures == ["Qwen3MoeForCausalLM"]
+
+
+@pytest.mark.parametrize(
+    ("model_type", "architecture"),
+    [
+        ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
+        ("qwen3_5_text", "Qwen3_5ForConditionalGeneration"),
+        ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+        ("qwen3_5_moe_text", "Qwen3_5MoeForConditionalGeneration"),
+    ],
+)
+def test_gguf_config_parser_uses_conditional_arch_for_qwen35(
+    tmp_path, monkeypatch, model_type, architecture
+):
+    """Qwen3.5 has no ForCausalLM entry in the vLLM model registry."""
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        return {}, PretrainedConfig(model_type=model_type)
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+
+    config_dict, config = GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
+
+    assert config_dict["architectures"] == [architecture]
+    assert config.architectures == [architecture]
 
 
 def test_register_sets_engine_args_for_gguf_model(monkeypatch):

@@ -251,3 +251,59 @@ class TestExtractLMHeadFromGGUF:
         ]
 
         assert extract_lm_head_from_gguf("/tmp/model.gguf")
+
+
+class TestMaybePatchQwen35Config:
+    @patch("vllm_gguf_plugin.gguf_utils.detect_gguf_multimodal", return_value=None)
+    @patch("vllm_gguf_plugin.gguf_utils.extract_lm_head_from_gguf", return_value=None)
+    @patch(
+        "vllm_gguf_plugin.gguf_utils.extract_vocab_size_from_gguf",
+        return_value=None,
+    )
+    @pytest.mark.parametrize(
+        ("model_type", "architecture"),
+        [
+            ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
+            ("qwen3_5_text", "Qwen3_5ForConditionalGeneration"),
+            ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+            ("qwen3_5_moe_text", "Qwen3_5MoeForConditionalGeneration"),
+        ],
+    )
+    def test_enforces_conditional_arch_without_mmproj(
+        self, _mock_vocab, _mock_lm_head, _mock_detect, model_type, architecture
+    ):
+        from transformers import PretrainedConfig
+
+        from vllm_gguf_plugin.gguf_utils import maybe_patch_hf_config_from_gguf
+
+        config = PretrainedConfig(
+            model_type=model_type, architectures=["Qwen3_5ForCausalLM"]
+        )
+        patched = maybe_patch_hf_config_from_gguf("/tmp/model.gguf", config)
+
+        assert patched.architectures == [architecture]
+
+    @patch(
+        "vllm_gguf_plugin.gguf_utils.extract_vision_config_from_gguf",
+        return_value=None,
+    )
+    @patch(
+        "vllm_gguf_plugin.gguf_utils.detect_gguf_multimodal",
+        return_value=Path("/tmp/mmproj.gguf"),
+    )
+    @patch("vllm_gguf_plugin.gguf_utils.extract_lm_head_from_gguf", return_value=None)
+    @patch(
+        "vllm_gguf_plugin.gguf_utils.extract_vocab_size_from_gguf",
+        return_value=None,
+    )
+    def test_upgrades_text_config_to_multimodal_with_mmproj(self, *_mocks):
+        from transformers import PretrainedConfig
+
+        from vllm_gguf_plugin.gguf_utils import maybe_patch_hf_config_from_gguf
+
+        config = PretrainedConfig(model_type="qwen3_5_text")
+        patched = maybe_patch_hf_config_from_gguf("/tmp/model.gguf", config)
+
+        assert patched.model_type == "qwen3_5"
+        assert patched.vision_config is not None
+        assert patched.architectures == ["Qwen3_5ForConditionalGeneration"]

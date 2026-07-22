@@ -11,9 +11,11 @@ from .diffusion import (
     get_diffusion_gguf_adapter,
 )
 from .gemma3 import Gemma3GGUFAdapter
+from .qwen3_5 import Qwen35GGUFAdapter
 
 _ADAPTER_REGISTRY: list[type[GGUFWeightsAdapter]] = [
     Gemma3GGUFAdapter,
+    Qwen35GGUFAdapter,
 ]
 
 
