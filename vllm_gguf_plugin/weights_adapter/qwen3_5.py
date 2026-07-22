@@ -164,6 +164,10 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
             # Forced-unquantized modules keep plain params.
             if "qweight" in name and ("lm_head." in name or "embed_tokens." in name):
                 continue
+            if name.endswith(".A_log"):
+                # GGUF stores A = -exp(A_log); recover A_log for the model.
+                yield name, torch.log(-weight)
+                continue
             if "conv1d.weight" in name and weight.dim() == 2:
                 # depthwise Conv1d: [d, k] -> [d, 1, k]
                 weight = weight.unsqueeze(1)
