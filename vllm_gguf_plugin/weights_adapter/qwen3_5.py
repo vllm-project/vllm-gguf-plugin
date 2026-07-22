@@ -168,6 +168,14 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
                 # GGUF stores A = -exp(A_log); recover A_log for the model.
                 yield name, torch.log(-weight)
                 continue
+            if (
+                name.endswith("norm.weight")
+                and not name.endswith("linear_attn.norm.weight")
+                and "visual" not in name
+            ):
+                # GGUF conversion bakes (w + 1) into these RMSNorm weights.
+                yield name, weight - 1
+                continue
             if "conv1d.weight" in name and weight.dim() == 2:
                 # depthwise Conv1d: [d, k] -> [d, 1, k]
                 weight = weight.unsqueeze(1)
