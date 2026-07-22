@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 from ..gguf_utils import detect_gguf_multimodal
-from ..weight_utils import get_gguf_weight_type_map
+from ..weight_utils import get_gguf_weight_type_map, gguf_quant_weights_iterator_multi
 from .base import GGUFLoadSpec
 from .default import GGUFWeightsAdapter
 
@@ -73,6 +73,25 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
         for name in ("lm_head", "embed_tokens"):
             if name not in unquantized_modules:
                 unquantized_modules.append(name)
+
+        # llama.cpp tiles GDN V heads when num_value_heads != num_key_heads.
+        tc = self.config.get_text_config()
+        num_k = getattr(tc, "linear_num_key_heads", 0) or 0
+        num_v = getattr(tc, "linear_num_value_heads", 0) or 0
+        self._reorder = None
+        self._dequant_suffixes: tuple[str, ...] = ()
+        if num_k and num_v and num_v % num_k == 0 and num_v // num_k > 1:
+            self._reorder = {
+                "num_k": num_k,
+                "r": num_v // num_k,
+                "head_k": tc.linear_key_head_dim,
+                "head_v": tc.linear_value_head_dim,
+            }
+            # Row reorders work on packed rows; out_proj is a column
+            # reorder, so it alone needs float.
+            self._dequant_suffixes = ("linear_attn.out_proj.weight",)
+            if "linear_attn.out_proj" not in unquantized_modules:
+                unquantized_modules.append("linear_attn.out_proj")
 
         self.load_spec = GGUFLoadSpec(
             weights_source=weights_source,
@@ -148,6 +167,56 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
             return ref.rsplit("/", 1)[0]
         return None
 
+    def prepare_weights(
+        self,
+        model_config: ModelConfig,
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        del model_config
+        weights = gguf_quant_weights_iterator_multi(
+            self.load_spec.weights_source,
+            self.load_spec.gguf_to_hf_name_map,
+            dequant_suffixes=("embed_tokens.weight", "lm_head.weight")
+            + self._dequant_suffixes,
+        )
+        yield from self.map_weights(weights)
+
+    @staticmethod
+    def _inv_reorder(t, dim, num_k, r, head_dim):
+        # Undo llama.cpp's grouped->tiled V-head reorder along *dim*.
+        shape = list(t.shape)
+        if dim < 0:
+            dim += len(shape)
+        t = t.reshape(*shape[:dim], r, num_k, head_dim, *shape[dim + 1 :])
+        t = t.transpose(dim, dim + 1)
+        return t.reshape(*shape).contiguous()
+
+    def _reorder_gdn(self, name: str, w: torch.Tensor) -> torch.Tensor | None:
+        """Undo llama.cpp's grouped->tiled V-head reorder. Row reorders apply
+        to packed ``qweight`` too, since GGUF quantizes per row."""
+        rc = self._reorder
+        nk, r, hk, hv = rc["num_k"], rc["r"], rc["head_k"], rc["head_v"]
+        inv = self._inv_reorder
+        if name.endswith("qweight_type"):
+            return None
+        base = name.removesuffix(".qweight").removesuffix(".weight")
+        if base.endswith(".A_log"):
+            return inv(torch.log(-w), 0, nk, r, 1)
+        if base.endswith(".dt_bias"):
+            return inv(w, 0, nk, r, 1)
+        if base.endswith("linear_attn.in_proj_z"):
+            return inv(w, 0, nk, r, hv)
+        if base.endswith(("linear_attn.in_proj_a", "linear_attn.in_proj_b")):
+            return inv(w, 0, nk, r, 1)
+        if base.endswith("linear_attn.in_proj_qkv"):
+            qk = hk * nk * 2  # q + k rows are unchanged; only V rows reorder
+            return torch.cat([w[:qk], inv(w[qk:], 0, nk, r, hv)], dim=0)
+        if base.endswith("linear_attn.out_proj"):
+            return inv(w, 1, nk, r, hv)  # column (input) reorder, dequantized
+        if base.endswith("linear_attn.conv1d") and w.dim() == 2:
+            qk = hk * nk * 2
+            return torch.cat([w[:qk], inv(w[qk:], 0, nk, r, hv)], dim=0).unsqueeze(1)
+        return None
+
     def map_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -164,6 +233,12 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
             # Forced-unquantized modules keep plain params.
             if "qweight" in name and ("lm_head." in name or "embed_tokens." in name):
                 continue
+            if self._reorder is not None:
+                # Also folds A_log's log(-a) recovery in the right order.
+                out = self._reorder_gdn(name, weight)
+                if out is not None:
+                    yield name, out
+                    continue
             if name.endswith(".A_log"):
                 # GGUF stores A = -exp(A_log); recover A_log for the model.
                 yield name, torch.log(-weight)

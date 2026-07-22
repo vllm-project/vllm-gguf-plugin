@@ -98,7 +98,9 @@ def gguf_quant_weights_iterator(
 
 
 def gguf_quant_weights_iterator_multi(
-    gguf_files: list[str], gguf_to_hf_name_map: dict[str, str] | None = None
+    gguf_files: list[str],
+    gguf_to_hf_name_map: dict[str, str] | None = None,
+    dequant_suffixes: tuple[str, ...] = ("embed_tokens.weight", "lm_head.weight"),
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Yield ``(name, tensor)`` for all tensors in *gguf_files*.
 
@@ -124,7 +126,7 @@ def gguf_quant_weights_iterator_multi(
             # ParallelLMHead as plain weights; dequantize instead of emitting
             # GGUF quant params (which those layers drop, leaving zeros).
             if weight_type.name not in _QUANT_TYPES and name.endswith(
-                ("embed_tokens.weight", "lm_head.weight")
+                dequant_suffixes
             ):
                 deq = gguf.quants.dequantize(tensor.data, weight_type)
                 yield name, torch.tensor(deq)
