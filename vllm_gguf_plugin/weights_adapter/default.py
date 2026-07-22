@@ -296,7 +296,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 gguf_name = text_name_map.get_name(base_name)
             if gguf_name is None:
                 return None
-            return gguf_name + "." + suffix
+            return f"{gguf_name}.{suffix}" if suffix else gguf_name
 
         unmapped_params = []
         for hf_name in state_dict:
