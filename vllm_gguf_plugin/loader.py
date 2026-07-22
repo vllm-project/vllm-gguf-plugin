@@ -79,10 +79,47 @@ class GGUFModelLoader(BaseModelLoader):
         adapter = self._prepare_adapter(model_config)
         model.load_weights(adapter.prepare_weights(model_config))
 
+    def _load_hf_draft(
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str
+    ) -> nn.Module:
+        """Load an MTP draft from the HF safetensors repo in native dtype,
+        clearing GGUF quantization for this load only."""
+        from vllm.model_executor.model_loader import get_model_loader
+
+        logger.info(
+            "Loading speculative draft '%s' from HF repo %s (not in GGUF)",
+            getattr(model_config.hf_config, "model_type", "?"),
+            model_config.model,
+        )
+        saved_quant_config = vllm_config.quant_config
+        saved_quantization = model_config.quantization
+        vllm_config.quant_config = None
+        model_config.quantization = None
+        model_config.model_weights = None  # use model_config.model (HF repo)
+        try:
+            loader = get_model_loader(LoadConfig(load_format="auto"))
+            return loader.load_model(
+                vllm_config=vllm_config, model_config=model_config, prefix=prefix
+            )
+        finally:
+            vllm_config.quant_config = saved_quant_config
+            model_config.quantization = saved_quantization
+
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
         device_config = vllm_config.device_config
+        # A draft ModelConfig has no GGUF reference of its own.
+        target_mc = vllm_config.model_config
+        if model_config is not target_mc and not model_config.model_weights:
+            model_type = getattr(model_config.hf_config, "model_type", "") or ""
+            # llama.cpp/unsloth GGUF exports omit the MTP/nextn draft layers,
+            # but they exist in the HF safetensors repo. Load the draft from
+            # there in native dtype instead of the GGUF loader.
+            if "mtp" in model_type:
+                return self._load_hf_draft(vllm_config, model_config, prefix)
+            # Otherwise the draft shares the target's GGUF file — borrow its ref.
+            model_config.model_weights = target_mc.model_weights
         adapter = self._prepare_adapter(model_config)
         vllm_config.model_config.hf_config = model_config.hf_config
         logger.debug(
