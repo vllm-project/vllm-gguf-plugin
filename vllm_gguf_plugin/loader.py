@@ -79,6 +79,31 @@ class GGUFModelLoader(BaseModelLoader):
         adapter = self._prepare_adapter(model_config)
         model.load_weights(adapter.prepare_weights(model_config))
 
+    @staticmethod
+    def _prefetch_mtp_weights(model_config: ModelConfig) -> str | None:
+        """Fetch only the ``mtp.*`` safetensors shards into the HF cache,
+        avoiding the full (tens of GiB) checkpoint. Returns the snapshot dir,
+        or None to let the default loader download normally."""
+        import json
+
+        repo = str(model_config.model)
+        if os.path.isdir(repo):
+            return None
+        try:
+            index_path = hf_hub_download(
+                repo, "model.safetensors.index.json", revision=model_config.revision
+            )
+        except Exception:
+            return None  # single-file checkpoint or no index — fall back
+        weight_map = json.load(open(index_path))["weight_map"]
+        shards = sorted({f for name, f in weight_map.items() if "mtp" in name.lower()})
+        if not shards:
+            return None
+        logger.info("Prefetching %d MTP shard(s): %s", len(shards), shards)
+        for shard in shards:
+            hf_hub_download(repo, shard, revision=model_config.revision)
+        return os.path.dirname(index_path)
+
     def _load_hf_draft(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str
     ) -> nn.Module:
@@ -93,9 +118,14 @@ class GGUFModelLoader(BaseModelLoader):
         )
         saved_quant_config = vllm_config.quant_config
         saved_quantization = model_config.quantization
+        saved_model = model_config.model
         vllm_config.quant_config = None
         model_config.quantization = None
         model_config.model_weights = None  # use model_config.model (HF repo)
+        # Point the loader at a snapshot with only the MTP shards when possible.
+        mtp_dir = self._prefetch_mtp_weights(model_config)
+        if mtp_dir is not None:
+            model_config.model = mtp_dir
         try:
             loader = get_model_loader(LoadConfig(load_format="auto"))
             return loader.load_model(
@@ -104,6 +134,7 @@ class GGUFModelLoader(BaseModelLoader):
         finally:
             vllm_config.quant_config = saved_quant_config
             model_config.quantization = saved_quantization
+            model_config.model = saved_model
 
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
