@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -104,13 +105,15 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
                         mmproj_files[0],
                         repo_id,
                     )
-                    # Download next to the backbone so detect_gguf_multimodal
-                    # finds it regardless of the configured download_dir.
+                    # Reuse the backbone's cache root so the file lands in
+                    # the same snapshot dir and concurrent TP workers
+                    # serialize on the hub cache lock instead of clobbering
+                    # each other.
                     hf_hub_download(
                         repo_id=repo_id,
                         filename=mmproj_files[0],
                         revision=model_config.revision,
-                        local_dir=os.path.dirname(model_path),
+                        cache_dir=self._resolve_hf_cache_dir(model_path),
                     )
             except Exception as e:
                 logger.warning("Failed to download mmproj from %s: %s", repo_id, e)
@@ -123,6 +126,15 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
                 "as the backbone GGUF file or available in the HF repo."
             )
         return mmproj_path
+
+    @staticmethod
+    def _resolve_hf_cache_dir(model_path: str) -> str | None:
+        """Return the HF cache root containing *model_path* (covers custom
+        --download-dir layouts), or None for the default cache."""
+        for parent in Path(model_path).parents:
+            if parent.name.startswith("models--"):
+                return str(parent.parent)
+        return None
 
     @staticmethod
     def _infer_repo_id(model_config: ModelConfig) -> str | None:
