@@ -42,6 +42,23 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
     def patch_hf_config(self, model_path: str, hf_config: PretrainedConfig):
         return maybe_patch_hf_config_from_gguf(model_path, hf_config)
 
+    @staticmethod
+    def _map_gdn_dt_bias(
+        gguf_to_hf_name_map, sideload_params, text_config, is_multimodal
+    ):
+        # gguf-py has no map for dt_bias; without this it stays zero and
+        # breaks GDN recurrence. sideload is the fallback when GGUF omits it.
+        layer_prefix = "model.language_model.layers" if is_multimodal else "model.layers"
+        for idx in range(text_config.num_hidden_layers):
+            gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                f"{layer_prefix}.{idx}.linear_attn.dt_bias"
+            )
+        sideload_params.append(
+            regex.compile(
+                r"model\.(language_model\.)?layers\.\d+\.linear_attn\.dt_bias"
+            )
+        )
+
     def build_name_map(self, model_config: ModelConfig) -> dict[str, str]:
         config = model_config.hf_config
         text_config = config.get_text_config()
@@ -121,11 +138,8 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 )
         if model_type in ("qwen3_5", "qwen3_5_text"):
             model_type = "qwen35"
-            # dt_bias may not exist in GGUF (can be folded into dt_proj)
-            sideload_params.append(
-                regex.compile(
-                    r"model\.(language_model\.)?layers\.\d+\.linear_attn\.dt_bias"
-                )
+            self._map_gdn_dt_bias(
+                gguf_to_hf_name_map, sideload_params, text_config, is_multimodal
             )
             if is_multimodal:
                 # Manual GGUF→HF mappings for the Qwen3.5 merger (mmproj);
@@ -146,11 +160,8 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 )
         if model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
             model_type = "qwen35moe"
-            # dt_bias may not exist in GGUF (can be folded into dt_proj)
-            sideload_params.append(
-                regex.compile(
-                    r"model\.(language_model\.)?layers\.\d+\.linear_attn\.dt_bias"
-                )
+            self._map_gdn_dt_bias(
+                gguf_to_hf_name_map, sideload_params, text_config, is_multimodal
             )
             if is_multimodal:
                 # Same merger mappings for the MoE variant
