@@ -71,6 +71,8 @@ starting points:
 | Text | Gemma 3 | Q4_0 |
 | Text | OLMoE | Q4_0 |
 | Vision-language | Gemma 3 | Q4_0 backbone with F16 projector |
+| Vision-language | Qwen 3.5 | Q4_0 backbone with BF16 projector |
+| Vision-language | Qwen 3.6 | UD-IQ2_XXS backbone with BF16 projector |
 | Image generation | Z-Image-Turbo | Q4_0 |
 | Image generation | FLUX.2-klein | Q8_0 |
 
