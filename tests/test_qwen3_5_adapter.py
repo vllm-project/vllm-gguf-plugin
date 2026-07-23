@@ -26,6 +26,21 @@ class TestMatches:
         assert not Qwen35GGUFAdapter.matches(config)
 
 
+class TestMergerNameMap:
+    def test_maps_merger_tensors(self):
+        name_map = {}
+        Qwen35GGUFAdapter._map_qwen35_merger(name_map)
+        assert name_map == {
+            "mm.0.weight": "model.visual.merger.linear_fc1.weight",
+            "mm.0.bias": "model.visual.merger.linear_fc1.bias",
+            "mm.2.weight": "model.visual.merger.linear_fc2.weight",
+            "mm.2.bias": "model.visual.merger.linear_fc2.bias",
+            # llama.cpp writes merger.norm as v.post_ln, not mm.input_norm
+            "v.post_ln.weight": "model.visual.merger.norm.weight",
+            "v.post_ln.bias": "model.visual.merger.norm.bias",
+        }
+
+
 class TestInferRepoId:
     def test_remote_quant_reference(self):
         model_config = SimpleNamespace(

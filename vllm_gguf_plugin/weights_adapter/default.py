@@ -48,7 +48,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
     ):
         # gguf-py has no map for dt_bias; without this it stays zero and
         # breaks GDN recurrence. sideload is the fallback when GGUF omits it.
-        layer_prefix = "model.language_model.layers" if is_multimodal else "model.layers"
+        layer_prefix = (
+            "model.language_model.layers" if is_multimodal else "model.layers"
+        )
         for idx in range(text_config.num_hidden_layers):
             gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
                 f"{layer_prefix}.{idx}.linear_attn.dt_bias"
@@ -58,6 +60,20 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 r"model\.(language_model\.)?layers\.\d+\.linear_attn\.dt_bias"
             )
         )
+
+    @staticmethod
+    def _map_qwen35_merger(gguf_to_hf_name_map):
+        # gguf-py's MMPROJ map has no linear_fc1/fc2 patterns, and llama.cpp
+        # writes the merger norm as v.post_ln.
+        for gguf_name, hf_name in (
+            ("mm.0", "linear_fc1"),
+            ("mm.2", "linear_fc2"),
+            ("v.post_ln", "norm"),
+        ):
+            for suffix in ("weight", "bias"):
+                gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = (
+                    f"model.visual.merger.{hf_name}.{suffix}"
+                )
 
     def build_name_map(self, model_config: ModelConfig) -> dict[str, str]:
         config = model_config.hf_config
@@ -142,43 +158,14 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 gguf_to_hf_name_map, sideload_params, text_config, is_multimodal
             )
             if is_multimodal:
-                # Manual GGUF→HF mappings for the Qwen3.5 merger (mmproj);
-                # gguf-py's MMPROJ map has no linear_fc1/fc2 patterns
-                gguf_to_hf_name_map["mm.0.weight"] = (
-                    "model.visual.merger.linear_fc1.weight"
-                )
-                gguf_to_hf_name_map["mm.0.bias"] = "model.visual.merger.linear_fc1.bias"
-                gguf_to_hf_name_map["mm.2.weight"] = (
-                    "model.visual.merger.linear_fc2.weight"
-                )
-                gguf_to_hf_name_map["mm.2.bias"] = "model.visual.merger.linear_fc2.bias"
-                gguf_to_hf_name_map["mm.input_norm.weight"] = (
-                    "model.visual.merger.norm.weight"
-                )
-                gguf_to_hf_name_map["mm.input_norm.bias"] = (
-                    "model.visual.merger.norm.bias"
-                )
+                self._map_qwen35_merger(gguf_to_hf_name_map)
         if model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
             model_type = "qwen35moe"
             self._map_gdn_dt_bias(
                 gguf_to_hf_name_map, sideload_params, text_config, is_multimodal
             )
             if is_multimodal:
-                # Same merger mappings for the MoE variant
-                gguf_to_hf_name_map["mm.0.weight"] = (
-                    "model.visual.merger.linear_fc1.weight"
-                )
-                gguf_to_hf_name_map["mm.0.bias"] = "model.visual.merger.linear_fc1.bias"
-                gguf_to_hf_name_map["mm.2.weight"] = (
-                    "model.visual.merger.linear_fc2.weight"
-                )
-                gguf_to_hf_name_map["mm.2.bias"] = "model.visual.merger.linear_fc2.bias"
-                gguf_to_hf_name_map["mm.input_norm.weight"] = (
-                    "model.visual.merger.norm.weight"
-                )
-                gguf_to_hf_name_map["mm.input_norm.bias"] = (
-                    "model.visual.merger.norm.bias"
-                )
+                self._map_qwen35_merger(gguf_to_hf_name_map)
             # GGUF layer map assumes merged expert weights.
             # Multimodal uses the model.language_model.layers prefix.
             layer_prefix = (
