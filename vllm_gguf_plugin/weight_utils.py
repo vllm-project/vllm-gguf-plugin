@@ -122,12 +122,9 @@ def gguf_quant_weights_iterator_multi(
                 name = tensor.name
 
             weight_type = tensor.tensor_type
-            # embed_tokens / lm_head load into VocabParallelEmbedding /
-            # ParallelLMHead as plain weights; dequantize instead of emitting
-            # GGUF quant params (which those layers drop, leaving zeros).
-            if weight_type.name not in _QUANT_TYPES and name.endswith(
-                dequant_suffixes
-            ):
+            # These load as plain weights; emitting GGUF quant params here
+            # would leave them zeroed.
+            if weight_type.name not in _QUANT_TYPES and name.endswith(dequant_suffixes):
                 deq = gguf.quants.dequantize(tensor.data, weight_type)
                 yield name, torch.tensor(deq)
                 continue

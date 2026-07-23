@@ -93,9 +93,13 @@ class GGUFModelLoader(BaseModelLoader):
             index_path = hf_hub_download(
                 repo, "model.safetensors.index.json", revision=model_config.revision
             )
-        except Exception:
-            return None  # single-file checkpoint or no index — fall back
-        weight_map = json.load(open(index_path))["weight_map"]
+        except Exception as e:
+            # No index (single-file checkpoint), or the fetch failed — the
+            # caller then downloads the whole repo, so say why.
+            logger.info("No MTP shard index for %s (%s)", repo, e)
+            return None
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
         shards = sorted({f for name, f in weight_map.items() if "mtp" in name.lower()})
         if not shards:
             return None
