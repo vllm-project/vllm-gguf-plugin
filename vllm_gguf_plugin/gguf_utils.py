@@ -391,6 +391,17 @@ def maybe_patch_hf_config_from_gguf(
     return hf_config
 
 
+def find_nextn_block_index(gguf_files: list[str]) -> int | None:
+    """Return the block index of the MTP/nextn layer in *gguf_files*, or None
+    when the export dropped it (llama.cpp skips ``mtp.*`` by default; unsloth's
+    ``*-MTP-GGUF`` repos keep it as one extra block)."""
+    for gguf_file in gguf_files:
+        for tensor in gguf.GGUFReader(gguf_file).tensors:
+            if match := re.match(r"blk\.(\d+)\.nextn\.", tensor.name):
+                return int(match.group(1))
+    return None
+
+
 def get_gguf_file_path_from_hf(
     repo_id: str | Path,
     quant_type: str,

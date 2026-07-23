@@ -16,9 +16,10 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from .gguf_utils import find_nextn_block_index
 from .quantization import GGUFConfig
 from .weight_utils import download_gguf, resolve_local_gguf
-from .weights_adapter import get_weights_adapter
+from .weights_adapter import GGUFWeightsAdapter, get_weights_adapter
 
 logger = init_logger(__name__)
 
@@ -108,6 +109,11 @@ class GGUFModelLoader(BaseModelLoader):
             hf_hub_download(repo, shard, revision=model_config.revision)
         return os.path.dirname(index_path)
 
+    def _gguf_has_mtp(self, target_mc: ModelConfig) -> bool:
+        """Whether the target's GGUF carries the MTP/nextn draft block."""
+        files = GGUFWeightsAdapter._get_all_gguf_files(self._prepare_weights(target_mc))
+        return find_nextn_block_index(files) is not None
+
     def _load_hf_draft(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str
     ) -> nn.Module:
@@ -146,17 +152,16 @@ class GGUFModelLoader(BaseModelLoader):
         device_config = vllm_config.device_config
         # A draft ModelConfig has no GGUF reference of its own.
         target_mc = vllm_config.model_config
-        if model_config is not target_mc and not model_config.model_weights:
+        is_draft = model_config is not target_mc
+        if is_draft and not model_config.model_weights:
             model_type = getattr(model_config.hf_config, "model_type", "") or ""
-            # llama.cpp/unsloth GGUF exports omit the MTP/nextn draft layers,
-            # but they exist in the HF safetensors repo. Load the draft from
-            # there in native dtype instead of the GGUF loader.
-            if "mtp" in model_type:
+            # Only unsloth's *-MTP-GGUF keeps the nextn block.
+            if "mtp" in model_type and not self._gguf_has_mtp(target_mc):
                 return self._load_hf_draft(vllm_config, model_config, prefix)
-            # Otherwise the draft shares the target's GGUF file — borrow its ref.
             model_config.model_weights = target_mc.model_weights
         adapter = self._prepare_adapter(model_config)
-        vllm_config.model_config.hf_config = model_config.hf_config
+        if not is_draft:
+            vllm_config.model_config.hf_config = model_config.hf_config
         logger.debug(
             "GGUF unquantized modules: %s", adapter.load_spec.unquantized_modules
         )
