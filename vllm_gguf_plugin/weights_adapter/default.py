@@ -75,7 +75,11 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                     f"model.visual.merger.{hf_name}.{suffix}"
                 )
 
-    def build_name_map(self, model_config: ModelConfig) -> dict[str, str]:
+    def build_name_map(
+        self,
+        model_config: ModelConfig,
+        gguf_tensor_names: set[str] | None = None,
+    ) -> dict[str, str]:
         config = model_config.hf_config
         text_config = config.get_text_config()
         model_type = config.model_type
@@ -182,11 +186,18 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"{layer_prefix}.{idx}.mlp.experts.0.up_proj.weight"
                 )
-                sideload_params.append(
-                    regex.compile(
-                        f"{layer_prefix_re}\\.{idx}"
-                        r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
-                    )
+                sideload_params.extend(
+                    [
+                        regex.compile(
+                            f"{layer_prefix_re}\\.{idx}"
+                            r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                        ),
+                        # Fused expert params; loaded via the per-expert names.
+                        regex.compile(
+                            f"{layer_prefix_re}\\.{idx}"
+                            r"\.mlp\.experts\.(gate_up_proj|down_proj)"
+                        ),
+                    ]
                 )
         if model_type == "minimax_m2":
             model_type = "minimax-m2"
@@ -305,6 +316,19 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 f"Failed to map GGUF parameters "
                 f"({len(unmapped_params)}): {unmapped_params}"
             )
+        # The mirror of the check above: a name mapped to a tensor no file has
+        # would load at its random init. Sideloaded params are the exceptions.
+        if gguf_tensor_names is not None:
+            missing = sorted(
+                hf_name
+                for gguf_name, hf_name in gguf_to_hf_name_map.items()
+                if gguf_name not in gguf_tensor_names
+                and not any(regex.fullmatch(p, hf_name) for p in sideload_params)
+            )
+            if missing:
+                logger.warning(
+                    "No GGUF tensor for %d mapped param(s): %s", len(missing), missing
+                )
         return gguf_to_hf_name_map
 
     def map_weights(

@@ -14,7 +14,11 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 from ..gguf_utils import detect_gguf_multimodal
-from ..weight_utils import get_gguf_weight_type_map, gguf_quant_weights_iterator_multi
+from ..weight_utils import (
+    get_gguf_tensor_names,
+    get_gguf_weight_type_map,
+    gguf_quant_weights_iterator_multi,
+)
 from .base import GGUFLoadSpec
 from .default import GGUFWeightsAdapter
 
@@ -54,7 +58,13 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
         self.config = model_config.hf_config
         mmproj_path = self._ensure_mmproj(model_path, model_config)
 
-        gguf_to_hf_name_map = self.build_name_map(model_config)
+        weights_source = self._get_all_gguf_files(model_path)
+        if mmproj_path is not None:
+            weights_source.append(str(mmproj_path))
+
+        gguf_to_hf_name_map = self.build_name_map(
+            model_config, get_gguf_tensor_names(weights_source)
+        )
         # Only the first Conv3d temporal slice has a gguf-py map entry.
         patch_embd = gguf_to_hf_name_map.get("v.patch_embd.weight")
         if patch_embd is not None:
@@ -65,21 +75,10 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
             model_path, model_config.hf_config, gguf_to_hf_name_map
         )
 
-        weights_source = self._get_all_gguf_files(model_path)
-        if mmproj_path is not None:
-            weights_source.append(str(mmproj_path))
-
         weight_type_map: dict[str, str] = {}
         for gguf_file in weights_source:
             weight_type_map.update(
                 get_gguf_weight_type_map(gguf_file, gguf_to_hf_name_map)
-            )
-        # A map entry naming a tensor no GGUF file has means the param loads
-        # at its random init; build_name_map can't see this.
-        missing = sorted(set(gguf_to_hf_name_map.values()) - weight_type_map.keys())
-        if missing:
-            logger.warning(
-                "No GGUF tensor for %d mapped param(s): %s", len(missing), missing
             )
 
         unquantized_modules = self.get_unquantized_modules(weight_type_map)

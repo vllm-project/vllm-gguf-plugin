@@ -80,6 +80,15 @@ def get_gguf_extra_tensor_names(
     return [gguf_to_hf_name_map[key] for key in extra_keys]
 
 
+def get_gguf_tensor_names(gguf_files: list[str]) -> set[str]:
+    """Names of every tensor in *gguf_files*, regardless of any name map."""
+    return {
+        tensor.name
+        for gguf_file in gguf_files
+        for tensor in gguf.GGUFReader(gguf_file).tensors
+    }
+
+
 def get_gguf_weight_type_map(
     gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
 ) -> dict[str, str]:
