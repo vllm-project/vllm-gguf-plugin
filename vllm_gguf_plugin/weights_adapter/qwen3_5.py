@@ -55,6 +55,12 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
         mmproj_path = self._ensure_mmproj(model_path, model_config)
 
         gguf_to_hf_name_map = self.build_name_map(model_config)
+        # Only the first Conv3d temporal slice has a gguf-py map entry.
+        patch_embd = gguf_to_hf_name_map.get("v.patch_embd.weight")
+        if patch_embd is not None:
+            tps = getattr(self.config.vision_config, "temporal_patch_size", 1)
+            for i in range(1, tps):
+                gguf_to_hf_name_map[f"v.patch_embd.weight.{i}"] = f"{patch_embd}.{i}"
         self.update_tie_word_embeddings(
             model_path, model_config.hf_config, gguf_to_hf_name_map
         )
@@ -229,6 +235,7 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
     ) -> Iterable[tuple[str, torch.Tensor]]:
         vision_config = getattr(self.config, "vision_config", None)
         temporal_patch_size = getattr(vision_config, "temporal_patch_size", 1)
+        patch_embed_parts: dict[str, torch.Tensor] = {}
         for name, weight in weights:
             # Forced-unquantized modules keep plain params.
             if "qweight" in name and ("lm_head." in name or "embed_tokens." in name):
@@ -251,20 +258,22 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
                 # GGUF conversion bakes (w + 1) into these RMSNorm weights.
                 yield name, weight - 1
                 continue
+            if temporal_patch_size > 1 and "patch_embed.proj.weight" in name:
+                # GGUF holds one 2D conv per temporal frame; stack back to 5D.
+                base, split, _ = name.rpartition(".weight.")
+                key = f"{base}.weight" if split else name
+                patch_embed_parts[name] = weight
+                parts = [patch_embed_parts.get(key)] + [
+                    patch_embed_parts.get(f"{key}.{i}")
+                    for i in range(1, temporal_patch_size)
+                ]
+                if any(part is None for part in parts):
+                    continue
+                yield key, torch.stack(parts, dim=2)
+                continue
             if "conv1d.weight" in name and weight.dim() == 2:
                 # depthwise Conv1d: [d, k] -> [d, 1, k]
                 weight = weight.unsqueeze(1)
-            elif (
-                temporal_patch_size > 1
-                and weight.dim() == 4
-                and "patch_embed.proj.weight" in name
-            ):
-                # GGUF mmproj stores patch_embed as a 2D conv; the model uses
-                # a 3D conv over temporal_patch_size frames. Expand to 5D.
-                weight = (
-                    weight.unsqueeze(2).repeat(1, 1, temporal_patch_size, 1, 1)
-                    / temporal_patch_size
-                )
             elif name.endswith(".weight") and weight.dim() == 1 and "norm" not in name:
                 # GGUF flattens [1, hidden] linears (e.g. shared expert gate).
                 weight = weight.unsqueeze(0)

@@ -112,13 +112,22 @@ class TestTransformWeights:
         out = self._transform(adapter, [(name, torch.zeros(16))])
         assert out[name].shape == (16,)
 
-    def test_expands_patch_embed_temporal_dim(self):
+    def test_stacks_patch_embed_temporal_slices(self):
         adapter = self._make_adapter(temporal_patch_size=2)
         name = "model.visual.patch_embed.proj.weight"
-        weight = torch.ones(8, 3, 14, 14)
-        out = self._transform(adapter, [(name, weight)])
+        first, second = torch.ones(8, 3, 14, 14), torch.zeros(8, 3, 14, 14)
+        out = self._transform(adapter, [(name, first), (f"{name}.1", second)])
+        assert list(out) == [name]
         assert out[name].shape == (8, 3, 2, 14, 14)
-        assert torch.allclose(out[name].sum(dim=2), weight)
+        assert torch.equal(out[name][:, :, 0], first)
+        assert torch.equal(out[name][:, :, 1], second)
+
+    def test_stacks_patch_embed_slices_out_of_order(self):
+        adapter = self._make_adapter(temporal_patch_size=2)
+        name = "model.visual.patch_embed.proj.weight"
+        first, second = torch.ones(8, 3, 14, 14), torch.zeros(8, 3, 14, 14)
+        out = self._transform(adapter, [(f"{name}.1", second), (name, first)])
+        assert torch.equal(out[name][:, :, 0], first)
 
     def test_keeps_patch_embed_without_temporal_expansion(self):
         adapter = self._make_adapter(temporal_patch_size=1)
