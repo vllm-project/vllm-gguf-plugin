@@ -173,7 +173,12 @@ class GGUFModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(vllm_config=vllm_config, prefix=prefix)
+                # vllm_config.model_config stays the target's even for a draft.
+                model = initialize_model(
+                    vllm_config=vllm_config,
+                    model_config=model_config,
+                    prefix=prefix,
+                )
             model.load_weights(
                 adapter.prepare_weights(model_config),
             )
