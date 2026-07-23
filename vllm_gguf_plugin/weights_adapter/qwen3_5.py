@@ -74,6 +74,14 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
             weight_type_map.update(
                 get_gguf_weight_type_map(gguf_file, gguf_to_hf_name_map)
             )
+        # A map entry naming a tensor no GGUF file has means the param loads
+        # at its random init; build_name_map can't see this.
+        missing = sorted(set(gguf_to_hf_name_map.values()) - weight_type_map.keys())
+        if missing:
+            logger.warning(
+                "No GGUF tensor for %d mapped param(s): %s", len(missing), missing
+            )
+
         unquantized_modules = self.get_unquantized_modules(weight_type_map)
         # ParallelLMHead / VocabParallelEmbedding take plain params only.
         for name in ("lm_head", "embed_tokens"):
