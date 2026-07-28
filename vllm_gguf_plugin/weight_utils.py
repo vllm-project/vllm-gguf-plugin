@@ -9,8 +9,9 @@ from pathlib import Path
 import gguf
 import numpy as np
 import torch
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from vllm.logger import init_logger
+from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
@@ -49,6 +50,37 @@ def download_gguf(
 
     local_files.sort(key=lambda x: (x.count("-"), x))
     return local_files[0]
+
+
+def download_mmproj(
+    repo_id: str,
+    cache_dir: str | None = None,
+    revision: str | None = None,
+) -> None:
+    """Fetch the multimodal projector into the backbone's snapshot dir.
+
+    ``download_gguf`` only matches the requested quant type, so the mmproj
+    file of a multimodal repo is never pulled by it. Repos ship the projector
+    in several precisions; take one, both to save the download and to keep
+    ``detect_gguf_multimodal`` deterministic. Downloading through the hub
+    cache keeps concurrent TP workers serialized on the cache lock.
+    """
+    try:
+        mmproj_files = list_filtered_repo_files(
+            repo_id, allow_patterns=["*mmproj*.gguf"], revision=revision
+        )
+        if not mmproj_files:
+            return
+        filename = sorted(mmproj_files)[0]
+        logger.info("Downloading mmproj file %s from %s", filename, repo_id)
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            cache_dir=cache_dir,
+            revision=revision,
+        )
+    except Exception as e:
+        logger.warning("Failed to download mmproj from %s: %s", repo_id, e)
 
 
 def resolve_local_gguf(local_dir: str, quant_type: str) -> str:

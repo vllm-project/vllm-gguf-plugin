@@ -3,15 +3,11 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
-from huggingface_hub import hf_hub_download
-from vllm.logger import init_logger
-from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 from ..gguf_utils import detect_gguf_multimodal
 from ..weight_utils import (
@@ -24,8 +20,6 @@ from .default import GGUFWeightsAdapter
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-
-logger = init_logger(__name__)
 
 QWEN35_MODEL_TYPES = (
     "qwen3_5",
@@ -56,7 +50,8 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
         )
         # patch_hf_config may replace the config object (multimodal upgrade)
         self.config = model_config.hf_config
-        mmproj_path = self._ensure_mmproj(model_path, model_config)
+
+        mmproj_path = self._ensure_mmproj(model_path)
 
         weights_source = self._get_all_gguf_files(model_path)
         if mmproj_path is not None:
@@ -113,44 +108,14 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
         )
         return self.load_spec
 
-    def _ensure_mmproj(self, model_path: str, model_config: ModelConfig):
-        """Locate (and download if needed) the mmproj file for multimodal
-        Qwen3.5 models. Returns its path, or None for text-only configs."""
-        if getattr(model_config.hf_config, "vision_config", None) is None:
+    def _ensure_mmproj(self, model_path: str) -> Path | None:
+        """Path to the mmproj file for a multimodal Qwen3.5 config, or None
+        when the model is text-only. The loader fetches it alongside the
+        backbone."""
+        if getattr(self.config, "vision_config", None) is None:
             return None
 
         mmproj_path = detect_gguf_multimodal(model_path)
-        if mmproj_path is not None:
-            return mmproj_path
-
-        repo_id = self._infer_repo_id(model_config)
-        if repo_id is not None:
-            try:
-                mmproj_files = list_filtered_repo_files(
-                    repo_id,
-                    allow_patterns=["*mmproj*.gguf"],
-                    revision=model_config.revision,
-                )
-                if mmproj_files:
-                    logger.info(
-                        "Downloading mmproj file %s from %s",
-                        mmproj_files[0],
-                        repo_id,
-                    )
-                    # Reuse the backbone's cache root so the file lands in
-                    # the same snapshot dir and concurrent TP workers
-                    # serialize on the hub cache lock instead of clobbering
-                    # each other.
-                    hf_hub_download(
-                        repo_id=repo_id,
-                        filename=mmproj_files[0],
-                        revision=model_config.revision,
-                        cache_dir=self._resolve_hf_cache_dir(model_path),
-                    )
-            except Exception as e:
-                logger.warning("Failed to download mmproj from %s: %s", repo_id, e)
-            mmproj_path = detect_gguf_multimodal(model_path)
-
         if mmproj_path is None:
             raise RuntimeError(
                 "Could not find mmproj file for multimodal GGUF model. "
@@ -158,27 +123,6 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
                 "as the backbone GGUF file or available in the HF repo."
             )
         return mmproj_path
-
-    @staticmethod
-    def _resolve_hf_cache_dir(model_path: str) -> str | None:
-        """Return the HF cache root containing *model_path* (covers custom
-        --download-dir layouts), or None for the default cache."""
-        for parent in Path(model_path).parents:
-            if parent.name.startswith("models--"):
-                return str(parent.parent)
-        return None
-
-    @staticmethod
-    def _infer_repo_id(model_config: ModelConfig) -> str | None:
-        ref = str(model_config.model_weights or model_config.model)
-        if os.path.exists(ref):
-            return None
-        if ":" in ref:
-            base, _ = ref.rsplit(":", 1)
-            return None if os.path.isdir(base) else base
-        if ref.endswith(".gguf") and "/" in ref:
-            return ref.rsplit("/", 1)[0]
-        return None
 
     def prepare_weights(
         self,

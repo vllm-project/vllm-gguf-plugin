@@ -41,49 +41,6 @@ class TestMergerNameMap:
         }
 
 
-class TestInferRepoId:
-    def test_remote_quant_reference(self):
-        model_config = SimpleNamespace(
-            model_weights="unsloth/Qwen3.5-0.8B-GGUF:UD-IQ2_XXS", model=None
-        )
-        assert (
-            Qwen35GGUFAdapter._infer_repo_id(model_config)
-            == "unsloth/Qwen3.5-0.8B-GGUF"
-        )
-
-    def test_repo_file_reference(self):
-        model_config = SimpleNamespace(
-            model_weights="unsloth/Qwen3.5-0.8B-GGUF/model-Q4_K_M.gguf", model=None
-        )
-        assert (
-            Qwen35GGUFAdapter._infer_repo_id(model_config)
-            == "unsloth/Qwen3.5-0.8B-GGUF"
-        )
-
-    def test_local_file_returns_none(self, tmp_path):
-        gguf_path = tmp_path / "model.gguf"
-        gguf_path.write_bytes(b"GGUF")
-        model_config = SimpleNamespace(model_weights=str(gguf_path), model=None)
-        assert Qwen35GGUFAdapter._infer_repo_id(model_config) is None
-
-    def test_local_dir_with_quant_returns_none(self, tmp_path):
-        model_config = SimpleNamespace(model_weights=f"{tmp_path}:Q8_0", model=None)
-        assert Qwen35GGUFAdapter._infer_repo_id(model_config) is None
-
-
-class TestResolveHfCacheDir:
-    def test_hub_cache_layout_returns_cache_root(self, tmp_path):
-        snapshot = (
-            tmp_path / "models--unsloth--Qwen3.5-0.8B-GGUF" / "snapshots" / "abc123"
-        )
-        model_path = snapshot / "model-Q4_K_M.gguf"
-        assert Qwen35GGUFAdapter._resolve_hf_cache_dir(str(model_path)) == str(tmp_path)
-
-    def test_plain_path_returns_none(self, tmp_path):
-        model_path = tmp_path / "gguf" / "model.gguf"
-        assert Qwen35GGUFAdapter._resolve_hf_cache_dir(str(model_path)) is None
-
-
 class TestTransformWeights:
     def _transform(self, adapter, weights):
         return dict(adapter._transform_qwen35_weights(weights))

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -122,11 +123,13 @@ class TestGGUFModelLoader:
         model_config = MagicMock()
         model_config.model_weights = "unsloth/Qwen3-0.6B-GGUF/model.gguf"
         model_config.model = "unsloth/Qwen3-0.6B-GGUF"
+        model_config.revision = None
+        model_config.hf_config = SimpleNamespace()
 
         result = loader._prepare_weights(model_config)
         assert result == "/downloaded/model.gguf"
         mock_hf_download.assert_called_once_with(
-            repo_id="unsloth/Qwen3-0.6B-GGUF", filename="model.gguf"
+            repo_id="unsloth/Qwen3-0.6B-GGUF", filename="model.gguf", revision=None
         )
 
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
@@ -150,10 +153,46 @@ class TestGGUFModelLoader:
         model_config.model_weights = "unsloth/Qwen3-0.6B-GGUF:IQ1_S"
         model_config.model = "unsloth/Qwen3-0.6B-GGUF"
         model_config.revision = None
+        model_config.hf_config = SimpleNamespace()
 
         result = loader._prepare_weights(model_config)
         assert result == f"{mock_folder}/model-IQ1_S.gguf"
         mock_download.assert_called_once()
+
+    @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
+    @patch("vllm_gguf_plugin.weight_utils.list_filtered_repo_files")
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    @patch("glob.glob")
+    @patch("os.path.isdir", return_value=False)
+    @patch("os.path.isfile", return_value=False)
+    def test_prepare_weights_fetches_one_mmproj_for_multimodal(
+        self, mock_isfile, mock_isdir, mock_glob, mock_download, mock_list, mock_hf
+    ):
+        """A multimodal config also pulls the projector — which the quant-type
+        patterns of download_gguf never match — but only one precision of it."""
+        mock_folder = "/tmp/mock_cache"
+        mock_download.return_value = mock_folder
+        mock_glob.side_effect = lambda pattern, **kwargs: (
+            [f"{mock_folder}/model-IQ1_S.gguf"] if "IQ1_S" in pattern else []
+        )
+        mock_list.return_value = ["mmproj-F32.gguf", "mmproj-BF16.gguf"]
+
+        loader = GGUFModelLoader(LoadConfig(load_format="gguf"))
+
+        model_config = MagicMock()
+        model_config.model_weights = "unsloth/Qwen3.5-0.8B-GGUF:IQ1_S"
+        model_config.model = "unsloth/Qwen3.5-0.8B-GGUF"
+        model_config.revision = None
+        model_config.hf_config = SimpleNamespace(vision_config=SimpleNamespace())
+
+        result = loader._prepare_weights(model_config)
+        assert result == f"{mock_folder}/model-IQ1_S.gguf"
+        mock_hf.assert_called_once_with(
+            repo_id="unsloth/Qwen3.5-0.8B-GGUF",
+            filename="mmproj-BF16.gguf",
+            cache_dir=None,
+            revision=None,
+        )
 
     @patch("os.path.isfile", return_value=False)
     def test_prepare_weights_invalid_format(self, mock_isfile):

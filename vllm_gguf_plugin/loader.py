@@ -18,7 +18,7 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .gguf_utils import find_nextn_block_index
 from .quantization import GGUFConfig
-from .weight_utils import download_gguf, resolve_local_gguf
+from .weight_utils import download_gguf, download_mmproj, resolve_local_gguf
 from .weights_adapter import GGUFWeightsAdapter, get_weights_adapter
 
 logger = init_logger(__name__)
@@ -43,12 +43,21 @@ class GGUFModelLoader(BaseModelLoader):
         model_name_or_path = model_config.model_weights or model_config.model
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
+        # Multimodal configs need the projector next to the backbone.
+        hf_config = model_config.hf_config
+        needs_mmproj = getattr(hf_config, "vision_config", None) is not None
         # local_dir:quant_type (e.g. /path/to/gguf-dir:Q8_0)
         if ":" in model_name_or_path:
             local_dir, quant_type = model_name_or_path.rsplit(":", 1)
             if os.path.isdir(local_dir):
                 return resolve_local_gguf(local_dir, quant_type)
             # remote repo_id:quant_type
+            if needs_mmproj:
+                download_mmproj(
+                    local_dir,
+                    cache_dir=self.load_config.download_dir,
+                    revision=model_config.revision,
+                )
             return download_gguf(
                 local_dir,
                 quant_type,
@@ -59,7 +68,12 @@ class GGUFModelLoader(BaseModelLoader):
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
-            return hf_hub_download(repo_id=repo_id, filename=filename)
+            if needs_mmproj:
+                download_mmproj(repo_id, revision=model_config.revision)
+            # Same revision as the mmproj, or they land in different snapshots.
+            return hf_hub_download(
+                repo_id=repo_id, filename=filename, revision=model_config.revision
+            )
 
         raise ValueError(
             f"Unrecognised GGUF reference: {model_name_or_path} "
