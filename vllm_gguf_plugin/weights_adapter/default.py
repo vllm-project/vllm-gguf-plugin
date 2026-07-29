@@ -43,43 +43,9 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
     def patch_hf_config(self, model_path: str, hf_config: PretrainedConfig):
         return maybe_patch_hf_config_from_gguf(model_path, hf_config)
 
-    @staticmethod
-    def _map_gdn_dt_bias(
-        gguf_to_hf_name_map, sideload_params, text_config, is_multimodal
-    ):
-        # gguf-py has no map for dt_bias; without this it stays zero and
-        # breaks GDN recurrence. sideload is the fallback when GGUF omits it.
-        layer_prefix = (
-            "model.language_model.layers" if is_multimodal else "model.layers"
-        )
-        for idx in range(text_config.num_hidden_layers):
-            gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
-                f"{layer_prefix}.{idx}.linear_attn.dt_bias"
-            )
-        sideload_params.append(
-            regex.compile(
-                r"model\.(language_model\.)?layers\.\d+\.linear_attn\.dt_bias"
-            )
-        )
-
-    @staticmethod
-    def _map_qwen35_merger(gguf_to_hf_name_map):
-        # gguf-py's MMPROJ map has no linear_fc1/fc2 patterns, and llama.cpp
-        # writes the merger norm as v.post_ln.
-        for gguf_name, hf_name in (
-            ("mm.0", "linear_fc1"),
-            ("mm.2", "linear_fc2"),
-            ("v.post_ln", "norm"),
-        ):
-            for suffix in ("weight", "bias"):
-                gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = (
-                    f"model.visual.merger.{hf_name}.{suffix}"
-                )
-
     def build_name_map(
         self,
         model_config: ModelConfig,
-        gguf_tensor_names: set[str] | None = None,
     ) -> dict[str, str]:
         config = model_config.hf_config
         text_config = config.get_text_config()
@@ -153,49 +119,6 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                         ),
                         regex.compile(
                             f"model\\.layers\\.{idx}"
-                            r"\.mlp\.experts\.(gate_up_proj|down_proj)"
-                        ),
-                    ]
-                )
-        if model_type in ("qwen3_5", "qwen3_5_text"):
-            model_type = "qwen35"
-            self._map_gdn_dt_bias(
-                gguf_to_hf_name_map, sideload_params, text_config, is_multimodal
-            )
-            if is_multimodal:
-                self._map_qwen35_merger(gguf_to_hf_name_map)
-        if model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
-            model_type = "qwen35moe"
-            self._map_gdn_dt_bias(
-                gguf_to_hf_name_map, sideload_params, text_config, is_multimodal
-            )
-            if is_multimodal:
-                self._map_qwen35_merger(gguf_to_hf_name_map)
-            # GGUF layer map assumes merged expert weights.
-            # Multimodal uses the model.language_model.layers prefix.
-            layer_prefix = (
-                "model.language_model.layers" if is_multimodal else "model.layers"
-            )
-            layer_prefix_re = layer_prefix.replace(".", "\\.")
-            for idx in range(text_config.num_hidden_layers):
-                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
-                    f"{layer_prefix}.{idx}.mlp.experts.0.down_proj.weight"
-                )
-                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
-                    f"{layer_prefix}.{idx}.mlp.experts.0.gate_proj.weight"
-                )
-                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
-                    f"{layer_prefix}.{idx}.mlp.experts.0.up_proj.weight"
-                )
-                sideload_params.extend(
-                    [
-                        regex.compile(
-                            f"{layer_prefix_re}\\.{idx}"
-                            r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
-                        ),
-                        # Fused expert params; loaded via the per-expert names.
-                        regex.compile(
-                            f"{layer_prefix_re}\\.{idx}"
                             r"\.mlp\.experts\.(gate_up_proj|down_proj)"
                         ),
                     ]
@@ -317,19 +240,6 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 f"Failed to map GGUF parameters "
                 f"({len(unmapped_params)}): {unmapped_params}"
             )
-        # The mirror of the check above: a name mapped to a tensor no file has
-        # would load at its random init. Sideloaded params are the exceptions.
-        if gguf_tensor_names is not None:
-            missing = sorted(
-                hf_name
-                for gguf_name, hf_name in gguf_to_hf_name_map.items()
-                if gguf_name not in gguf_tensor_names
-                and not any(regex.fullmatch(p, hf_name) for p in sideload_params)
-            )
-            if missing:
-                logger.warning(
-                    "No GGUF tensor for %d mapped param(s): %s", len(missing), missing
-                )
         return gguf_to_hf_name_map
 
     def map_weights(
