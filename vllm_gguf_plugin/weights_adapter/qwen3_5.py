@@ -8,19 +8,24 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
+from vllm.logger import init_logger
+from vllm.model_executor.models.utils import WeightsMapper
 
-from ..gguf_utils import detect_gguf_multimodal
+from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
 from ..weight_utils import (
     get_gguf_shard_files,
     get_gguf_tensor_names,
-    get_gguf_weight_type_map,
+    get_gguf_unquantized_params,
     gguf_quant_weights_iterator_multi,
+    split_stacked_experts,
 )
-from .base import GGUFLoadSpec
-from .default import GGUFWeightsAdapter
+from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
 
 if TYPE_CHECKING:
+    from transformers import PretrainedConfig
     from vllm.config import ModelConfig
+
+logger = init_logger(__name__)
 
 QWEN35_MODEL_TYPES = (
     "qwen3_5",
@@ -28,18 +33,112 @@ QWEN35_MODEL_TYPES = (
     "qwen3_5_moe",
     "qwen3_5_moe_text",
 )
+QWEN35_MOE_MODEL_TYPES = ("qwen3_5_moe", "qwen3_5_moe_text")
+
+# GGUF tensors that load as plain params, so they must be dequantized on the
+# way out (names are the GGUF ones, the mapper runs afterwards).
+DEQUANT_TENSORS = ("token_embd.weight", "output.weight")
 
 
-class Qwen35GGUFAdapter(GGUFWeightsAdapter):
+def build_qwen35_text_mapper(is_multimodal: bool, is_moe: bool) -> WeightsMapper:
+    backbone_prefix = "model.language_model." if is_multimodal else "model."
+    orig_to_new_substr: dict[str, str] = {
+        "attn_norm.": "input_layernorm.",
+        "post_attention_norm.": "post_attention_layernorm.",
+        # attention
+        "attn_q_norm.": "self_attn.q_norm.",
+        "attn_k_norm.": "self_attn.k_norm.",
+        "attn_q.": "self_attn.q_proj.",
+        "attn_k.": "self_attn.k_proj.",
+        "attn_v.": "self_attn.v_proj.",
+        "attn_output.": "self_attn.o_proj.",
+        # gated delta net; llama.cpp writes the two fused in_proj halves under
+        # the attention names, the rest under ssm_*.
+        "attn_qkv.": "linear_attn.in_proj_qkv.",
+        "attn_gate.": "linear_attn.in_proj_z.",
+        "ssm_alpha.": "linear_attn.in_proj_a.",
+        "ssm_beta.": "linear_attn.in_proj_b.",
+        "ssm_conv1d.": "linear_attn.conv1d.",
+        "ssm_norm.": "linear_attn.norm.",
+        "ssm_out.": "linear_attn.out_proj.",
+        # A_log and dt_bias are bare params in the HF checkpoint, so they drop
+        # the GGUF suffix. Keep these after ssm_alpha, "ssm_a" is a prefix of it.
+        "ssm_dt.bias": "linear_attn.dt_bias",
+        "ssm_a.weight": "linear_attn.A_log",
+        "ssm_a": "linear_attn.A_log",
+    }
+    if is_moe:
+        orig_to_new_substr |= {
+            "ffn_gate_inp_shexp.": "mlp.shared_expert_gate.",
+            "ffn_gate_inp.": "mlp.gate.",
+            # Expert weights are stacked; prepare_weights splits them per expert.
+            "ffn_gate_exps.": "mlp.experts.0.gate_proj.",
+            "ffn_up_exps.": "mlp.experts.0.up_proj.",
+            "ffn_down_exps.": "mlp.experts.0.down_proj.",
+            "ffn_gate_shexp.": "mlp.shared_expert.gate_proj.",
+            "ffn_up_shexp.": "mlp.shared_expert.up_proj.",
+            "ffn_down_shexp.": "mlp.shared_expert.down_proj.",
+        }
+    else:
+        orig_to_new_substr |= {
+            "ffn_gate.": "mlp.gate_proj.",
+            "ffn_up.": "mlp.up_proj.",
+            "ffn_down.": "mlp.down_proj.",
+        }
+
+    return WeightsMapper(
+        orig_to_new_prefix={
+            "token_embd.": backbone_prefix + "embed_tokens.",
+            "blk.": backbone_prefix + "layers.",
+            "output_norm.": backbone_prefix + "norm.",
+            "output.": "lm_head.",
+        },
+        orig_to_new_substr=orig_to_new_substr,
+    )
+
+
+def build_qwen35_vision_mapper() -> WeightsMapper:
+    """Vision tower and merger. Kept apart from the text mapper because the
+    two reuse GGUF names for different modules (``attn_qkv`` is the merged QKV
+    of a vision block, but the GDN in_proj of a text layer)."""
+    return WeightsMapper(
+        orig_to_new_prefix={
+            "v.blk.": "model.visual.blocks.",
+            "v.patch_embd.": "model.visual.patch_embed.proj.",
+            "v.position_embd.": "model.visual.pos_embed.",
+            # llama.cpp writes the merger norm as v.post_ln and its MLP as mm.N.
+            "v.post_ln.": "model.visual.merger.norm.",
+            "mm.0.": "model.visual.merger.linear_fc1.",
+            "mm.2.": "model.visual.merger.linear_fc2.",
+        },
+        orig_to_new_substr={
+            "attn_qkv.": "attn.qkv.",
+            "attn_out.": "attn.proj.",
+            "ffn_up.": "mlp.linear_fc1.",
+            "ffn_down.": "mlp.linear_fc2.",
+            "ln1.": "norm1.",
+            "ln2.": "norm2.",
+        },
+    )
+
+
+class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
     """Adapter for Qwen3.5 dense and MoE GGUF models (Qwen3.6 reuses the
     qwen3_5_moe architecture)."""
 
+    text_mapper = None
+    vision_mapper = None
+    load_spec = None
+
     _reorder: dict | None = None
-    _dequant_suffixes: tuple[str, ...] = ()
+    _dequant_tensors: tuple[str, ...] = DEQUANT_TENSORS
 
     @classmethod
     def matches(cls, config) -> bool:
         return config.model_type in QWEN35_MODEL_TYPES
+
+    def patch_hf_config(self, model_path: str, hf_config: PretrainedConfig):
+        return maybe_patch_hf_config_from_gguf(model_path, hf_config)
 
     def prepare_loading(
         self,
@@ -53,58 +152,43 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
         self.config = model_config.hf_config
 
         mmproj_path = self._ensure_mmproj(model_path)
-
-        weights_source = get_gguf_shard_files(model_path)
+        gguf_files = get_gguf_shard_files(model_path)
         if mmproj_path is not None:
-            weights_source.append(str(mmproj_path))
+            gguf_files.append(str(mmproj_path))
 
-        gguf_to_hf_name_map = self.build_name_map(
-            model_config, get_gguf_tensor_names(weights_source)
+        is_moe = self.config.model_type in QWEN35_MOE_MODEL_TYPES
+        self.text_mapper = build_qwen35_text_mapper(
+            is_multimodal=mmproj_path is not None, is_moe=is_moe
         )
-        # Only the first Conv3d temporal slice has a gguf-py map entry.
-        patch_embd = gguf_to_hf_name_map.get("v.patch_embd.weight")
-        if patch_embd is not None:
-            tps = getattr(self.config.vision_config, "temporal_patch_size", 1)
-            for i in range(1, tps):
-                gguf_to_hf_name_map[f"v.patch_embd.weight.{i}"] = f"{patch_embd}.{i}"
-        self.update_tie_word_embeddings(
-            model_path, model_config.hf_config, gguf_to_hf_name_map
-        )
+        self.vision_mapper = build_qwen35_vision_mapper()
+        self._set_gdn_reorder()
 
-        weight_type_map: dict[str, str] = {}
-        for gguf_file in weights_source:
-            weight_type_map.update(
-                get_gguf_weight_type_map(gguf_file, gguf_to_hf_name_map)
+        unmapped = sorted(
+            name
+            for name in get_gguf_tensor_names(gguf_files)
+            if self._map_name(name) is None
+        )
+        if unmapped:
+            logger.warning(
+                "No HF name for %d GGUF tensor(s), skipping: %s",
+                len(unmapped),
+                unmapped,
             )
 
-        unquantized_modules = self.get_unquantized_modules(weight_type_map)
-        # ParallelLMHead / VocabParallelEmbedding take plain params only.
-        for name in ("lm_head", "embed_tokens"):
+        unquantized_modules = list(
+            {
+                mapped.removesuffix(".weight")
+                for param in get_gguf_unquantized_params(gguf_files)
+                if (mapped := self._map_name(param)) is not None
+                and mapped.endswith(".weight")
+            }
+        )
+        for name in self._forced_unquantized_modules():
             if name not in unquantized_modules:
                 unquantized_modules.append(name)
 
-        # llama.cpp tiles GDN V heads when num_value_heads != num_key_heads.
-        tc = self.config.get_text_config()
-        num_k = getattr(tc, "linear_num_key_heads", 0) or 0
-        num_v = getattr(tc, "linear_num_value_heads", 0) or 0
-        self._reorder = None
-        self._dequant_suffixes: tuple[str, ...] = ()
-        if num_k and num_v and num_v % num_k == 0 and num_v // num_k > 1:
-            self._reorder = {
-                "num_k": num_k,
-                "r": num_v // num_k,
-                "head_k": tc.linear_key_head_dim,
-                "head_v": tc.linear_value_head_dim,
-            }
-            # Row reorders work on packed rows; out_proj is a column
-            # reorder, so it alone needs float.
-            self._dequant_suffixes = ("linear_attn.out_proj.weight",)
-            if "linear_attn.out_proj" not in unquantized_modules:
-                unquantized_modules.append("linear_attn.out_proj")
-
         self.load_spec = GGUFLoadSpec(
-            weights_source=weights_source,
-            gguf_to_hf_name_map=gguf_to_hf_name_map,
+            weights_source=gguf_files,
             unquantized_modules=unquantized_modules,
         )
         return self.load_spec
@@ -125,6 +209,44 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
             )
         return mmproj_path
 
+    def _set_gdn_reorder(self) -> None:
+        """llama.cpp tiles GDN V heads when num_value_heads != num_key_heads."""
+        tc = self.config.get_text_config()
+        num_k = getattr(tc, "linear_num_key_heads", 0) or 0
+        num_v = getattr(tc, "linear_num_value_heads", 0) or 0
+        self._reorder = None
+        self._dequant_tensors = DEQUANT_TENSORS
+        if num_k and num_v and num_v % num_k == 0 and num_v // num_k > 1:
+            self._reorder = {
+                "num_k": num_k,
+                "r": num_v // num_k,
+                "head_k": tc.linear_key_head_dim,
+                "head_v": tc.linear_value_head_dim,
+            }
+            # Row reorders work on packed rows; out_proj is a column reorder,
+            # so it alone needs float.
+            self._dequant_tensors += ("ssm_out.weight",)
+
+    def _forced_unquantized_modules(self) -> list[str]:
+        """Modules whose weights are handed over as plain params, so they must
+        not be built with the GGUF linear method."""
+        # ParallelLMHead / VocabParallelEmbedding take plain params only.
+        modules = ["lm_head", "embed_tokens"]
+        if self._reorder is not None:
+            # Dequantized for the GDN column reorder, see _set_gdn_reorder.
+            modules.append("linear_attn.out_proj")
+        return modules
+
+    def _map_name(self, gguf_name: str) -> str | None:
+        """HF name for *gguf_name*, or None when nothing maps it."""
+        mapper = (
+            self.vision_mapper
+            if gguf_name.startswith(("v.", "mm."))
+            else self.text_mapper
+        )
+        hf_name = mapper.apply_list([gguf_name])[0]
+        return hf_name if hf_name != gguf_name else None
+
     def prepare_weights(
         self,
         model_config: ModelConfig,
@@ -132,11 +254,21 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
         del model_config
         weights = gguf_quant_weights_iterator_multi(
             self.load_spec.weights_source,
-            self.load_spec.gguf_to_hf_name_map,
-            dequant_suffixes=("embed_tokens.weight", "lm_head.weight")
-            + self._dequant_suffixes,
+            dequant_suffixes=self._dequant_tensors,
         )
-        yield from self.map_weights(weights)
+        mapped = self.map_names(weights)
+        yield from split_stacked_experts(self.transform_weight(mapped))
+
+    def map_names(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for gguf_name, weight in weights:
+            # Quantized tensors arrive as .qweight / .qweight_type pairs; the
+            # mapper keys on the module part, so both map like the plain name.
+            hf_name = self._map_name(gguf_name)
+            if hf_name is not None:
+                yield hf_name, weight
 
     @staticmethod
     def _inv_reorder(t, dim, num_k, r, head_dim):
@@ -175,16 +307,11 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
             return torch.cat([w[:qk], inv(w[qk:], 0, nk, r, hv)], dim=0).unsqueeze(1)
         return None
 
-    def map_weights(
+    def transform_weight(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[tuple[str, torch.Tensor]]:
-        yield from super().map_weights(self._transform_qwen35_weights(weights))
-
-    def _transform_qwen35_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> Iterable[tuple[str, torch.Tensor]]:
+        """Transform raw GGUF weights to HF-style weights."""
         vision_config = getattr(self.config, "vision_config", None)
         temporal_patch_size = getattr(vision_config, "temporal_patch_size", 1)
         patch_embed_parts: dict[str, torch.Tensor] = {}

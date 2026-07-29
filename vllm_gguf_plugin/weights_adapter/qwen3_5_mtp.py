@@ -10,9 +10,14 @@ import torch
 from vllm.logger import init_logger
 
 from ..gguf_utils import find_nextn_block_index
-from ..weight_utils import get_gguf_shard_files, get_gguf_weight_type_map
-from .base import GGUFLoadSpec
-from .default import GGUFWeightsAdapter
+from ..weight_utils import (
+    get_gguf_shard_files,
+    get_gguf_tensor_names,
+    get_gguf_unquantized_params,
+    gguf_quant_weights_iterator_multi,
+    split_stacked_experts,
+)
+from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -50,11 +55,13 @@ _MTP_TENSORS = {
 _MTP_NORM_SUFFIXES = ("norm.weight", "norm_embedding.weight", "norm_hidden.weight")
 
 
-class Qwen35MtpGGUFAdapter(GGUFWeightsAdapter):
+class Qwen35MtpGGUFAdapter(BaseGGUFWeightsAdapter):
     """Adapter for the Qwen3.5/3.6 MTP draft when the GGUF carries the nextn
     block. gguf-py has no arch for the draft's model_type, so the name map is
     written out directly. Covers a single MTP block (mtp_num_hidden_layers=1);
     a multi-block export would load only the first."""
+
+    load_spec = None
 
     @classmethod
     def matches(cls, config) -> bool:
@@ -73,44 +80,57 @@ class Qwen35MtpGGUFAdapter(GGUFWeightsAdapter):
         model_config: ModelConfig,
     ) -> GGUFLoadSpec:
         del model_config
-        weights_source = get_gguf_shard_files(model_path)
-        block_index = find_nextn_block_index(weights_source)
+        gguf_files = get_gguf_shard_files(model_path)
+        block_index = find_nextn_block_index(gguf_files)
         if block_index is None:
             raise RuntimeError(
-                f"No MTP/nextn block in {weights_source}; this GGUF cannot "
+                f"No MTP/nextn block in {gguf_files}; this GGUF cannot "
                 "serve a speculative draft."
             )
         logger.info("Loading MTP draft from GGUF block %d", block_index)
 
         gguf_to_hf_name_map = self.build_mtp_name_map(block_index)
-        weight_type_map: dict[str, str] = {}
-        for gguf_file in weights_source:
-            weight_type_map.update(
-                get_gguf_weight_type_map(gguf_file, gguf_to_hf_name_map)
-            )
-        missing = sorted(set(gguf_to_hf_name_map.values()) - weight_type_map.keys())
+        missing = sorted(
+            hf_name
+            for gguf_name, hf_name in gguf_to_hf_name_map.items()
+            if gguf_name not in get_gguf_tensor_names(gguf_files)
+        )
         if missing:
             logger.warning(
                 "No GGUF tensor for %d MTP param(s): %s", len(missing), missing
             )
 
+        unquantized_modules = list(
+            {
+                gguf_to_hf_name_map[param].removesuffix(".weight")
+                for param in get_gguf_unquantized_params(gguf_files)
+                if param in gguf_to_hf_name_map
+            }
+        )
+
         self.load_spec = GGUFLoadSpec(
-            weights_source=weights_source,
+            weights_source=gguf_files,
             gguf_to_hf_name_map=gguf_to_hf_name_map,
-            unquantized_modules=self.get_unquantized_modules(weight_type_map),
+            unquantized_modules=unquantized_modules,
         )
         return self.load_spec
 
-    def map_weights(
+    def prepare_weights(
         self,
-        weights: Iterable[tuple[str, torch.Tensor]],
+        model_config: ModelConfig,
     ) -> Iterable[tuple[str, torch.Tensor]]:
-        yield from super().map_weights(self._transform_mtp_weights(weights))
+        del model_config
+        weights = gguf_quant_weights_iterator_multi(
+            self.load_spec.weights_source,
+            self.load_spec.gguf_to_hf_name_map,
+        )
+        yield from split_stacked_experts(self.transform_weight(weights))
 
     @staticmethod
-    def _transform_mtp_weights(
+    def transform_weight(
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[tuple[str, torch.Tensor]]:
+        """Transform raw GGUF weights to HF-style weights."""
         for name, weight in weights:
             if name.endswith(_MTP_NORM_SUFFIXES):
                 # GGUF conversion bakes (w + 1) into these RMSNorm weights.

@@ -52,7 +52,7 @@ class TestNameMap:
 
 class TestTransformWeights:
     def _transform(self, weights):
-        return dict(Qwen35MtpGGUFAdapter._transform_mtp_weights(weights))
+        return dict(Qwen35MtpGGUFAdapter.transform_weight(weights))
 
     @pytest.mark.parametrize(
         "name",

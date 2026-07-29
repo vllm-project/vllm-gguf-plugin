@@ -14,14 +14,14 @@ from .gemma3 import Gemma3GGUFAdapter
 from .qwen3_5 import Qwen35GGUFAdapter
 from .qwen3_5_mtp import Qwen35MtpGGUFAdapter
 
-_ADAPTER_REGISTRY: list[type[GGUFWeightsAdapter]] = [
+_ADAPTER_REGISTRY: list[type[BaseGGUFWeightsAdapter]] = [
     Gemma3GGUFAdapter,
     Qwen35GGUFAdapter,
     Qwen35MtpGGUFAdapter,
 ]
 
 
-def get_weights_adapter(config) -> GGUFWeightsAdapter:
+def get_weights_adapter(config) -> BaseGGUFWeightsAdapter:
     """Return the adapter for *config*, falling back to the default."""
     for cls in _ADAPTER_REGISTRY:
         if cls.matches(config):

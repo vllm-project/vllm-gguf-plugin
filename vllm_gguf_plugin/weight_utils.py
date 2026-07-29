@@ -184,8 +184,12 @@ def gguf_quant_weights_iterator_multi(
 
             weight_type = tensor.tensor_type
             # These load as plain weights; emitting GGUF quant params here
-            # would leave them zeroed.
-            if weight_type.name not in _QUANT_TYPES and name.endswith(dequant_suffixes):
+            # would leave them zeroed. Match on whole path segments, or
+            # "output.weight" would also catch every "attn_output.weight".
+            if weight_type.name not in _QUANT_TYPES and any(
+                name == suffix or name.endswith(f".{suffix}")
+                for suffix in dequant_suffixes
+            ):
                 deq = gguf.quants.dequantize(tensor.data, weight_type)
                 yield name, torch.tensor(deq)
                 continue
