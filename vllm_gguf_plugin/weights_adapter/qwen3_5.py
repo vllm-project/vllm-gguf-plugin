@@ -11,6 +11,7 @@ import torch
 
 from ..gguf_utils import detect_gguf_multimodal
 from ..weight_utils import (
+    get_gguf_shard_files,
     get_gguf_tensor_names,
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator_multi,
@@ -53,7 +54,7 @@ class Qwen35GGUFAdapter(GGUFWeightsAdapter):
 
         mmproj_path = self._ensure_mmproj(model_path)
 
-        weights_source = self._get_all_gguf_files(model_path)
+        weights_source = get_gguf_shard_files(model_path)
         if mmproj_path is not None:
             weights_source.append(str(mmproj_path))
 

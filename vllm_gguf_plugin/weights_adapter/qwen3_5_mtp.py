@@ -10,7 +10,7 @@ import torch
 from vllm.logger import init_logger
 
 from ..gguf_utils import find_nextn_block_index
-from ..weight_utils import get_gguf_weight_type_map
+from ..weight_utils import get_gguf_shard_files, get_gguf_weight_type_map
 from .base import GGUFLoadSpec
 from .default import GGUFWeightsAdapter
 
@@ -73,7 +73,7 @@ class Qwen35MtpGGUFAdapter(GGUFWeightsAdapter):
         model_config: ModelConfig,
     ) -> GGUFLoadSpec:
         del model_config
-        weights_source = self._get_all_gguf_files(model_path)
+        weights_source = get_gguf_shard_files(model_path)
         block_index = find_nextn_block_index(weights_source)
         if block_index is None:
             raise RuntimeError(

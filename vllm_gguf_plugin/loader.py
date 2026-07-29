@@ -18,8 +18,13 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .gguf_utils import find_nextn_block_index
 from .quantization import GGUFConfig
-from .weight_utils import download_gguf, download_mmproj, resolve_local_gguf
-from .weights_adapter import GGUFWeightsAdapter, get_weights_adapter
+from .weight_utils import (
+    download_gguf,
+    download_mmproj,
+    get_gguf_shard_files,
+    resolve_local_gguf,
+)
+from .weights_adapter import get_weights_adapter
 
 logger = init_logger(__name__)
 
@@ -125,7 +130,7 @@ class GGUFModelLoader(BaseModelLoader):
 
     def _gguf_has_mtp(self, target_mc: ModelConfig) -> bool:
         """Whether the target's GGUF carries the MTP/nextn draft block."""
-        files = GGUFWeightsAdapter._get_all_gguf_files(self._prepare_weights(target_mc))
+        files = get_gguf_shard_files(self._prepare_weights(target_mc))
         return find_nextn_block_index(files) is not None
 
     def _load_hf_draft(

@@ -3,7 +3,8 @@
 import glob
 import itertools
 import os
-from collections.abc import Generator
+import re
+from collections.abc import Generator, Iterable
 from pathlib import Path
 
 import gguf
@@ -102,6 +103,25 @@ def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     return matches[0]
 
 
+def get_gguf_shard_files(model_path: str) -> list[str]:
+    """All shards of a split GGUF, or just *model_path* when it is whole."""
+    match = re.search(r"-(\d+)-of-(\d+)\.gguf$", model_path)
+    if not match:
+        return [model_path]
+    total = int(match.group(2))
+    num_digits = len(match.group(1))
+    prefix = model_path[: match.start(1)]
+    suffix = model_path[match.end(2) :]
+    files = []
+    for i in range(1, total + 1):
+        shard_path = f"{prefix}{i:0{num_digits}d}-of-{total:0{num_digits}d}{suffix}"
+        if os.path.isfile(shard_path):
+            files.append(shard_path)
+    if files:
+        logger.info("Discovered %d GGUF shard files", len(files))
+    return files if files else [model_path]
+
+
 def get_gguf_extra_tensor_names(
     gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
 ) -> list[str]:
@@ -182,6 +202,20 @@ def gguf_quant_weights_iterator_multi(
             else:
                 param = torch.tensor(weight)
             yield name, param
+
+
+def split_stacked_experts(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Split a stacked GGUF expert tensor into the per-expert weights vLLM
+    loads, leaving every other weight untouched."""
+    for name, weight in weights:
+        if weight.ndim == 3 and ".experts.0." in name:
+            for expert_id, expert_weight in enumerate(weight.unbind()):
+                expert_name = name.replace(".experts.0.", f".experts.{expert_id}.")
+                yield expert_name, expert_weight
+        else:
+            yield name, weight
 
 
 def get_gguf_unquantized_params(gguf_files: list[str]) -> list[str]:

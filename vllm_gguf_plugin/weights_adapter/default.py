@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
@@ -17,8 +16,10 @@ from vllm.logger import init_logger
 from ..gguf_utils import maybe_patch_hf_config_from_gguf
 from ..weight_utils import (
     get_gguf_extra_tensor_names,
+    get_gguf_shard_files,
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator_multi,
+    split_stacked_experts,
 )
 from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
 
@@ -335,34 +336,10 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[tuple[str, torch.Tensor]]:
-        for hf_name, weight in weights:
-            weight = self.transform_weight(hf_name, weight)
-            if weight.ndim == 3 and ".experts.0." in hf_name:
-                for expert_id, expert_weight in enumerate(weight.unbind()):
-                    expert_name = hf_name.replace(
-                        ".experts.0.", f".experts.{expert_id}."
-                    )
-                    yield expert_name, expert_weight
-            else:
-                yield hf_name, weight
-
-    @staticmethod
-    def _get_all_gguf_files(model_path: str) -> list[str]:
-        match = re.search(r"-(\d+)-of-(\d+)\.gguf$", model_path)
-        if not match:
-            return [model_path]
-        total = int(match.group(2))
-        num_digits = len(match.group(1))
-        prefix = model_path[: match.start(1)]
-        suffix = model_path[match.end(2) :]
-        files = []
-        for i in range(1, total + 1):
-            shard_path = f"{prefix}{i:0{num_digits}d}-of-{total:0{num_digits}d}{suffix}"
-            if os.path.isfile(shard_path):
-                files.append(shard_path)
-        if files:
-            logger.info("Discovered %d GGUF shard files", len(files))
-        return files if files else [model_path]
+        yield from split_stacked_experts(
+            (hf_name, self.transform_weight(hf_name, weight))
+            for hf_name, weight in weights
+        )
 
     def update_tie_word_embeddings(
         self,
@@ -374,7 +351,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             return
 
         all_extra_names = []
-        for gguf_file in self._get_all_gguf_files(model_path):
+        for gguf_file in get_gguf_shard_files(model_path):
             all_extra_names.extend(
                 get_gguf_extra_tensor_names(gguf_file, gguf_to_hf_name_map)
             )
@@ -386,7 +363,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         gguf_to_hf_name_map: dict[str, str],
     ) -> dict[str, str]:
         weight_type_map = {}
-        for gguf_file in self._get_all_gguf_files(model_path):
+        for gguf_file in get_gguf_shard_files(model_path):
             weight_type_map.update(
                 get_gguf_weight_type_map(gguf_file, gguf_to_hf_name_map)
             )
@@ -414,7 +391,7 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         )
         weight_type_map = self.get_weight_type_map(model_path, gguf_to_hf_name_map)
         self.load_spec = GGUFLoadSpec(
-            weights_source=self._get_all_gguf_files(model_path),
+            weights_source=get_gguf_shard_files(model_path),
             gguf_to_hf_name_map=gguf_to_hf_name_map,
             unquantized_modules=self.get_unquantized_modules(weight_type_map),
         )
