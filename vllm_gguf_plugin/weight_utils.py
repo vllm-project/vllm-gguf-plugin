@@ -60,11 +60,9 @@ def download_mmproj(
 ) -> None:
     """Fetch the multimodal projector into the backbone's snapshot dir.
 
-    ``download_gguf`` only matches the requested quant type, so the mmproj
-    file of a multimodal repo is never pulled by it. Repos ship the projector
-    in several precisions; take one, both to save the download and to keep
-    ``detect_gguf_multimodal`` deterministic. Downloading through the hub
-    cache keeps concurrent TP workers serialized on the cache lock.
+    ``download_gguf`` only matches the requested quant type, so it never pulls
+    the mmproj file. Repos ship the projector in several precisions; take one
+    so ``detect_gguf_multimodal`` stays deterministic.
     """
     try:
         mmproj_files = list_filtered_repo_files(
