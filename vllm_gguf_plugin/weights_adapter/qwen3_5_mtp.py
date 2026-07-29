@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import WeightsMapper
 
 from ..gguf_utils import find_nextn_block_index
 from ..weight_utils import (
@@ -18,6 +19,7 @@ from ..weight_utils import (
     split_stacked_experts,
 )
 from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
+from .qwen3_5 import qwen35_layer_substr
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -25,54 +27,42 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 QWEN35_MTP_MODEL_TYPES = ("qwen3_5_mtp", "qwen3_5_moe_mtp")
-
-# GGUF suffix -> HF suffix within the single MTP block. HF names follow the
-# safetensors index, which is what the draft's load_weights takes.
-_MTP_TENSORS = {
-    "nextn.eh_proj.weight": "fc.weight",
-    "nextn.enorm.weight": "pre_fc_norm_embedding.weight",
-    "nextn.hnorm.weight": "pre_fc_norm_hidden.weight",
-    "nextn.shared_head_norm.weight": "norm.weight",
-    "attn_norm.weight": "layers.0.input_layernorm.weight",
-    "post_attention_norm.weight": "layers.0.post_attention_layernorm.weight",
-    "attn_q.weight": "layers.0.self_attn.q_proj.weight",
-    "attn_k.weight": "layers.0.self_attn.k_proj.weight",
-    "attn_v.weight": "layers.0.self_attn.v_proj.weight",
-    "attn_output.weight": "layers.0.self_attn.o_proj.weight",
-    "attn_q_norm.weight": "layers.0.self_attn.q_norm.weight",
-    "attn_k_norm.weight": "layers.0.self_attn.k_norm.weight",
-    "ffn_gate_inp.weight": "layers.0.mlp.gate.weight",
-    "ffn_gate_exps.weight": "layers.0.mlp.experts.0.gate_proj.weight",
-    "ffn_up_exps.weight": "layers.0.mlp.experts.0.up_proj.weight",
-    "ffn_down_exps.weight": "layers.0.mlp.experts.0.down_proj.weight",
-    "ffn_gate_shexp.weight": "layers.0.mlp.shared_expert.gate_proj.weight",
-    "ffn_up_shexp.weight": "layers.0.mlp.shared_expert.up_proj.weight",
-    "ffn_down_shexp.weight": "layers.0.mlp.shared_expert.down_proj.weight",
-    "ffn_gate_inp_shexp.weight": "layers.0.mlp.shared_expert_gate.weight",
-}
+QWEN35_MOE_MTP_MODEL_TYPES = ("qwen3_5_moe_mtp",)
 
 # Every MTP RMSNorm; enorm/hnorm are the two that don't end in "norm.weight".
 _MTP_NORM_SUFFIXES = ("norm.weight", "norm_embedding.weight", "norm_hidden.weight")
 
 
+def build_qwen35_mtp_mapper(block_index: int, is_moe: bool) -> WeightsMapper:
+    """Map the GGUF nextn block onto the draft's HF names. The block holds a
+    plain decoder layer, so only the prefixes differ from the backbone."""
+    blk = f"blk.{block_index}."
+    return WeightsMapper(
+        # nextn entries first; once one rewrites a name the generic block
+        # prefix no longer matches it.
+        orig_to_new_prefix={
+            f"{blk}nextn.eh_proj.": "mtp.fc.",
+            f"{blk}nextn.enorm.": "mtp.pre_fc_norm_embedding.",
+            f"{blk}nextn.hnorm.": "mtp.pre_fc_norm_hidden.",
+            f"{blk}nextn.shared_head_norm.": "mtp.norm.",
+            blk: "mtp.layers.0.",
+        },
+        orig_to_new_substr=qwen35_layer_substr(is_moe),
+    )
+
+
 class Qwen35MtpGGUFAdapter(BaseGGUFWeightsAdapter):
     """Adapter for the Qwen3.5/3.6 MTP draft when the GGUF carries the nextn
-    block. gguf-py has no arch for the draft's model_type, so the name map is
-    written out directly. Covers a single MTP block (mtp_num_hidden_layers=1);
-    a multi-block export would load only the first."""
+    block. gguf-py has no arch for the draft's model_type, so the names come
+    from the backbone's rules plus the nextn prefixes. Covers a single MTP
+    block (mtp_num_hidden_layers=1); a multi-block export loads only the
+    first."""
 
     load_spec = None
 
     @classmethod
     def matches(cls, config) -> bool:
         return config.model_type in QWEN35_MTP_MODEL_TYPES
-
-    @staticmethod
-    def build_mtp_name_map(block_index: int) -> dict[str, str]:
-        return {
-            f"blk.{block_index}.{gguf_suffix}": f"mtp.{hf_suffix}"
-            for gguf_suffix, hf_suffix in _MTP_TENSORS.items()
-        }
 
     def prepare_loading(
         self,
@@ -89,15 +79,25 @@ class Qwen35MtpGGUFAdapter(BaseGGUFWeightsAdapter):
             )
         logger.info("Loading MTP draft from GGUF block %d", block_index)
 
-        gguf_to_hf_name_map = self.build_mtp_name_map(block_index)
-        missing = sorted(
-            hf_name
-            for gguf_name, hf_name in gguf_to_hf_name_map.items()
-            if gguf_name not in get_gguf_tensor_names(gguf_files)
+        mapper = build_qwen35_mtp_mapper(
+            block_index,
+            is_moe=self.config.model_type in QWEN35_MOE_MTP_MODEL_TYPES,
         )
-        if missing:
+        # Only the draft block; every other tensor belongs to the backbone.
+        block_prefix = f"blk.{block_index}."
+        gguf_to_hf_name_map: dict[str, str] = {}
+        unmapped: list[str] = []
+        for name in sorted(get_gguf_tensor_names(gguf_files)):
+            if not name.startswith(block_prefix):
+                continue
+            hf_name = mapper.apply_list([name])[0]
+            if hf_name == name:
+                unmapped.append(name)
+            else:
+                gguf_to_hf_name_map[name] = hf_name
+        if unmapped:
             logger.warning(
-                "No GGUF tensor for %d MTP param(s): %s", len(missing), missing
+                "No HF name for %d MTP tensor(s), skipping: %s", len(unmapped), unmapped
             )
 
         unquantized_modules = list(

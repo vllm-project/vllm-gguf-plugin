@@ -40,52 +40,60 @@ QWEN35_MOE_MODEL_TYPES = ("qwen3_5_moe", "qwen3_5_moe_text")
 DEQUANT_TENSORS = ("token_embd.weight", "output.weight")
 
 
+# Within-layer GGUF -> HF renames, shared with the MTP draft. Substr rules
+# apply in order, so entries that are prefixes of others come last.
+QWEN35_ATTN_SUBSTR: dict[str, str] = {
+    "attn_norm.": "input_layernorm.",
+    "post_attention_norm.": "post_attention_layernorm.",
+    # attention
+    "attn_q_norm.": "self_attn.q_norm.",
+    "attn_k_norm.": "self_attn.k_norm.",
+    "attn_q.": "self_attn.q_proj.",
+    "attn_k.": "self_attn.k_proj.",
+    "attn_v.": "self_attn.v_proj.",
+    "attn_output.": "self_attn.o_proj.",
+    # gated delta net; llama.cpp writes the two fused in_proj halves under
+    # the attention names, the rest under ssm_*.
+    "attn_qkv.": "linear_attn.in_proj_qkv.",
+    "attn_gate.": "linear_attn.in_proj_z.",
+    "ssm_alpha.": "linear_attn.in_proj_a.",
+    "ssm_beta.": "linear_attn.in_proj_b.",
+    "ssm_conv1d.": "linear_attn.conv1d.",
+    "ssm_norm.": "linear_attn.norm.",
+    "ssm_out.": "linear_attn.out_proj.",
+    # A_log and dt_bias are bare params in the HF checkpoint, so they drop
+    # the GGUF suffix. Keep these after ssm_alpha, "ssm_a" is a prefix of it.
+    "ssm_dt.bias": "linear_attn.dt_bias",
+    "ssm_a.weight": "linear_attn.A_log",
+    "ssm_a": "linear_attn.A_log",
+}
+
+QWEN35_MOE_SUBSTR: dict[str, str] = {
+    "ffn_gate_inp_shexp.": "mlp.shared_expert_gate.",
+    "ffn_gate_inp.": "mlp.gate.",
+    # Expert weights are stacked; prepare_weights splits them per expert.
+    "ffn_gate_exps.": "mlp.experts.0.gate_proj.",
+    "ffn_up_exps.": "mlp.experts.0.up_proj.",
+    "ffn_down_exps.": "mlp.experts.0.down_proj.",
+    "ffn_gate_shexp.": "mlp.shared_expert.gate_proj.",
+    "ffn_up_shexp.": "mlp.shared_expert.up_proj.",
+    "ffn_down_shexp.": "mlp.shared_expert.down_proj.",
+}
+
+QWEN35_DENSE_SUBSTR: dict[str, str] = {
+    "ffn_gate.": "mlp.gate_proj.",
+    "ffn_up.": "mlp.up_proj.",
+    "ffn_down.": "mlp.down_proj.",
+}
+
+
+def qwen35_layer_substr(is_moe: bool) -> dict[str, str]:
+    """Within-layer renames for a Qwen3.5 decoder block."""
+    return QWEN35_ATTN_SUBSTR | (QWEN35_MOE_SUBSTR if is_moe else QWEN35_DENSE_SUBSTR)
+
+
 def build_qwen35_text_mapper(is_multimodal: bool, is_moe: bool) -> WeightsMapper:
     backbone_prefix = "model.language_model." if is_multimodal else "model."
-    orig_to_new_substr: dict[str, str] = {
-        "attn_norm.": "input_layernorm.",
-        "post_attention_norm.": "post_attention_layernorm.",
-        # attention
-        "attn_q_norm.": "self_attn.q_norm.",
-        "attn_k_norm.": "self_attn.k_norm.",
-        "attn_q.": "self_attn.q_proj.",
-        "attn_k.": "self_attn.k_proj.",
-        "attn_v.": "self_attn.v_proj.",
-        "attn_output.": "self_attn.o_proj.",
-        # gated delta net; llama.cpp writes the two fused in_proj halves under
-        # the attention names, the rest under ssm_*.
-        "attn_qkv.": "linear_attn.in_proj_qkv.",
-        "attn_gate.": "linear_attn.in_proj_z.",
-        "ssm_alpha.": "linear_attn.in_proj_a.",
-        "ssm_beta.": "linear_attn.in_proj_b.",
-        "ssm_conv1d.": "linear_attn.conv1d.",
-        "ssm_norm.": "linear_attn.norm.",
-        "ssm_out.": "linear_attn.out_proj.",
-        # A_log and dt_bias are bare params in the HF checkpoint, so they drop
-        # the GGUF suffix. Keep these after ssm_alpha, "ssm_a" is a prefix of it.
-        "ssm_dt.bias": "linear_attn.dt_bias",
-        "ssm_a.weight": "linear_attn.A_log",
-        "ssm_a": "linear_attn.A_log",
-    }
-    if is_moe:
-        orig_to_new_substr |= {
-            "ffn_gate_inp_shexp.": "mlp.shared_expert_gate.",
-            "ffn_gate_inp.": "mlp.gate.",
-            # Expert weights are stacked; prepare_weights splits them per expert.
-            "ffn_gate_exps.": "mlp.experts.0.gate_proj.",
-            "ffn_up_exps.": "mlp.experts.0.up_proj.",
-            "ffn_down_exps.": "mlp.experts.0.down_proj.",
-            "ffn_gate_shexp.": "mlp.shared_expert.gate_proj.",
-            "ffn_up_shexp.": "mlp.shared_expert.up_proj.",
-            "ffn_down_shexp.": "mlp.shared_expert.down_proj.",
-        }
-    else:
-        orig_to_new_substr |= {
-            "ffn_gate.": "mlp.gate_proj.",
-            "ffn_up.": "mlp.up_proj.",
-            "ffn_down.": "mlp.down_proj.",
-        }
-
     return WeightsMapper(
         orig_to_new_prefix={
             "token_embd.": backbone_prefix + "embed_tokens.",
@@ -93,7 +101,7 @@ def build_qwen35_text_mapper(is_multimodal: bool, is_moe: bool) -> WeightsMapper
             "output_norm.": backbone_prefix + "norm.",
             "output.": "lm_head.",
         },
-        orig_to_new_substr=orig_to_new_substr,
+        orig_to_new_substr=qwen35_layer_substr(is_moe),
     )
 
 
