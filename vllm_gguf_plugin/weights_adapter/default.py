@@ -272,12 +272,19 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         if "lm_head.weight" not in gguf_to_hf_name_map.values():
             return
 
-        all_extra_names = []
+        model_missing_names: set[str] | None = None
         for gguf_file in self._get_all_gguf_files(model_path):
-            all_extra_names.extend(
+            shard_missing_names = set(
                 get_gguf_extra_tensor_names(gguf_file, gguf_to_hf_name_map)
             )
-        hf_config.update({"tie_word_embeddings": "lm_head.weight" in all_extra_names})
+            model_missing_names = (
+                shard_missing_names
+                if model_missing_names is None
+                else model_missing_names & shard_missing_names
+            )
+        hf_config.update(
+            {"tie_word_embeddings": "lm_head.weight" in (model_missing_names or set())}
+        )
 
     def get_weight_type_map(
         self,
