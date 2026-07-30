@@ -4,6 +4,8 @@
 from functools import partial
 
 import torch
+from gguf import GGML_QUANT_SIZES
+from gguf import GGMLQuantizationType as WeightType
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
 )
@@ -30,6 +32,45 @@ from .params import (
 )
 from .utils import MMQ_QUANT_TYPES, MMVQ_QUANT_TYPES, logger
 
+_MAX_GGUF_MOE_ROUTED_TOKENS = (1 << 16) - 1
+
+
+def _moe_token_slices(num_tokens: int, top_k: int) -> list[slice]:
+    """Split batches before the 16-bit routed-token launch boundary."""
+    tokens_per_chunk = _MAX_GGUF_MOE_ROUTED_TOKENS // top_k
+    if tokens_per_chunk <= 0:
+        raise ValueError(
+            f"GGUF MoE top_k={top_k} exceeds the routed-token launch limit."
+        )
+    return [
+        slice(start, min(start + tokens_per_chunk, num_tokens))
+        for start in range(0, num_tokens, tokens_per_chunk)
+    ]
+
+
+def _apply_gguf_moe_activation(
+    inp: torch.Tensor,
+    activation: str,
+    activation_situ_beta: float,
+    activation_situ_linear_beta: float,
+) -> torch.Tensor:
+    activation_enum = MoEActivation.from_str(activation)
+    d = inp.shape[-1] // 2
+    output_shape = inp.shape[:-1] + (d,)
+    out = torch.empty(output_shape, dtype=inp.dtype, device=inp.device)
+    apply_moe_activation(
+        activation_enum,
+        out,
+        inp,
+        activation_situ_beta=(
+            None if activation_situ_beta < 0 else activation_situ_beta
+        ),
+        activation_situ_linear_beta=(
+            None if activation_situ_linear_beta < 0 else activation_situ_linear_beta
+        ),
+    )
+    return out
+
 
 def _fused_moe_gguf(
     x: torch.Tensor,
@@ -37,18 +78,47 @@ def _fused_moe_gguf(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
     qweight_type: int,
     qweight_type2: int,
     activation: str,
+    activation_situ_beta: float,
+    activation_situ_linear_beta: float,
 ) -> torch.Tensor:
-    activation_enum = MoEActivation.from_str(activation)
+    top_k = topk_ids.shape[1]
+    if x.shape[0] * top_k > _MAX_GGUF_MOE_ROUTED_TOKENS:
+        return torch.cat(
+            [
+                _fused_moe_gguf(
+                    x[token_slice],
+                    w1,
+                    w2,
+                    topk_weights[token_slice],
+                    topk_ids[token_slice],
+                    expert_map,
+                    qweight_type,
+                    qweight_type2,
+                    activation,
+                    activation_situ_beta,
+                    activation_situ_linear_beta,
+                )
+                for token_slice in _moe_token_slices(x.shape[0], top_k)
+            ],
+            dim=0,
+        )
+
+    if expert_map.numel() != 0:
+        local_topk_ids = expert_map[topk_ids.long()]
+        topk_weights = topk_weights * (local_topk_ids >= 0).to(topk_weights.dtype)
+        topk_ids = local_topk_ids.clamp_min(0).to(topk_ids.dtype)
 
     def act(inp: torch.Tensor):
-        d = inp.shape[-1] // 2
-        output_shape = inp.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=inp.dtype, device=inp.device)
-        apply_moe_activation(activation_enum, out, inp)
-        return out
+        return _apply_gguf_moe_activation(
+            inp,
+            activation,
+            activation_situ_beta,
+            activation_situ_linear_beta,
+        )
 
     from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
@@ -60,7 +130,6 @@ def _fused_moe_gguf(
     ):
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
-        top_k = topk_ids.shape[1]
         block_size = ops.ggml_moe_get_block_size(qweight_type)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
@@ -96,8 +165,6 @@ def _fused_moe_gguf(
     elif qweight_type2 in MMVQ_QUANT_TYPES and qweight_type in MMVQ_QUANT_TYPES:
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
-        top_k = topk_ids.shape[1]
-
         out = ops.ggml_moe_a8_vec(x, w1, topk_ids, top_k, qweight_type, N, num_tokens)
         out = act(out)
 
@@ -139,11 +206,25 @@ def _fused_moe_gguf_fake(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
     qweight_type: int,
     qweight_type2: int,
     activation: str,
+    activation_situ_beta: float,
+    activation_situ_linear_beta: float,
 ) -> torch.Tensor:
-    del w1, w2, topk_weights, topk_ids, qweight_type, qweight_type2, activation
+    del (
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        expert_map,
+        qweight_type,
+        qweight_type2,
+        activation,
+        activation_situ_beta,
+        activation_situ_linear_beta,
+    )
     return torch.empty_like(x)
 
 
@@ -248,6 +329,22 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         del layer
         return None
 
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        parallel = layer.moe_config.moe_parallel_config
+        if parallel.tp_size <= 1:
+            return
+        weight_type = WeightType(layer.w2_qweight_type.weight_type)
+        block_size, _ = GGML_QUANT_SIZES[weight_type]
+        per_rank_intermediate = layer.moe_config.intermediate_size // parallel.tp_size
+        if per_rank_intermediate % block_size:
+            raise ValueError(
+                f"GGUF MoE {weight_type.name} blocks contain {block_size} values, "
+                f"but TP{parallel.tp_size} would split intermediate_size="
+                f"{layer.moe_config.intermediate_size} into "
+                f"{per_rank_intermediate} values per rank. Use "
+                "--enable-expert-parallel so each rank owns complete experts."
+            )
+
     def apply(
         self,
         layer: RoutedExperts,
@@ -272,7 +369,22 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             layer.w2_qweight,
             topk_weights,
             topk_ids,
+            (
+                layer.expert_map
+                if layer.expert_map is not None
+                else torch.empty(0, dtype=torch.int32, device=x.device)
+            ),
             layer.w13_qweight_type.weight_type,
             layer.w2_qweight_type.weight_type,
             layer.activation.value,
+            (
+                -1.0
+                if layer.moe_config.activation_situ_beta is None
+                else layer.moe_config.activation_situ_beta
+            ),
+            (
+                -1.0
+                if layer.moe_config.activation_situ_linear_beta is None
+                else layer.moe_config.activation_situ_linear_beta
+            ),
         )

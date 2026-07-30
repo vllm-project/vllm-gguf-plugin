@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from collections.abc import Iterable
 from typing import cast
 
 import torch
@@ -21,6 +22,50 @@ from .weight_utils import download_gguf, resolve_local_gguf
 from .weights_adapter import get_weights_adapter
 
 logger = init_logger(__name__)
+
+
+def _load_weights_strict(
+    model: nn.Module,
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> set[str]:
+    """Load weights and reject parameters silently skipped by model loaders."""
+    loaded = model.load_weights(weights)
+    if loaded is None:
+        raise ValueError(
+            f"{model.__class__.__name__}.load_weights() did not report which "
+            "parameters were initialized; strict GGUF loading requires a set."
+        )
+
+    loaded = set(loaded)
+    expected = {name for name, _ in model.named_parameters()}
+    missing = expected - loaded
+    if missing:
+        formatted = "\n  ".join(sorted(missing))
+        raise ValueError(
+            "Following model parameters were not initialized from the GGUF "
+            f"checkpoint ({len(missing)}):\n  {formatted}"
+        )
+
+    logger.info(
+        "Strict GGUF weight audit passed: %d model parameters initialized.",
+        len(expected),
+    )
+    return loaded
+
+
+def _normalize_kimi_k3_mla_context_parallelism(model: nn.Module) -> None:
+    """Resolve Kimi-K3's disabled-CP sentinel for the FA3 decode kernel."""
+    for module in model.modules():
+        if (
+            module.__class__.__module__ == "vllm.models.kimi_k3.nvidia.mla"
+            and module.__class__.__name__ == "MultiHeadLatentAttention"
+            and getattr(module.impl, "dcp_world_size", -1) < 1
+        ):
+            # Kimi-K3's fused MLA wrapper rejects context parallelism but calls
+            # the backend directly, bypassing the regular MLAAttention wrapper
+            # that resolves this sentinel. FA3 requires the neutral value 1.
+            module.impl.dcp_world_size = 1
+            module.impl.dcp_rank = 0
 
 
 class GGUFModelLoader(BaseModelLoader):
@@ -77,7 +122,7 @@ class GGUFModelLoader(BaseModelLoader):
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         adapter = self._prepare_adapter(model_config)
-        model.load_weights(adapter.prepare_weights(model_config))
+        _load_weights_strict(model, adapter.prepare_weights(model_config))
 
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
@@ -97,8 +142,10 @@ class GGUFModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config, prefix=prefix)
-            model.load_weights(
+            _load_weights_strict(
+                model,
                 adapter.prepare_weights(model_config),
             )
             process_weights_after_loading(model, model_config, target_device)
+            _normalize_kimi_k3_mla_context_parallelism(model)
         return model

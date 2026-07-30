@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
+import os
 from functools import wraps
 from pathlib import Path
 
 import vllm.engine.arg_utils as arg_utils_module
+import vllm.envs as envs_module
 import vllm.transformers_utils.config as config_module
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -13,9 +16,15 @@ from vllm.model_executor.model_loader import (
     get_model_loader,
     register_model_loader,
 )
+from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
+from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 
-from .config_parser import GGUFConfigParser
+from .config_parser import (
+    KIMI_K3_GGUF_TEXT_ARCH,
+    KIMI_K3_GGUF_TEXT_MARKER,
+    GGUFConfigParser,
+)
 from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 from .loader import GGUFModelLoader
 from .quantization import DiffusionGGUFConfig, GGUFConfig
@@ -73,7 +82,17 @@ def _patch_engine_args() -> None:
                 self.tokenizer if isinstance(self.tokenizer, str) else None,
                 self.hf_config_path,
             )
-        return original_create_model_config(self, *args, **kwargs)
+        model_config = original_create_model_config(self, *args, **kwargs)
+        if (
+            getattr(
+                getattr(model_config, "hf_config", None),
+                KIMI_K3_GGUF_TEXT_MARKER,
+                False,
+            )
+            and getattr(model_config, "tokenizer_mode", None) == "auto"
+        ):
+            model_config.tokenizer_mode = "kimi_k3"
+        return model_config
 
     EngineArgs.create_model_config = create_model_config
     EngineArgs._gguf_create_model_config_patched = True
@@ -97,6 +116,52 @@ def _patch_speculator_probe() -> None:
     config_module._gguf_speculator_probe_patched = True
 
 
+def _patch_kimi_k3_mla_cache_spec() -> None:
+    """Bridge the incomplete Kimi-K3 cache-spec merge in pinned vLLM.
+
+    Kimi's regular MLA path passes ``non_causal_multi_token_decode=False`` to
+    ``MLAAttentionSpec``, but that dataclass does not yet define the field in
+    the pinned vLLM revision. The optional DSpark draft path passes ``True``;
+    reject that case rather than silently dropping behavior vLLM cannot
+    represent.
+    """
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    if (
+        "non_causal_multi_token_decode"
+        in inspect.signature(MLAAttentionSpec).parameters
+    ):
+        return
+    if getattr(MLAAttentionSpec, "_gguf_kimi_k3_compat_patched", False):
+        return
+
+    original_init = MLAAttentionSpec.__init__
+
+    @wraps(original_init)
+    def compat_init(
+        self,
+        *args,
+        non_causal_multi_token_decode: bool = False,
+        **kwargs,
+    ):
+        if non_causal_multi_token_decode:
+            raise NotImplementedError(
+                "The pinned vLLM MLAAttentionSpec cannot represent "
+                "non-causal multi-token decode."
+            )
+        return original_init(self, *args, **kwargs)
+
+    MLAAttentionSpec.__init__ = compat_init
+    MLAAttentionSpec._gguf_kimi_k3_compat_patched = True
+
+
+def _patch_kimi_k3_environment() -> None:
+    """Restore the Kimi-K3 stream threshold omitted from pinned vLLM."""
+    name = "VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD"
+    if name not in envs_module.environment_variables:
+        envs_module.environment_variables[name] = lambda: int(os.getenv(name, "256"))
+
+
 def _register_omni_diffusion_quantization() -> None:
     try:
         from vllm_omni.quantization import register_quantization_override
@@ -108,6 +173,15 @@ def _register_omni_diffusion_quantization() -> None:
 
 def register() -> None:
     """Register the out-of-tree GGUF integration."""
+    # vLLM carries the native Kimi-K3 config/model implementation, but the
+    # pinned revision does not include kimi_k3 in _CONFIG_REGISTRY. Registering
+    # it here makes HFConfigParser ignore the repository auto_map and keeps
+    # trust_remote_code disabled.
+    config_module._CONFIG_REGISTRY["kimi_k3"] = KimiK3Config
+    ModelRegistry.register_model(
+        KIMI_K3_GGUF_TEXT_ARCH,
+        "vllm.models.kimi_k3:KimiLinearForCausalLM",
+    )
     register_quantization_config("gguf")(GGUFConfig)
     _register_omni_diffusion_quantization()
 
@@ -124,4 +198,6 @@ def register() -> None:
         register_config_parser("gguf")(GGUFConfigParser)
     _patch_engine_args()
     _patch_speculator_probe()
+    _patch_kimi_k3_mla_cache_spec()
+    _patch_kimi_k3_environment()
     _patch_diffusers_loader()

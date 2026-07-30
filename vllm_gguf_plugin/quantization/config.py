@@ -84,6 +84,10 @@ class GGUFConfig(QuantizationConfig):
                 return UnquantizedEmbeddingMethod()
             return GGUFEmbeddingMethod(self)
         if isinstance(layer, RoutedExperts):
+            if is_layer_skipped_gguf(
+                prefix, self.unquantized_modules, self.packed_modules_mapping
+            ):
+                return None
             return GGUFMoEMethod(self, layer.moe_config)
         return None
 

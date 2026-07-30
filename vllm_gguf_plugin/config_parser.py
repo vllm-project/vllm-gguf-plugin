@@ -15,6 +15,9 @@ from .gguf_utils import (
     split_remote_gguf,
 )
 
+KIMI_K3_GGUF_TEXT_ARCH = "KimiK3GGUFForCausalLM"
+KIMI_K3_GGUF_TEXT_MARKER = "_gguf_kimi_k3_text_only"
+
 
 class GGUFConfigParser(ConfigParserBase):
     def parse(
@@ -38,6 +41,25 @@ class GGUFConfigParser(ConfigParserBase):
         if config.model_type == "qwen3_moe" and "norm_topk_prob" not in config_dict:
             config_dict["norm_topk_prob"] = True
             config.update({"norm_topk_prob": True})
+
+        if config.model_type == "kimi_k3":
+            config = config.get_text_config()
+            config_dict = config.to_dict()
+            config_dict.pop("quantization_config", None)
+            config.update(
+                {
+                    "architectures": [KIMI_K3_GGUF_TEXT_ARCH],
+                    KIMI_K3_GGUF_TEXT_MARKER: True,
+                    "quantization_config": None,
+                }
+            )
+            config_dict.update(
+                {
+                    "architectures": [KIMI_K3_GGUF_TEXT_ARCH],
+                    KIMI_K3_GGUF_TEXT_MARKER: True,
+                }
+            )
+            return config_dict, config
 
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
