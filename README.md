@@ -26,19 +26,26 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
    cd vllm-gguf-plugin
    ```
 
-2. Install the plugin in development mode:
+2. If vLLM is not already installed, install it first:
 
    ```bash
-   uv pip install -e . --torch-backend=auto
+   uv pip install vllm --torch-backend=auto
    ```
 
-Or install directly:
+3. Build and install the plugin against the PyTorch installation used by
+   vLLM:
 
-```bash
-uv pip install . --torch-backend=auto
-```
+   ```bash
+   uv pip install -e . --no-build-isolation
+   ```
+
+   Disabling build isolation ensures that the CUDA extension is compiled
+   against the same PyTorch installation used by vLLM at runtime.
 
 ## Development
+
+After completing the editable source installation above, install and run the
+development tooling:
 
 ```bash
 uv pip install -e .[dev] --torch-backend=auto
