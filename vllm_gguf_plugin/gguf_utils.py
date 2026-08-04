@@ -194,6 +194,19 @@ def detect_gguf_multimodal(model: str) -> Path | None:
         return None
 
 
+def _extract_gguf_scalar(field) -> object:
+    value = field.parts[-1]
+    if not hasattr(value, "shape"):
+        return value
+    if value.shape == ():
+        return value.item()
+    if value.size == 1:
+        return value.item()
+    raise ValueError(
+        f"Expected scalar GGUF metadata field, but found array with shape {value.shape}"
+    )
+
+
 def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | None":
     """Extract vision config parameters from mmproj.gguf metadata.
 
@@ -250,8 +263,10 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
                 gguf_key,
             )
             return None
-        # Extract scalar value from GGUF field and convert to target type
-        config_params[param_name] = dtype(field.parts[-1])
+        # Extract scalar value from GGUF field and convert to target type.
+        # Some GGUF readers expose numeric scalar metadata as single-element
+        # arrays backed by memmap storage.
+        config_params[param_name] = dtype(_extract_gguf_scalar(field))
 
     # Apply model-specific parameters based on projector type
     if projector_type == VisionProjectorType.GEMMA3:

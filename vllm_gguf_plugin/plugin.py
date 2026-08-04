@@ -56,6 +56,7 @@ def _patch_engine_args() -> None:
 
     @wraps(original_create_model_config)
     def create_model_config(self, *args, **kwargs):
+        gguf_model = None
         if _is_gguf_reference(self.model):
             gguf_model = self.model
             if self.quantization is None:
@@ -68,12 +69,22 @@ def _patch_engine_args() -> None:
                 self.model_weights = gguf_model
             if self.served_model_name is None:
                 self.served_model_name = [gguf_model]
-            self.model = _get_gguf_config_source(
+            config_source = _get_gguf_config_source(
                 gguf_model,
                 self.tokenizer if isinstance(self.tokenizer, str) else None,
                 self.hf_config_path,
             )
-        return original_create_model_config(self, *args, **kwargs)
+            if self.hf_config_path is None:
+                self.hf_config_path = config_source
+            if self.tokenizer is None:
+                self.tokenizer = config_source
+            self.model = config_source
+        try:
+            model_config = original_create_model_config(self, *args, **kwargs)
+        finally:
+            if gguf_model is not None:
+                self.model = gguf_model
+        return model_config
 
     EngineArgs.create_model_config = create_model_config
     EngineArgs._gguf_create_model_config_patched = True
