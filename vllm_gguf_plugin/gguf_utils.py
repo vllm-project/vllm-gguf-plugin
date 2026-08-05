@@ -252,7 +252,7 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
             return None
         # Extract scalar value from GGUF field and convert to target type
         val = field.parts[-1]
-        if hasattr(val, 'item'):
+        if hasattr(val, "item"):
             val = val.item()
         config_params[param_name] = dtype(val)
 
