@@ -5,7 +5,7 @@ from typing import cast
 
 import torch
 import torch.nn as nn
-from huggingface_hub import hf_hub_download
+from huggingface_hub import ResolvedRevision, hf_hub_download
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
@@ -21,6 +21,23 @@ from .weight_utils import download_gguf, resolve_local_gguf
 from .weights_adapter import get_weights_adapter
 
 logger = init_logger(__name__)
+
+
+def _revision_for_weights_repo(
+    model_config: ModelConfig, weights_repo_id: str
+) -> str | None:
+    """Return a revision that is valid for the weights repository.
+
+    A ``ResolvedRevision`` is bound to the repository for which vLLM loaded
+    the model config. If the GGUF weights live in another repository, reuse
+    the user's original revision instead of that repository's resolved SHA.
+    An explicitly requested SHA remains unchanged, while ``None`` lets the
+    weights repository resolve its own default branch.
+    """
+    revision = model_config.revision
+    if isinstance(revision, ResolvedRevision) and weights_repo_id != model_config.model:
+        return revision.initial
+    return revision
 
 
 class GGUFModelLoader(BaseModelLoader):
@@ -52,7 +69,7 @@ class GGUFModelLoader(BaseModelLoader):
                 local_dir,
                 quant_type,
                 cache_dir=self.load_config.download_dir,
-                revision=model_config.revision,
+                revision=_revision_for_weights_repo(model_config, local_dir),
                 ignore_patterns=self.load_config.ignore_patterns,
             )
         # repo id/filename.gguf
