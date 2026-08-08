@@ -1,0 +1,60 @@
+env:
+  VLLM_WORKER_MULTIPROC_METHOD: spawn
+  HF_HUB_DOWNLOAD_TIMEOUT: 300
+  HF_HUB_ETAG_TIMEOUT: 60
+
+steps:
+  - group: ":card_index_dividers: GGUF Tests"
+    depends_on: upload-merge-pipeline
+    steps:
+      - label: "GGUF · Stable · Generation and Multimodal"
+        key: gguf-stable-tests
+        timeout_in_minutes: 120
+        commands:
+          - |
+            timeout 110m bash -c "
+              set -e
+              python -m pip install -e .
+              pytest -s -v \
+                tests/test_gguf_generation.py \
+                tests/test_multimodal_gguf.py
+            "
+        agents:
+          queue: "gpu_1_queue"
+        plugins:
+          - docker#v5.2.0:
+              image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-stable
+              always-pull: true
+              propagate-environment: true
+              shm-size: "8gb"
+              environment:
+                - "HF_HOME=/fsx/hf_cache"
+                - "HF_TOKEN"
+              volumes:
+                - "/fsx/hf_cache:/fsx/hf_cache"
+
+      - label: "GGUF · Nightly · Generation and Multimodal"
+        key: gguf-nightly-tests
+        timeout_in_minutes: 120
+        commands:
+          - |
+            timeout 110m bash -c "
+              set -e
+              python -m pip install -e .
+              pytest -s -v \
+                tests/test_gguf_generation.py \
+                tests/test_multimodal_gguf.py
+            "
+        agents:
+          queue: "gpu_1_queue"
+        plugins:
+          - docker#v5.2.0:
+              image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-nightly
+              always-pull: true
+              propagate-environment: true
+              shm-size: "8gb"
+              environment:
+                - "HF_HOME=/fsx/hf_cache"
+                - "HF_TOKEN"
+              volumes:
+                - "/fsx/hf_cache:/fsx/hf_cache"
