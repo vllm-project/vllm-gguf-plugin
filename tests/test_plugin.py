@@ -2,6 +2,7 @@
 
 import torch
 import vllm.engine.arg_utils as arg_utils_module
+import vllm.model_executor.layers.linear as linear_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.transformers_utils.config as config_module
@@ -20,6 +21,7 @@ from vllm.transformers_utils.config import get_config_parser
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
 import vllm_gguf_plugin.quantization as gguf_quantization
+import vllm_gguf_plugin.quantization.params as gguf_params_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
 from vllm_gguf_plugin.quantization import (
@@ -294,6 +296,74 @@ def test_gguf_qkv_shards_are_padded_in_qkv_order(monkeypatch):
     assert torch.equal(layer.qweight[:4], q)
     assert torch.equal(layer.qweight[4:6], k)
     assert torch.equal(layer.qweight[6:8], v)
+
+
+def _patch_tp(monkeypatch, tp_rank: int, tp_size: int):
+    """Fake a tp_size-way TP group without initializing a process group."""
+    for module in (linear_module, parameter_module, gguf_params_module):
+        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
+        monkeypatch.setattr(
+            module, "get_tensor_model_parallel_world_size", lambda: tp_size
+        )
+
+
+def _load_merged_column_shard(monkeypatch, tp_rank, loaded_weight):
+    register()
+    _patch_tp(monkeypatch, tp_rank, tp_size=2)
+    layer = MergedColumnParallelLinear(
+        input_size=4,
+        output_sizes=[4, 4],
+        bias=False,
+        quant_config=OOTGGUFConfig.from_config({}),
+    )
+    layer.weight_loader_v2(layer.qweight, loaded_weight, 0)
+
+    return layer.qweight.data_container[0]
+
+
+def _load_qkv_shard(monkeypatch, tp_rank, shard_id, loaded_weight):
+    register()
+    _patch_tp(monkeypatch, tp_rank, tp_size=2)
+    layer = QKVParallelLinear(
+        hidden_size=4,
+        head_size=2,
+        total_num_heads=4,
+        total_num_kv_heads=2,
+        bias=False,
+        quant_config=OOTGGUFConfig.from_config({}),
+    )
+    layer.weight_loader_v2(layer.qweight, loaded_weight, shard_id)
+
+    return layer.qweight.data_container[0]
+
+
+def test_gguf_merged_column_shard_follows_tp_rank(monkeypatch):
+    # output_sizes=[4, 4] over tp_size=2 gives shard_size=2, so each rank must
+    # take a different half of the 4 rows the GGUF file holds for shard 0.
+    loaded_weight = torch.arange(16, dtype=torch.uint8).reshape(4, 4)
+
+    rank0 = _load_merged_column_shard(monkeypatch, 0, loaded_weight)
+    rank1 = _load_merged_column_shard(monkeypatch, 1, loaded_weight)
+
+    assert torch.equal(rank0, loaded_weight[0:2])
+    assert torch.equal(rank1, loaded_weight[2:4])
+
+
+def test_gguf_qkv_shard_follows_tp_rank(monkeypatch):
+    # total_num_heads=4 and total_num_kv_heads=2 over tp_size=2 gives
+    # num_kv_head_replicas=1, q shard_size=4 of 8 rows, k shard_size=2 of 4.
+    q = torch.arange(32, dtype=torch.uint8).reshape(8, 4)
+    k = torch.arange(16, dtype=torch.uint8).reshape(4, 4)
+
+    q_rank0 = _load_qkv_shard(monkeypatch, 0, "q", q)
+    q_rank1 = _load_qkv_shard(monkeypatch, 1, "q", q)
+    k_rank0 = _load_qkv_shard(monkeypatch, 0, "k", k)
+    k_rank1 = _load_qkv_shard(monkeypatch, 1, "k", k)
+
+    assert torch.equal(q_rank0, q[0:4])
+    assert torch.equal(q_rank1, q[4:8])
+    assert torch.equal(k_rank0, k[0:2])
+    assert torch.equal(k_rank1, k[2:4])
 
 
 def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
