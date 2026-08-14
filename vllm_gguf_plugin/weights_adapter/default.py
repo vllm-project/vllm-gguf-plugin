@@ -57,6 +57,11 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_type = "command-r"
         if model_type == "gemma3_text":
             model_type = "gemma3"
+        model_name_map, model_sideload_params = (
+            self._get_model_specific_mapping(config)
+        )
+        gguf_to_hf_name_map.update(model_name_map)
+        sideload_params.extend(model_sideload_params)
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             for idx in range(config.num_hidden_layers):
@@ -95,29 +100,6 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                         f"model\\.layers\\.{idx}"
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
-                )
-        if model_type == "olmoe":
-            for idx in range(config.num_hidden_layers):
-                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
-                )
-                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
-                )
-                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
-                )
-                sideload_params.extend(
-                    [
-                        regex.compile(
-                            f"model\\.layers\\.{idx}"
-                            r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
-                        ),
-                        regex.compile(
-                            f"model\\.layers\\.{idx}"
-                            r"\.mlp\.experts\.(gate_up_proj|down_proj)"
-                        ),
-                    ]
                 )
         if model_type == "minimax_m2":
             model_type = "minimax-m2"
@@ -229,6 +211,13 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 f"({len(unmapped_params)}): {unmapped_params}"
             )
         return gguf_to_hf_name_map
+
+    def _get_model_specific_mapping(
+        self,
+        config,
+    ) -> tuple[dict[str, str], list[re.Pattern]]:
+        del config
+        return {}, []
 
     def map_weights(
         self,
