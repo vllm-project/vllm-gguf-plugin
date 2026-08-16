@@ -53,10 +53,13 @@ def split_olmoe_expert_weights(
     for name, weight in weights:
         if weight.ndim == 3 and ".experts.0." in name:
             for expert_id, expert_weight in enumerate(weight.unbind()):
-                yield name.replace(
-                    ".experts.0.",
-                    f".experts.{expert_id}.",
-                ), expert_weight
+                yield (
+                    name.replace(
+                        ".experts.0.",
+                        f".experts.{expert_id}.",
+                    ),
+                    expert_weight,
+                )
         else:
             yield name, weight
 
