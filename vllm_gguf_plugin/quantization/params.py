@@ -352,6 +352,13 @@ def _materialize_gguf_weight_parameter(
     qweight.shard_id_map = dict(raw_param.shard_id_map)
     if hasattr(raw_param, "ignore_warning"):
         qweight.ignore_warning = raw_param.ignore_warning
+    # Hand the shard tensors over rather than sharing them: the source param
+    # outlives this call, and a second reference to the shards would keep them
+    # resident after _create_padded_weight_param builds the concatenated copy,
+    # leaving every fused layer in VRAM twice.
+    raw_param.data_container.clear()
+    raw_param.shard_id.clear()
+    raw_param.shard_id_map.clear()
     layer.register_parameter(param_name, qweight)
 
 

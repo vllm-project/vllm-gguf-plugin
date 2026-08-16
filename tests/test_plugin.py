@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
+import weakref
+
 import torch
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.model_executor.layers.linear as linear_module
@@ -393,3 +396,37 @@ def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
 
     assert layer.qweight.device.type == "cuda"
     assert layer.qweight_type.device.type == "cuda"
+
+
+def test_gguf_merged_column_releases_shards_after_concat(monkeypatch):
+    register()
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    quant_config = OOTGGUFConfig.from_config({})
+    layer = MergedColumnParallelLinear(
+        input_size=4,
+        output_sizes=[4, 4],
+        bias=False,
+        quant_config=quant_config,
+        disable_tp=True,
+    )
+    layer.weight_loader_v2(layer.qweight, torch.ones((4, 4), dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.qweight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 1)
+
+    # The loading path keeps the pre-materialization parameter alive past
+    # process_weights_after_loading; hold it here so the shards can only be
+    # freed if materialization handed its containers over instead of copying.
+    source_param = layer.qweight
+    shard_refs = [weakref.ref(shard) for shard in source_param.data_container]
+
+    layer.quant_method.process_weights_after_loading(layer)
+    gc.collect()
+
+    assert layer.qweight is not source_param
+    assert not source_param.data_container
+    assert all(ref() is None for ref in shard_refs)
