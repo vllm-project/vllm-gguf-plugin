@@ -57,11 +57,6 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             model_type = "command-r"
         if model_type == "gemma3_text":
             model_type = "gemma3"
-        model_name_map, model_sideload_params = (
-            self._get_model_specific_mapping(config)
-        )
-        gguf_to_hf_name_map.update(model_name_map)
-        sideload_params.extend(model_sideload_params)
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             for idx in range(config.num_hidden_layers):
@@ -211,13 +206,6 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                 f"({len(unmapped_params)}): {unmapped_params}"
             )
         return gguf_to_hf_name_map
-
-    def _get_model_specific_mapping(
-        self,
-        config,
-    ) -> tuple[dict[str, str], list[re.Pattern]]:
-        del config
-        return {}, []
 
     def map_weights(
         self,
