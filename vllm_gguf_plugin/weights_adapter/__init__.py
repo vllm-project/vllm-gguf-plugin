@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .base import BaseGGUFWeightsAdapter
+from .deepseek import DeepSeekGGUFAdapter
 from .default import GGUFWeightsAdapter
 from .diffusion import (
     DiffusionGGUFAdapter,
@@ -16,6 +17,7 @@ from .olmoe import OLMoEGGUFAdapter
 _ADAPTER_REGISTRY: list[type[GGUFWeightsAdapter]] = [
     Gemma3GGUFAdapter,
     OLMoEGGUFAdapter,
+    DeepSeekGGUFAdapter,
 ]
 
 
@@ -29,6 +31,7 @@ def get_weights_adapter(config) -> GGUFWeightsAdapter:
 
 __all__ = [
     "BaseGGUFWeightsAdapter",
+    "DeepSeekGGUFAdapter",
     "DiffusionGGUFAdapter",
     "Flux2KleinDiffusionGGUFAdapter",
     "GGUFWeightsAdapter",
