@@ -3,6 +3,7 @@
 
 from .base import BaseGGUFWeightsAdapter
 from .default import GGUFWeightsAdapter
+from .deepseek import DeepSeekGGUFAdapter
 from .diffusion import (
     DiffusionGGUFAdapter,
     Flux2KleinDiffusionGGUFAdapter,
@@ -16,6 +17,7 @@ from .olmoe import OLMoEGGUFAdapter
 _ADAPTER_REGISTRY: list[type[GGUFWeightsAdapter]] = [
     Gemma3GGUFAdapter,
     OLMoEGGUFAdapter,
+    DeepSeekGGUFAdapter,
 ]
 
 
@@ -29,6 +31,7 @@ def get_weights_adapter(config) -> GGUFWeightsAdapter:
 
 __all__ = [
     "BaseGGUFWeightsAdapter",
+    "DeepSeekGGUFAdapter",
     "DiffusionGGUFAdapter",
     "Flux2KleinDiffusionGGUFAdapter",
     "GGUFWeightsAdapter",
