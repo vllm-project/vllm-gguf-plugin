@@ -28,6 +28,14 @@ class BaseGGUFWeightsAdapter(ABC):
     #: model in speculative decoding) and must stay unquantized.
     extra_unquantized_modules: tuple[str, ...] = ()
 
+    #: Modalities this adapter cannot reconstruct from GGUF weights.  Some
+    #: converters fold away information that one modality needs while leaving
+    #: the rest of the model intact; listing it here drops it from the model's
+    #: supported multimodal limits, so requests carrying it are rejected during
+    #: input validation instead of running against weights that cannot
+    #: represent them.
+    UNSUPPORTED_MODALITIES: tuple[str, ...] = ()
+
     @classmethod
     @abstractmethod
     def matches(cls, config: PretrainedConfig) -> bool:

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from functools import wraps
+from functools import cached_property, wraps
 from pathlib import Path
 
 import vllm.engine.arg_utils as arg_utils_module
@@ -118,6 +118,54 @@ def _patch_speculator_probe() -> None:
     config_module._gguf_speculator_probe_patched = True
 
 
+def _gguf_unsupported_modalities(model_config) -> tuple[str, ...]:
+    if getattr(model_config, "quantization", None) != "gguf":
+        return ()
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None:
+        return ()
+
+    from .weights_adapter import get_weights_adapter
+
+    return tuple(get_weights_adapter(hf_config).UNSUPPORTED_MODALITIES)
+
+
+def _patch_mm_limits() -> None:
+    """Hide modalities an adapter cannot reconstruct from its GGUF weights.
+
+    Wrapping the base ``supported_mm_limits`` rather than each model's
+    ``get_supported_mm_limits`` covers every subclass at once, and every
+    consumer -- request validation, the advertised modality list, and profiling
+    -- reads that one property. Dropping a modality from it makes vLLM reject
+    those requests with its usual validation error.
+    """
+    from vllm.multimodal.processing.context import BaseProcessingInfo
+
+    if getattr(BaseProcessingInfo, "_gguf_mm_limits_patched", False):
+        return
+
+    original = BaseProcessingInfo.supported_mm_limits.func
+
+    @wraps(original)
+    def supported_mm_limits(self):
+        limits = original(self)
+        unsupported = _gguf_unsupported_modalities(self.ctx.model_config)
+        if not unsupported:
+            return limits
+        return {
+            modality: limit
+            for modality, limit in limits.items()
+            if modality not in unsupported
+        }
+
+    patched = cached_property(supported_mm_limits)
+    BaseProcessingInfo.supported_mm_limits = patched
+    # Assigning a cached_property after class creation skips __set_name__, which
+    # is what tells it which attribute to cache under.
+    patched.__set_name__(BaseProcessingInfo, "supported_mm_limits")
+    BaseProcessingInfo._gguf_mm_limits_patched = True
+
+
 def _register_omni_diffusion_quantization() -> None:
     try:
         from vllm_omni.quantization import register_quantization_override
@@ -145,4 +193,5 @@ def register() -> None:
         register_config_parser("gguf")(GGUFConfigParser)
     _patch_engine_args()
     _patch_speculator_probe()
+    _patch_mm_limits()
     _patch_diffusers_loader()

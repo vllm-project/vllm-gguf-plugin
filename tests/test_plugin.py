@@ -2,7 +2,9 @@
 
 import gc
 import weakref
+from types import SimpleNamespace
 
+import pytest
 import torch
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.model_executor.layers.linear as linear_module
@@ -430,3 +432,60 @@ def test_gguf_merged_column_releases_shards_after_concat(monkeypatch):
     assert layer.qweight is not source_param
     assert not source_param.data_container
     assert all(ref() is None for ref in shard_refs)
+
+
+def _supported_mm_limits(quantization: str | None, model_type: str) -> dict:
+    """Evaluate the patched ``supported_mm_limits`` without starting an engine.
+
+    The wrapper installed by ``register()`` is what is under test, so this calls
+    the property directly.  Reading the effect off a rejected request instead
+    would mean loading a model, and the assertion would be buried in it.
+    """
+    from vllm.multimodal.processing.context import BaseProcessingInfo
+
+    register()
+
+    hf_config = PretrainedConfig()
+    hf_config.model_type = model_type
+
+    class Info(BaseProcessingInfo):
+        def __init__(self):
+            self.ctx = SimpleNamespace(
+                model_config=SimpleNamespace(
+                    quantization=quantization, hf_config=hf_config
+                )
+            )
+
+        def get_supported_mm_limits(self):
+            return {"image": None, "video": None}
+
+    return dict(Info().supported_mm_limits)
+
+
+def test_gguf_hides_a_modality_the_adapter_cannot_reconstruct():
+    """Muse Glimmer's converter keeps only the sum over the patch embedding's
+    time steps, so video cannot be reconstructed from these weights.
+
+    Dropping the modality here makes vLLM refuse the request with its own
+    validation error.  The alternative is worse than a refusal: video would run
+    on a reconstruction that is off by roughly 7% in the one channel carrying
+    frame-to-frame motion, and produce a fluent description of the wrong thing.
+    """
+    assert "video" not in _supported_mm_limits("gguf", "muse_glimmer")
+
+
+def test_the_modality_gate_leaves_images_alone():
+    """Positive control: the gate has to be per-modality, not per-model."""
+    assert "image" in _supported_mm_limits("gguf", "muse_glimmer")
+
+
+def test_the_modality_gate_is_tied_to_gguf():
+    """Negative control: the limitation comes from the GGUF conversion, so
+    unquantized weights of the same architecture keep video."""
+    assert "video" in _supported_mm_limits(None, "muse_glimmer")
+
+
+@pytest.mark.parametrize("model_type", ["gemma3", "qwen2_vl", "llama"])
+def test_the_modality_gate_does_not_reach_other_architectures(model_type):
+    """Negative control: the patch is global, so it has to stay adapter-scoped."""
+    assert "video" in _supported_mm_limits("gguf", model_type)
