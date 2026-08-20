@@ -9,7 +9,12 @@ description = "Out-of-tree GGUF quantization plugin for vLLM"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
-dependencies = ["gguf>=0.17.0", "vllm", "torch>=2.9"]
+dependencies = [
+    "gguf>=0.17.0",
+    "vllm",
+    "torch>=2.9",
+    "huggingface_hub>=1.26.0",
+]
 
 [project.optional-dependencies]
 dev = ["pre-commit"]
