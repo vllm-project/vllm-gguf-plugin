@@ -46,6 +46,7 @@ class GGUFLoadPlan(NamedTuple):
     files: GGUFModelFiles
     name_map: dict[str, str]
     unquantized_modules: tuple[str, ...]
+    dense_module_suffixes: tuple[str, ...]
     linear_layouts: dict[str, GGUFLinearLayout]
 
 
@@ -78,6 +79,25 @@ def _get_unquantized_modules(
         and mapped_name.endswith(".weight")
     }
     return tuple(sorted(modules))
+
+
+def _publish_declaration_for_a_draft(
+    model_config: ModelConfig,
+    plan: GGUFLoadPlan,
+) -> None:
+    """Record the declaration where a draft model will look for it.
+
+    A target model's layers are built against the very ``GGUFConfig`` this
+    loader extends.  A draft's are not: it resolves its own config separately,
+    rebuilding it from ``hf_config.quantization_config``, so everything recorded
+    on the shared object reaches the target and never the draft.  Writing the
+    declaration into that dict as well is what lets a draft declare anything.
+    """
+    quant_config = getattr(model_config.hf_config, "quantization_config", None)
+    if not isinstance(quant_config, dict):
+        return
+    quant_config["unquantized_modules"] = list(plan.unquantized_modules)
+    quant_config["dense_module_suffixes"] = list(plan.dense_module_suffixes)
 
 
 class GGUFModelLoader(BaseModelLoader):
@@ -178,7 +198,11 @@ class GGUFModelLoader(BaseModelLoader):
         )
         linear_layouts = adapter.get_linear_layouts(files, model_config, name_map)
         return adapter, GGUFLoadPlan(
-            files, name_map, unquantized_modules, linear_layouts
+            files,
+            name_map,
+            unquantized_modules,
+            tuple(adapter.dense_module_suffixes),
+            linear_layouts,
         )
 
     def _iter_weights(
@@ -208,6 +232,10 @@ class GGUFModelLoader(BaseModelLoader):
         logger.debug("GGUF unquantized modules: %s", plan.unquantized_modules)
         vllm_config.quant_config = cast(GGUFConfig, vllm_config.quant_config)
         vllm_config.quant_config.unquantized_modules.extend(plan.unquantized_modules)
+        vllm_config.quant_config.dense_module_suffixes.extend(
+            plan.dense_module_suffixes
+        )
+        _publish_declaration_for_a_draft(model_config, plan)
         vllm_config.quant_config.register_linear_layouts(
             plan.linear_layouts,
             prefix=prefix,

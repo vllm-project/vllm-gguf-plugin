@@ -528,3 +528,178 @@ class MuseGlimmerGGUFAdapter(BaseGGUFWeightsAdapter):
             elif (layout := self._rope_layout(name, config)) is not None:
                 weight = undo_rope_interleave(weight, *layout)
             yield name, weight
+
+
+MUSE_GLIMMER_DRAFT_MODEL_TYPES = ("muse_glimmer_assistant",)
+
+# vLLM serves this draft with the generic DFlash head, and EAGLEConfig rewrites
+# the architecture to DFlash{arch} on the way in, so the registry is asked for
+# DFlashMuseGlimmerAssistantModel.  The bare name is what belongs here: the
+# rewrite happens after the config parser runs.
+MUSE_GLIMMER_DRAFT_ARCHITECTURE = "MuseGlimmerAssistantModel"
+
+# Layer-local renames.  The draft is a plain requantization -- see
+# MuseGlimmerDraftGGUFAdapter -- so this table is the whole adapter.
+_DRAFT_WITHIN_LAYER = {
+    "attn_norm": "input_layernorm",
+    "ffn_norm": "post_attention_layernorm",
+    "attn_q": "self_attn.q_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_output": "self_attn.o_proj",
+    "attn_q_norm": "self_attn.q_norm",
+    "attn_k_norm": "self_attn.k_norm",
+    "ffn_gate": "mlp.gate_proj",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+}
+
+# The three tensors outside the blocks.  ``fc`` consumes the concatenated
+# hidden states of the target layers named by ``target_layer_ids``, which is why
+# its input dimension is a multiple of the hidden size.
+_DRAFT_TOP_LEVEL = {
+    "fc.weight": "encoder.fc.weight",
+    "enc.output_norm.weight": "encoder.output_norm_enc.weight",
+    "output_norm.weight": "norm.weight",
+}
+
+_DRAFT_BLOCK_RE = re.compile(r"^blk\.(\d+)\.(.+)\.weight$")
+
+# The projections that make up the fused ``qkv_proj``.  See
+# MuseGlimmerDraftGGUFAdapter.dense_module_suffixes for why these three, and
+# only these three, cannot stay packed.
+_DRAFT_DENSE_SUFFIXES = (
+    "self_attn.q_proj.weight",
+    "self_attn.k_proj.weight",
+    "self_attn.v_proj.weight",
+)
+
+
+def _draft_model_type(config: PretrainedConfig) -> str | None:
+    """Read the draft's own model type, seeing through EAGLEConfig.
+
+    A dflash draft is wrapped in ``EAGLEConfig`` on its way into the engine,
+    which reports ``model_type == "eagle"`` and keeps the real config on
+    ``.model``.  The wrapper is applied after the config parser has run, so
+    ``architecture()`` sees the bare type while the loader sees the wrapped
+    one, and an adapter that only checks the bare type stops matching exactly
+    when the weights are about to be mapped -- the fallback adapter then takes
+    over and fails on an architecture it has never heard of.
+    """
+    model_type = getattr(config, "model_type", None)
+    if model_type != "eagle":
+        return model_type
+    return getattr(getattr(config, "model", None), "model_type", None)
+
+
+def build_muse_glimmer_draft_name_map(tensor_names: Iterable[str]) -> dict[str, str]:
+    """Map the draft's GGUF tensor names to assistant-checkpoint names."""
+    name_map: dict[str, str] = {}
+    unmapped: list[str] = []
+    for name in sorted(tensor_names):
+        if (mapped := _DRAFT_TOP_LEVEL.get(name)) is not None:
+            name_map[name] = mapped
+            continue
+        match = _DRAFT_BLOCK_RE.match(name)
+        within = _DRAFT_WITHIN_LAYER.get(match.group(2)) if match else None
+        if within is None:
+            unmapped.append(name)
+            continue
+        name_map[name] = f"layers.{match.group(1)}.{within}.weight"
+
+    if unmapped:
+        logger.warning(
+            "No HF name for %d Muse Glimmer draft tensor(s), skipping: %s",
+            len(unmapped),
+            unmapped,
+        )
+    return name_map
+
+
+class MuseGlimmerDraftGGUFAdapter(BaseGGUFWeightsAdapter):
+    """Adapter for the Muse Glimmer DFlash draft, shipped as its own GGUF.
+
+    None of the conversions the backbone needs apply here, and that is the
+    point worth stating: the draft is a plain requantization.  Its Q/K rows are
+    already in NEOX order, its norms are stored as-is, and its Q/K norms are
+    learned rather than synthesized.  Reusing the backbone's rules would rewrite
+    correct weights -- the draft would still load and still produce fluent text,
+    because the target verifies every token, but its proposals would stop being
+    accepted.  ``test_muse_glimmer_dflash_gguf.py`` pins each of those three
+    facts.
+
+    So the name map is the whole conversion.  The one thing
+    ``transform_weights`` does is unpack Q/K/V, which the fused KV path forces
+    and which changes no values.
+    """
+
+    #: Never present in the draft's own checkpoint -- both are shared from the
+    #: target after loading, so they must stay ordinary vocab modules rather
+    #: than ones expecting packed GGUF bytes.
+    extra_unquantized_modules = ("embed_tokens", "lm_head")
+
+    #: The head fuses every layer's KV projection into one buffer at the end of
+    #: loading and reads ``qkv_proj.weight`` to build it, which a quantized
+    #: layer does not have.  Leaving these packed is therefore not an option,
+    #: and unpacking them is cheap: Q/K/V are about a sixth of the draft, so it
+    #: still loads at roughly a third of its unquantized size.  Everything else
+    #: stays quantized.
+    dense_module_suffixes = ("self_attn.qkv_proj",)
+
+    def __init__(self) -> None:
+        self._dense_modules: tuple[str, ...] = ()
+
+    @classmethod
+    def matches(cls, config) -> bool:
+        return _draft_model_type(config) in MUSE_GLIMMER_DRAFT_MODEL_TYPES
+
+    @classmethod
+    def architecture(cls, config) -> str | None:
+        if not cls.matches(config):
+            return None
+        return MUSE_GLIMMER_DRAFT_ARCHITECTURE
+
+    def build_name_map(
+        self,
+        files: GGUFModelFiles,
+        model_config: ModelConfig,
+    ) -> dict[str, str]:
+        del model_config
+        name_map = build_muse_glimmer_draft_name_map(
+            get_gguf_tensor_names(files.all_files)
+        )
+        self._dense_modules = tuple(
+            sorted(
+                name.removesuffix(".weight")
+                for name in name_map.values()
+                if name.endswith(_DRAFT_DENSE_SUFFIXES)
+            )
+        )
+        return name_map
+
+    def transform_weights(
+        self,
+        weights: Iterable[GGUFWeight],
+        model_config: ModelConfig,
+    ) -> Iterable[GGUFWeight]:
+        """Unpack the Q/K/V projections; pass everything else through.
+
+        No values change here.  Dequantizing is a representation change that the
+        fused KV path forces, not one of the conversions the backbone needs --
+        see the class docstring for why none of those apply to the draft.
+        """
+        dtype = model_config.dtype
+        dense = set(self._dense_modules)
+
+        # The iterator emits a module's ``qweight_type`` immediately before its
+        # ``qweight``, so a single slot is enough to rejoin the two.
+        quant_types: dict[str, int] = {}
+        for name, weight in weights:
+            module, _, leaf = name.rpartition(".")
+            if leaf in ("qweight", "qweight_type") and module in dense:
+                if leaf == "qweight_type":
+                    quant_types[module] = int(weight.item())
+                    continue
+                name = f"{module}.weight"
+                weight = dequantize_packed_rows(weight, quant_types.pop(module), dtype)
+            yield name, weight
