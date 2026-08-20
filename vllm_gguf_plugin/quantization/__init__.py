@@ -5,6 +5,7 @@ from .diffusion_config import (
     dequant_gemm_gguf,
 )
 from .fused_moe import GGUFMoEMethod, fused_moe_gguf
+from .layout import GGUFHeadTilingLayout, GGUFLinearLayout
 from .linear import GGUFLinearMethod, fused_mul_mat_gguf
 from .params import (
     GGUFUninitializedParameter,
@@ -23,7 +24,11 @@ from .utils import (
     UNQUANTIZED_TYPES,
     is_layer_skipped_gguf,
 )
-from .vocal_embeds import GGUFEmbeddingMethod, apply_gguf_embedding
+from .vocal_embeds import (
+    GGUFEmbeddingMethod,
+    apply_gguf_embedding,
+    recursive_replace_vocab_modules,
+)
 
 __all__ = [
     "DEQUANT_TYPES",
@@ -32,6 +37,8 @@ __all__ = [
     "dequant_gemm_gguf",
     "GGUFConfig",
     "GGUFEmbeddingMethod",
+    "GGUFHeadTilingLayout",
+    "GGUFLinearLayout",
     "GGUFLinearMethod",
     "GGUFMoEMethod",
     "GGUFUninitializedParameter",
@@ -49,4 +56,5 @@ __all__ = [
     "fused_moe_gguf",
     "fused_mul_mat_gguf",
     "is_layer_skipped_gguf",
+    "recursive_replace_vocab_modules",
 ]

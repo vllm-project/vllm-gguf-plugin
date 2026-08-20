@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
@@ -14,13 +13,10 @@ import torch
 from transformers import AutoModelForCausalLM
 from vllm.logger import init_logger
 
+from ..gguf_files import GGUFModelFiles
 from ..gguf_utils import maybe_patch_hf_config_from_gguf
-from ..weight_utils import (
-    get_gguf_extra_tensor_names,
-    get_gguf_weight_type_map,
-    gguf_quant_weights_iterator_multi,
-)
-from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
+from ..weight_utils import split_stacked_experts
+from .base import BaseGGUFWeightsAdapter, GGUFWeight
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -29,26 +25,35 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
-    """Default adapter for GGUF models."""
-
-    load_spec = None
+class TransformersGGUFWeightsAdapter(BaseGGUFWeightsAdapter):
+    """GGUF weights adapter based on Transformers tensor-name mappings."""
 
     @classmethod
     def matches(cls, config) -> bool:
         del config
         return True
 
-    def patch_hf_config(self, model_path: str, hf_config: PretrainedConfig):
-        return maybe_patch_hf_config_from_gguf(model_path, hf_config)
+    def patch_hf_config(
+        self,
+        files: GGUFModelFiles,
+        hf_config: PretrainedConfig,
+    ):
+        return maybe_patch_hf_config_from_gguf(
+            files.primary_backbone,
+            hf_config,
+            mmproj_path=files.mm_proj,
+        )
 
-    def build_name_map(self, model_config: ModelConfig) -> dict[str, str]:
+    def build_name_map(
+        self,
+        files: GGUFModelFiles,
+        model_config: ModelConfig,
+    ) -> dict[str, str]:
+        del files
         config = model_config.hf_config
         text_config = config.get_text_config()
         model_type = config.model_type
-        is_multimodal = (
-            hasattr(config, "vision_config") and config.vision_config is not None
-        )
+        is_multimodal = getattr(config, "vision_config", None) is not None
 
         gguf_to_hf_name_map: dict[str, str] = {}
         sideload_params: list[re.Pattern] = []
@@ -95,29 +100,6 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
                         f"model\\.layers\\.{idx}"
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
-                )
-        if model_type == "olmoe":
-            for idx in range(config.num_hidden_layers):
-                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
-                )
-                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
-                )
-                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
-                )
-                sideload_params.extend(
-                    [
-                        regex.compile(
-                            f"model\\.layers\\.{idx}"
-                            r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
-                        ),
-                        regex.compile(
-                            f"model\\.layers\\.{idx}"
-                            r"\.mlp\.experts\.(gate_up_proj|down_proj)"
-                        ),
-                    ]
                 )
         if model_type == "minimax_m2":
             model_type = "minimax-m2"
@@ -230,109 +212,10 @@ class GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
             )
         return gguf_to_hf_name_map
 
-    def map_weights(
+    def transform_weights(
         self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        for hf_name, weight in weights:
-            weight = self.transform_weight(hf_name, weight)
-            if weight.ndim == 3 and ".experts.0." in hf_name:
-                for expert_id, expert_weight in enumerate(weight.unbind()):
-                    expert_name = hf_name.replace(
-                        ".experts.0.", f".experts.{expert_id}."
-                    )
-                    yield expert_name, expert_weight
-            else:
-                yield hf_name, weight
-
-    @staticmethod
-    def _get_all_gguf_files(model_path: str) -> list[str]:
-        match = re.search(r"-(\d+)-of-(\d+)\.gguf$", model_path)
-        if not match:
-            return [model_path]
-        total = int(match.group(2))
-        num_digits = len(match.group(1))
-        prefix = model_path[: match.start(1)]
-        suffix = model_path[match.end(2) :]
-        files = []
-        for i in range(1, total + 1):
-            shard_path = f"{prefix}{i:0{num_digits}d}-of-{total:0{num_digits}d}{suffix}"
-            if os.path.isfile(shard_path):
-                files.append(shard_path)
-        if files:
-            logger.info("Discovered %d GGUF shard files", len(files))
-        return files if files else [model_path]
-
-    def update_tie_word_embeddings(
-        self,
-        model_path: str,
-        hf_config: PretrainedConfig,
-        gguf_to_hf_name_map: dict[str, str],
-    ) -> None:
-        if "lm_head.weight" not in gguf_to_hf_name_map.values():
-            return
-
-        model_missing_names: set[str] | None = None
-        for gguf_file in self._get_all_gguf_files(model_path):
-            shard_missing_names = set(
-                get_gguf_extra_tensor_names(gguf_file, gguf_to_hf_name_map)
-            )
-            model_missing_names = (
-                shard_missing_names
-                if model_missing_names is None
-                else model_missing_names & shard_missing_names
-            )
-        hf_config.update(
-            {"tie_word_embeddings": "lm_head.weight" in (model_missing_names or set())}
-        )
-
-    def get_weight_type_map(
-        self,
-        model_path: str,
-        gguf_to_hf_name_map: dict[str, str],
-    ) -> dict[str, str]:
-        weight_type_map = {}
-        for gguf_file in self._get_all_gguf_files(model_path):
-            weight_type_map.update(
-                get_gguf_weight_type_map(gguf_file, gguf_to_hf_name_map)
-            )
-        return weight_type_map
-
-    @staticmethod
-    def get_unquantized_modules(weight_type_map: dict[str, str]) -> list[str]:
-        return [
-            name.removesuffix(".weight")
-            for name, weight_type in weight_type_map.items()
-            if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
-        ]
-
-    def prepare_loading(
-        self,
-        model_path: str,
+        weights: Iterable[GGUFWeight],
         model_config: ModelConfig,
-    ) -> GGUFLoadSpec:
-        model_config.hf_config = self.patch_hf_config(
-            model_path, model_config.hf_config
-        )
-        gguf_to_hf_name_map = self.build_name_map(model_config)
-        self.update_tie_word_embeddings(
-            model_path, model_config.hf_config, gguf_to_hf_name_map
-        )
-        weight_type_map = self.get_weight_type_map(model_path, gguf_to_hf_name_map)
-        self.load_spec = GGUFLoadSpec(
-            weights_source=self._get_all_gguf_files(model_path),
-            gguf_to_hf_name_map=gguf_to_hf_name_map,
-            unquantized_modules=self.get_unquantized_modules(weight_type_map),
-        )
-        return self.load_spec
-
-    def prepare_weights(
-        self,
-        model_config: ModelConfig,
-    ) -> Iterable[tuple[str, torch.Tensor]]:
+    ) -> Iterable[GGUFWeight]:
         del model_config
-        weights = gguf_quant_weights_iterator_multi(
-            self.load_spec.weights_source,
-            self.load_spec.gguf_to_hf_name_map,
-        )
-        yield from self.map_weights(weights)
+        yield from split_stacked_experts(weights)

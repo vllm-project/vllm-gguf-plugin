@@ -26,19 +26,26 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
    cd vllm-gguf-plugin
    ```
 
-2. Install the plugin in development mode:
+2. If vLLM is not already installed, install it first:
 
    ```bash
-   uv pip install -e . --torch-backend=auto
+   uv pip install vllm --torch-backend=auto
    ```
 
-Or install directly:
+3. Build and install the plugin against the PyTorch installation used by
+   vLLM:
 
-```bash
-uv pip install . --torch-backend=auto
-```
+   ```bash
+   uv pip install -e . --no-build-isolation
+   ```
+
+   Disabling build isolation ensures that the CUDA extension is compiled
+   against the same PyTorch installation used by vLLM at runtime.
 
 ## Development
+
+After completing the editable source installation above, install and run the
+development tooling:
 
 ```bash
 uv pip install -e .[dev] --torch-backend=auto
@@ -53,6 +60,18 @@ The same hooks also run in GitHub Actions on every push and pull request.
 ```bash
 vllm serve Qwen/Qwen3-0.6B-GGUF:Q8_0 --tokenizer Qwen/Qwen3-0.6B
 ```
+
+Qwen 3.5 MTP speculative decoding loads the `nextn` block embedded in the same
+GGUF; it does not download separate Hugging Face MTP weights:
+
+```bash
+vllm serve unsloth/Qwen3.5-4B-MTP-GGUF:Q4_K_M \
+  --tokenizer Qwen/Qwen3.5-4B \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
+```
+
+For a GGUF without a `nextn` block, omit `--speculative-config`; the backbone
+loads normally without MTP.
 
 ## Tested model coverage
 
@@ -71,6 +90,8 @@ starting points:
 | Text | Gemma 3 | Q4_0 |
 | Text | OLMoE | Q4_0 |
 | Vision-language | Gemma 3 | Q4_0 backbone with F16 projector |
+| Vision-language | Qwen 3.5 | Q4_K_M backbone with BF16 projector |
+| Vision-language | Qwen 3.6 | UD-IQ2_XXS backbone with BF16 projector |
 | Image generation | Z-Image-Turbo | Q4_0 |
 | Image generation | FLUX.2-klein | Q8_0 |
 

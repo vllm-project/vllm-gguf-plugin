@@ -10,6 +10,7 @@ import gguf
 import regex as re
 from gguf.constants import Keys, LlamaFileType, VisionProjectorType
 from gguf.quants import GGMLQuantizationType
+from huggingface_hub import hf_hub_download
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
@@ -126,6 +127,52 @@ def split_remote_gguf(model: str | Path) -> tuple[str, str]:
         f"- Extended suffixes also supported: {_GGUF_QUANT_SUFFIXES}\n"
         "- Non-standard GGUF quant types also supported: "
         "dash-separated prefixes (e.g. UD-Q4_K_XL, Custom-Q8_0)",
+    )
+
+
+def get_remote_gguf_repo_id(model: str | Path) -> str | None:
+    """Return the Hugging Face repository for a supported remote reference."""
+    model = str(model)
+    if Path(model).is_file():
+        return None
+    if is_remote_gguf(model):
+        repo_id, _ = split_remote_gguf(model)
+        return repo_id
+    if "/" in model and model.endswith(".gguf"):
+        repo_id, _ = model.rsplit("/", 1)
+        return repo_id
+    return None
+
+
+def resolve_explicit_mm_proj(
+    reference: str | Path,
+    model_path: str | Path,
+    *,
+    cache_dir: str | None = None,
+    revision: str | None = None,
+) -> str:
+    """Resolve an explicit local, sibling, or Hugging Face mm_proj reference."""
+    reference = str(reference)
+    if Path(reference).is_file():
+        return reference
+
+    sibling_path = Path(model_path).parent / reference
+    if sibling_path.is_file():
+        return str(sibling_path)
+
+    if "/" in reference and reference.endswith(".gguf"):
+        repo_id, filename = reference.rsplit("/", 1)
+        return hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            cache_dir=cache_dir,
+            revision=revision,
+        )
+
+    raise ValueError(
+        f"Unrecognised GGUF mm_proj reference: {reference} "
+        "(expected a local file, sibling filename, or "
+        "<repo_id>/<filename>.gguf)"
     )
 
 
@@ -251,7 +298,10 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
             )
             return None
         # Extract scalar value from GGUF field and convert to target type
-        config_params[param_name] = dtype(field.parts[-1])
+        value = field.parts[-1]
+        if hasattr(value, "item"):
+            value = value.item()
+        config_params[param_name] = dtype(value)
 
     # Apply model-specific parameters based on projector type
     if projector_type == VisionProjectorType.GEMMA3:
@@ -304,6 +354,7 @@ def extract_lm_head_from_gguf(model_path: str | Path) -> bool:
 def maybe_patch_hf_config_from_gguf(
     model: str,
     hf_config: PretrainedConfig,
+    mmproj_path: str | Path | None = None,
 ) -> PretrainedConfig:
     """Patch HF config for GGUF models.
 
@@ -336,7 +387,8 @@ def maybe_patch_hf_config_from_gguf(
         text_config.update({"tie_word_embeddings": not has_lm_head})
 
     # Patch multimodal config if mmproj.gguf exists
-    mmproj_path = detect_gguf_multimodal(model)
+    if mmproj_path is None:
+        mmproj_path = detect_gguf_multimodal(model)
     if mmproj_path is not None:
         vision_config = extract_vision_config_from_gguf(str(mmproj_path))
 

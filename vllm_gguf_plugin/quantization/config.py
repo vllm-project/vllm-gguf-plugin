@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -18,12 +19,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 
 from .utils import is_layer_skipped_gguf
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
+
+    from .layout import GGUFLinearLayout
 
 
 class GGUFConfig(QuantizationConfig):
@@ -32,6 +35,7 @@ class GGUFConfig(QuantizationConfig):
     def __init__(self, unquantized_modules: list[str] | None = None) -> None:
         super().__init__()
         self.unquantized_modules = unquantized_modules or []
+        self.linear_layouts: dict[str, GGUFLinearLayout] = {}
 
     def __repr__(self) -> str:
         return "GGUFConfig()"
@@ -57,7 +61,7 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg: dict[str, Any], user_quant: str | None
+        cls, hf_quant_cfg: dict[str, Any], user_quant: str | None, hf_config: Any = None
     ) -> "QuantizationMethods | None":
         del hf_quant_cfg
         if user_quant == "gguf":
@@ -76,7 +80,10 @@ class GGUFConfig(QuantizationConfig):
                 prefix, self.unquantized_modules, self.packed_modules_mapping
             ):
                 return UnquantizedLinearMethod()
-            return GGUFLinearMethod(self)
+            return GGUFLinearMethod(
+                self,
+                layout=self.linear_layouts.get(prefix),
+            )
         if isinstance(layer, VocabParallelEmbedding):
             if is_layer_skipped_gguf(
                 prefix, self.unquantized_modules, self.packed_modules_mapping
@@ -91,6 +98,17 @@ class GGUFConfig(QuantizationConfig):
             return GGUFMoEMethod(self, layer.moe_config)
         return None
 
+    def register_linear_layouts(
+        self,
+        layouts: Mapping[str, "GGUFLinearLayout"],
+        prefix: str = "",
+    ) -> None:
+        """Register GGUF linear layouts before model initialization."""
+        self.linear_layouts.update(
+            (maybe_prefix(prefix, module_name), layout)
+            for module_name, layout in layouts.items()
+        )
+
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         """
         Interface for models to update module names referenced in
@@ -103,3 +121,7 @@ class GGUFConfig(QuantizationConfig):
             self.unquantized_modules = hf_to_vllm_mapper.apply_list(
                 self.unquantized_modules
             )
+        if self.linear_layouts:
+            layouts = self.linear_layouts
+            mapped_names = hf_to_vllm_mapper.apply_list(list(layouts))
+            self.linear_layouts = dict(zip(mapped_names, layouts.values(), strict=True))

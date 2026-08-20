@@ -16,7 +16,20 @@ from vllm_gguf_plugin.quantization.fused_moe import (
     fused_moe_gguf,
 )
 
+try:
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+    _HAS_SITU = any(member.value == "situ" for member in MoEActivation)
+except ImportError:
+    _HAS_SITU = False
+
+requires_situ_vllm = pytest.mark.skipif(
+    not _HAS_SITU,
+    reason="installed vLLM MoEActivation lacks SiTU support",
+)
+
+
+@requires_situ_vllm
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
 def test_kimi_k3_situ_betas_match_reference(dtype: torch.dtype):
@@ -34,6 +47,7 @@ def test_kimi_k3_situ_betas_match_reference(dtype: torch.dtype):
 
 
 @torch.inference_mode()
+@requires_situ_vllm
 def test_situ_missing_beta_uses_upstream_defaults():
     inp = torch.ones((2, 64), device="cuda", dtype=torch.bfloat16)
 
@@ -51,6 +65,7 @@ def test_kimi_profile_batch_splits_before_routed_token_launch_limit():
 
 
 @torch.inference_mode()
+@requires_situ_vllm
 def test_fused_gguf_moe_custom_op_carries_situ_betas():
     qtype = GGMLQuantizationType.Q8_0
     experts, hidden_size, intermediate_size = 2, 32, 32
@@ -114,6 +129,7 @@ def test_iq2_xs_plain_tp8_is_rejected_with_ep_guidance():
         GGUFMoEMethod.process_weights_after_loading(None, layer)
 
 
+@requires_situ_vllm
 @pytest.mark.skipif(
     not os.environ.get("KIMI_IQ2_FIXTURE"),
     reason="set KIMI_IQ2_FIXTURE to the tiny MoE GGUF sample",

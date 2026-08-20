@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
+import inspect
+import weakref
+
 import pytest
 import torch
 import vllm.engine.arg_utils as arg_utils_module
 import vllm.envs as envs_module
+import vllm.model_executor.layers.linear as linear_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.transformers_utils.config as config_module
@@ -19,7 +24,6 @@ from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
-from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
@@ -43,7 +47,24 @@ from vllm_gguf_plugin.quantization import (
     GGUFWeightTypeParameter,
 )
 
+try:
+    from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
+except ImportError:
+    KimiK3Config = None
 
+requires_kimi_k3_vllm = pytest.mark.skipif(
+    KimiK3Config is None,
+    reason="installed vLLM lacks native Kimi-K3 support",
+)
+
+requires_native_mla_cache_spec = pytest.mark.skipif(
+    "non_causal_multi_token_decode"
+    not in inspect.signature(MLAAttentionSpec).parameters,
+    reason="installed vLLM MLAAttentionSpec lacks non_causal_multi_token_decode",
+)
+
+
+@requires_kimi_k3_vllm
 def test_register_overrides_gguf_config():
     register()
 
@@ -72,6 +93,7 @@ def test_register_is_idempotent():
     assert isinstance(get_config_parser("gguf"), GGUFConfigParser)
 
 
+@requires_native_mla_cache_spec
 def test_register_preserves_native_kimi_k3_mla_cache_spec():
     register()
 
@@ -103,6 +125,7 @@ def test_register_restores_kimi_k3_routed_down_proj_threshold(monkeypatch):
     assert envs_module.VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD == 17
 
 
+@requires_kimi_k3_vllm
 def test_loader_normalizes_kimi_k3_mla_disabled_cp_sentinel():
     from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 
@@ -360,6 +383,7 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     assert config.architectures == ["Qwen3MoeForCausalLM"]
 
 
+@requires_kimi_k3_vllm
 def test_gguf_config_parser_selects_kimi_k3_text_model(monkeypatch):
     outer_config = KimiK3Config(
         text_config=KimiLinearConfig(
@@ -468,6 +492,74 @@ def test_gguf_qkv_shards_are_padded_in_qkv_order(monkeypatch):
     assert torch.equal(layer.qweight[6:8], v)
 
 
+def _patch_tp(monkeypatch, tp_rank: int, tp_size: int):
+    """Fake a tp_size-way TP group without initializing a process group."""
+    for module in (linear_module, parameter_module, gguf_params_module):
+        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
+        monkeypatch.setattr(
+            module, "get_tensor_model_parallel_world_size", lambda: tp_size
+        )
+
+
+def _load_merged_column_shard(monkeypatch, tp_rank, loaded_weight):
+    register()
+    _patch_tp(monkeypatch, tp_rank, tp_size=2)
+    layer = MergedColumnParallelLinear(
+        input_size=4,
+        output_sizes=[4, 4],
+        bias=False,
+        quant_config=OOTGGUFConfig.from_config({}),
+    )
+    layer.weight_loader_v2(layer.qweight, loaded_weight, 0)
+
+    return layer.qweight.data_container[0]
+
+
+def _load_qkv_shard(monkeypatch, tp_rank, shard_id, loaded_weight):
+    register()
+    _patch_tp(monkeypatch, tp_rank, tp_size=2)
+    layer = QKVParallelLinear(
+        hidden_size=4,
+        head_size=2,
+        total_num_heads=4,
+        total_num_kv_heads=2,
+        bias=False,
+        quant_config=OOTGGUFConfig.from_config({}),
+    )
+    layer.weight_loader_v2(layer.qweight, loaded_weight, shard_id)
+
+    return layer.qweight.data_container[0]
+
+
+def test_gguf_merged_column_shard_follows_tp_rank(monkeypatch):
+    # output_sizes=[4, 4] over tp_size=2 gives shard_size=2, so each rank must
+    # take a different half of the 4 rows the GGUF file holds for shard 0.
+    loaded_weight = torch.arange(16, dtype=torch.uint8).reshape(4, 4)
+
+    rank0 = _load_merged_column_shard(monkeypatch, 0, loaded_weight)
+    rank1 = _load_merged_column_shard(monkeypatch, 1, loaded_weight)
+
+    assert torch.equal(rank0, loaded_weight[0:2])
+    assert torch.equal(rank1, loaded_weight[2:4])
+
+
+def test_gguf_qkv_shard_follows_tp_rank(monkeypatch):
+    # total_num_heads=4 and total_num_kv_heads=2 over tp_size=2 gives
+    # num_kv_head_replicas=1, q shard_size=4 of 8 rows, k shard_size=2 of 4.
+    q = torch.arange(32, dtype=torch.uint8).reshape(8, 4)
+    k = torch.arange(16, dtype=torch.uint8).reshape(4, 4)
+
+    q_rank0 = _load_qkv_shard(monkeypatch, 0, "q", q)
+    q_rank1 = _load_qkv_shard(monkeypatch, 1, "q", q)
+    k_rank0 = _load_qkv_shard(monkeypatch, 0, "k", k)
+    k_rank1 = _load_qkv_shard(monkeypatch, 1, "k", k)
+
+    assert torch.equal(q_rank0, q[0:4])
+    assert torch.equal(q_rank1, q[4:8])
+    assert torch.equal(k_rank0, k[0:2])
+    assert torch.equal(k_rank1, k[2:4])
+
+
 def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
     if not torch.cuda.is_available():
         return
@@ -496,3 +588,37 @@ def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
 
     assert layer.qweight.device.type == "cuda"
     assert layer.qweight_type.device.type == "cuda"
+
+
+def test_gguf_merged_column_releases_shards_after_concat(monkeypatch):
+    register()
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    quant_config = OOTGGUFConfig.from_config({})
+    layer = MergedColumnParallelLinear(
+        input_size=4,
+        output_sizes=[4, 4],
+        bias=False,
+        quant_config=quant_config,
+        disable_tp=True,
+    )
+    layer.weight_loader_v2(layer.qweight, torch.ones((4, 4), dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.qweight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 1)
+
+    # The loading path keeps the pre-materialization parameter alive past
+    # process_weights_after_loading; hold it here so the shards can only be
+    # freed if materialization handed its containers over instead of copying.
+    source_param = layer.qweight
+    shard_refs = [weakref.ref(shard) for shard in source_param.data_container]
+
+    layer.quant_method.process_weights_after_loading(layer)
+    gc.collect()
+
+    assert layer.qweight is not source_param
+    assert not source_param.data_container
+    assert all(ref() is None for ref in shard_refs)

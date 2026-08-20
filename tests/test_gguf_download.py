@@ -1,13 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from huggingface_hub import ResolvedRevision
 from vllm.config.load import LoadConfig
 
+import vllm_gguf_plugin.loader as loader_module
+from vllm_gguf_plugin.gguf_files import GGUFModelFiles
 from vllm_gguf_plugin.loader import GGUFModelLoader
-from vllm_gguf_plugin.weight_utils import download_gguf, resolve_local_gguf
+from vllm_gguf_plugin.weight_utils import (
+    download_gguf,
+    download_mmproj,
+    resolve_local_gguf,
+)
 
 
 class TestGGUFDownload:
@@ -95,6 +103,26 @@ class TestGGUFDownload:
         with pytest.raises(ValueError, match="Downloaded GGUF files not found"):
             download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
 
+    @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
+    @patch("vllm_gguf_plugin.weight_utils.list_filtered_repo_files")
+    def test_download_mmproj_prefers_bfloat16(self, mock_list, mock_download):
+        mock_list.return_value = [
+            "mmproj-F32.gguf",
+            "mmproj-F16.gguf",
+            "mmproj-BF16.gguf",
+        ]
+        mock_download.return_value = "/cache/mmproj-BF16.gguf"
+
+        result = download_mmproj("org/model", revision="main")
+
+        assert result == "/cache/mmproj-BF16.gguf"
+        mock_download.assert_called_once_with(
+            repo_id="org/model",
+            filename="mmproj-BF16.gguf",
+            cache_dir=None,
+            revision="main",
+        )
+
 
 class TestGGUFModelLoader:
     """Test GGUFModelLoader class methods."""
@@ -158,6 +186,51 @@ class TestGGUFModelLoader:
         assert result == f"{mock_folder}/model-IQ1_S.gguf"
         mock_download.assert_called_once()
 
+    @pytest.mark.parametrize(
+        ("initial_revision", "resolved_revision", "expected_revision"),
+        [
+            (None, "b" * 40, None),
+            ("weights-branch", "b" * 40, "weights-branch"),
+            ("a" * 40, "a" * 40, "a" * 40),
+        ],
+    )
+    @patch("vllm_gguf_plugin.loader.download_gguf")
+    @patch("os.path.isdir", return_value=False)
+    @patch("os.path.isfile", return_value=False)
+    def test_prepare_weights_detaches_revision_resolved_for_another_repo(
+        self,
+        mock_isfile,
+        mock_isdir,
+        mock_download,
+        initial_revision,
+        resolved_revision,
+        expected_revision,
+    ):
+        mock_download.return_value = "/downloaded/model-Q4_0.gguf"
+        load_config = LoadConfig(load_format="gguf")
+        loader = GGUFModelLoader(load_config)
+
+        model_config = MagicMock()
+        model_config.model = "org/config-repo"
+        model_config.model_weights = "org/weights-repo:Q4_0"
+        model_config.revision = ResolvedRevision(
+            initial=initial_revision,
+            resolved=resolved_revision,
+        )
+
+        result = loader._prepare_weights(model_config)
+
+        assert result == "/downloaded/model-Q4_0.gguf"
+        mock_download.assert_called_once_with(
+            "org/weights-repo",
+            "Q4_0",
+            cache_dir=None,
+            revision=expected_revision,
+            ignore_patterns=load_config.ignore_patterns,
+        )
+        revision = mock_download.call_args.kwargs["revision"]
+        assert revision is None or type(revision) is str
+
     @patch("os.path.isfile", return_value=False)
     def test_prepare_weights_invalid_format(self, mock_isfile):
         """Test _prepare_weights with invalid format."""
@@ -170,3 +243,64 @@ class TestGGUFModelLoader:
 
         with pytest.raises(ValueError, match="Unrecognised GGUF reference"):
             loader._prepare_weights(model_config)
+
+    def test_rejects_unknown_extra_config(self):
+        load_config = LoadConfig(
+            load_format="gguf",
+            model_loader_extra_config={"unknown": "value"},
+        )
+
+        with pytest.raises(ValueError, match="Unsupported GGUF"):
+            GGUFModelLoader(load_config)
+
+    def test_prepare_model_files_uses_explicit_mmproj(self, tmp_path):
+        backbone = tmp_path / "model.gguf"
+        mm_proj = tmp_path / "projector-custom.gguf"
+        backbone.write_bytes(b"GGUF")
+        mm_proj.write_bytes(b"GGUF")
+
+        loader = GGUFModelLoader(
+            LoadConfig(
+                load_format="gguf",
+                model_loader_extra_config={"mm_proj": str(mm_proj)},
+            )
+        )
+        model_config = SimpleNamespace(
+            model_weights=str(backbone),
+            model=str(backbone),
+            revision=None,
+            hf_config=SimpleNamespace(),
+        )
+
+        files = loader._prepare_model_files(model_config)
+
+        assert files == GGUFModelFiles((str(backbone),), str(mm_proj))
+
+    def test_prepare_model_files_downloads_remote_mmproj(self, monkeypatch):
+        loader = GGUFModelLoader(LoadConfig(load_format="gguf"))
+        model_config = SimpleNamespace(
+            model_weights="org/model:Q4_0",
+            model="org/model",
+            revision="main",
+            hf_config=SimpleNamespace(vision_config=object()),
+        )
+
+        monkeypatch.setattr(
+            loader,
+            "_prepare_weights",
+            lambda config: "/cache/model-Q4_0.gguf",
+        )
+        download_calls = []
+
+        def fake_download(repo_id, cache_dir=None, revision=None):
+            download_calls.append((repo_id, cache_dir, revision))
+            return "/cache/mmproj-BF16.gguf"
+
+        monkeypatch.setattr(loader_module, "download_mmproj", fake_download)
+
+        files = loader._prepare_model_files(model_config)
+
+        assert files == GGUFModelFiles(
+            ("/cache/model-Q4_0.gguf",), "/cache/mmproj-BF16.gguf"
+        )
+        assert download_calls == [("org/model", None, "main")]

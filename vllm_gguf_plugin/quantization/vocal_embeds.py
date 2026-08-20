@@ -6,7 +6,12 @@ from functools import partial
 import gguf
 import torch
 from gguf import GGMLQuantizationType as WeightType
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -21,6 +26,54 @@ from .params import (
     _materialize_gguf_weight_type_parameter,
 )
 from .utils import DEQUANT_TYPES, UNQUANTIZED_TYPES
+
+
+def recursive_replace_vocab_modules(
+    model: torch.nn.Module,
+    quant_config: QuantizationConfig,
+    prefix: str = "",
+) -> None:
+    """Recursively rebuild vocab modules missing their quantization method."""
+    replacements: dict[int, torch.nn.Module] = {}
+
+    def replace(module: torch.nn.Module, prefix: str) -> None:
+        # named_children() de-duplicates tied modules.
+        for child_name, child_module in tuple(module._modules.items()):
+            if child_module is None:
+                continue
+            qual_name = maybe_prefix(prefix, child_name)
+            replacement = replacements.get(id(child_module))
+            if replacement is not None:
+                setattr(module, child_name, replacement)
+                continue
+
+            if type(child_module) not in (VocabParallelEmbedding, ParallelLMHead):
+                replace(child_module, qual_name)
+                continue
+
+            expected_method = quant_config.get_quant_method(child_module, qual_name)
+            if type(child_module.quant_method) is type(expected_method):
+                continue
+
+            kwargs = (
+                {"bias": child_module.bias is not None}
+                if type(child_module) is ParallelLMHead
+                else {}
+            )
+            replacement = type(child_module)(
+                child_module.num_embeddings,
+                child_module.embedding_dim,
+                params_dtype=child_module.params_dtype,
+                org_num_embeddings=child_module.org_vocab_size,
+                padding_size=child_module.padding_size,
+                quant_config=quant_config,
+                prefix=qual_name,
+                **kwargs,
+            )
+            replacements[id(child_module)] = replacement
+            setattr(module, child_name, replacement)
+
+    replace(model, prefix)
 
 
 def _apply_gguf_embedding(

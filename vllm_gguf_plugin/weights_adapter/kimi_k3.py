@@ -11,11 +11,17 @@ import torch
 from gguf import GGMLQuantizationType
 from gguf.quants import dequantize
 
-from ..config_parser import KIMI_K3_GGUF_TEXT_MARKER
-from .default import GGUFWeightsAdapter
+from ..gguf_files import GGUFModelFiles
+from ..gguf_utils import maybe_patch_hf_config_from_gguf
+from ..weight_utils import split_stacked_experts
+from .base import BaseGGUFWeightsAdapter, GGUFWeight
 
 if TYPE_CHECKING:
+    from transformers import PretrainedConfig
     from vllm.config import ModelConfig
+
+KIMI_K3_GGUF_TEXT_ARCH = "KimiK3GGUFForCausalLM"
+KIMI_K3_GGUF_TEXT_MARKER = "_gguf_kimi_k3_text_only"
 
 _KV_B_PART_RE = re.compile(
     r"^(model\.layers\.\d+\.self_attn)\.([kv])_b_proj\."
@@ -187,27 +193,49 @@ def build_kimi_k3_name_map(config) -> dict[str, str]:
     return names
 
 
-class KimiK3GGUFWeightsAdapter(GGUFWeightsAdapter):
+class KimiK3GGUFWeightsAdapter(BaseGGUFWeightsAdapter):
     """Text-only Kimi-K3 adapter for llama.cpp PR #26185 GGUF files."""
+
+    # Kimi-K3 reconstructs split MLA/KDA/routed tensors into fused vLLM
+    # modules; a silently skipped parameter would corrupt the model, so every
+    # parameter must be reported as initialized by the model loader.
+    strict_weight_audit = True
 
     @classmethod
     def matches(cls, config) -> bool:
         return bool(getattr(config, KIMI_K3_GGUF_TEXT_MARKER, False))
 
-    def build_name_map(self, model_config: ModelConfig) -> dict[str, str]:
+    def patch_hf_config(
+        self,
+        files: GGUFModelFiles,
+        hf_config: PretrainedConfig,
+    ):
+        return maybe_patch_hf_config_from_gguf(files.primary_backbone, hf_config)
+
+    def build_name_map(
+        self,
+        files: GGUFModelFiles,
+        model_config: ModelConfig,
+    ) -> dict[str, str]:
+        del files
         return build_kimi_k3_name_map(model_config.hf_config)
 
-    @staticmethod
-    def get_unquantized_modules(weight_type_map: dict[str, str]) -> list[str]:
-        modules = GGUFWeightsAdapter.get_unquantized_modules(weight_type_map)
-        unquantized = set(modules)
+    def extend_unquantized_modules(
+        self,
+        files: GGUFModelFiles,
+        name_map: dict[str, str],
+        unquantized_modules: tuple[str, ...],
+    ) -> Iterable[str]:
+        del files
+        unquantized = set(unquantized_modules)
+        extra: list[str] = []
 
         # vLLM packs these checkpoint projections into one LinearBase module.
         # The generic GGUF precision scan sees only the unfused checkpoint
         # names, so add the actual destination module when every shard is
         # unquantized.
         fused_groups: dict[str, tuple[str, ...]] = {}
-        for name in weight_type_map:
+        for name in name_map.values():
             if match := re.match(
                 r"^(.+\.(?:mlp|shared_experts))\.(?:gate|up)_proj\.weight$",
                 name,
@@ -247,17 +275,17 @@ class KimiK3GGUFWeightsAdapter(GGUFWeightsAdapter):
                     f"unquantized shards: {fused_name}"
                 )
             if all(shard_states):
-                modules.append(fused_name)
+                extra.append(fused_name)
 
-        for name in weight_type_map:
+        for name in name_map.values():
             match = re.match(
                 r"^(model\.layers\.\d+\.self_attn)\.[kv]_b_proj\.weight$",
                 name,
             )
             if match:
                 fused_name = f"{match.group(1)}.kv_b_proj"
-                if fused_name not in modules:
-                    modules.append(fused_name)
+                if fused_name not in extra:
+                    extra.append(fused_name)
             match = re.match(
                 r"^(model\.layers\.\d+\.self_attn)\.b_proj\.weight$",
                 name,
@@ -267,9 +295,9 @@ class KimiK3GGUFWeightsAdapter(GGUFWeightsAdapter):
                 # fused projection natively so its independently stored GGUF
                 # components can be reconstructed before vLLM packs them.
                 fused_name = f"{match.group(1)}.in_proj_qkvgfab"
-                if fused_name not in modules:
-                    modules.append(fused_name)
-        return modules
+                if fused_name not in extra:
+                    extra.append(fused_name)
+        return extra
 
     @staticmethod
     def _dequantize_q8_0(
@@ -324,10 +352,19 @@ class KimiK3GGUFWeightsAdapter(GGUFWeightsAdapter):
         )
         return self._fuse_mla_kv_b_tensors(prefix, k_b, v_b)
 
-    def map_weights(
+    def transform_weights(
         self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> Iterable[tuple[str, torch.Tensor]]:
+        weights: Iterable[GGUFWeight],
+        model_config: ModelConfig,
+    ) -> Iterable[GGUFWeight]:
+        config = model_config.hf_config
+        yield from split_stacked_experts(self._transform_weights(weights, config))
+
+    def _transform_weights(
+        self,
+        weights: Iterable[GGUFWeight],
+        config,
+    ) -> Iterable[GGUFWeight]:
         mla_parts: dict[str, dict[str, torch.Tensor]] = {}
         routed_parts: dict[str, dict[str, torch.Tensor]] = {}
         kda_parts: dict[str, dict[str, torch.Tensor]] = {}
@@ -358,7 +395,7 @@ class KimiK3GGUFWeightsAdapter(GGUFWeightsAdapter):
 
             if match := _KDA_IN_PROJ_RE.match(name):
                 layer_prefix, layer_idx, component, value_kind = match.groups()
-                if self.config.is_kda_layer(int(layer_idx)):
+                if config.is_kda_layer(int(layer_idx)):
                     prefix = f"{layer_prefix}.{component}"
                     parts = kda_parts.setdefault(prefix, {})
                     parts[value_kind] = weight
@@ -453,7 +490,7 @@ class KimiK3GGUFWeightsAdapter(GGUFWeightsAdapter):
                     yield base + proj_suffix, weight.reshape(1, -1)
                     break
             else:
-                yield from super().map_weights([(name, weight)])
+                yield name, weight
 
         if mla_parts:
             missing = {

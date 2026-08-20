@@ -18,7 +18,13 @@ from vllm.model_executor.model_loader import (
 )
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
-from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
+
+try:
+    from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
+except ImportError:
+    # The installed vLLM predates native Kimi-K3 support; the plugin stays
+    # usable for other models, only Kimi-K3 GGUF loading is unavailable.
+    KimiK3Config = None
 
 from .config_parser import (
     KIMI_K3_GGUF_TEXT_ARCH,
@@ -96,6 +102,27 @@ def _patch_engine_args() -> None:
 
     EngineArgs.create_model_config = create_model_config
     EngineArgs._gguf_create_model_config_patched = True
+
+    original_create_speculative_config = EngineArgs.create_speculative_config
+
+    @wraps(original_create_speculative_config)
+    def create_speculative_config(self, *args, **kwargs):
+        configured_model = getattr(self, "spec_model", None)
+        if self.speculative_config is not None:
+            configured_model = configured_model or self.speculative_config.get("model")
+
+        config = original_create_speculative_config(self, *args, **kwargs)
+        gguf_model = self.model_weights
+        if (
+            config is not None
+            and config.method == "mtp"
+            and configured_model is None
+            and _is_gguf_reference(gguf_model)
+        ):
+            config.draft_model_config.model_weights = gguf_model
+        return config
+
+    EngineArgs.create_speculative_config = create_speculative_config
 
 
 def _patch_speculator_probe() -> None:
@@ -177,7 +204,8 @@ def register() -> None:
     # pinned revision does not include kimi_k3 in _CONFIG_REGISTRY. Registering
     # it here makes HFConfigParser ignore the repository auto_map and keeps
     # trust_remote_code disabled.
-    config_module._CONFIG_REGISTRY["kimi_k3"] = KimiK3Config
+    if KimiK3Config is not None:
+        config_module._CONFIG_REGISTRY["kimi_k3"] = KimiK3Config
     ModelRegistry.register_model(
         KIMI_K3_GGUF_TEXT_ARCH,
         "vllm.models.kimi_k3:KimiLinearForCausalLM",

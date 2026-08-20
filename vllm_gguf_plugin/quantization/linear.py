@@ -12,6 +12,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .. import ops
+from .layout import GGUFLinearLayout
 from .params import (
     GGUFUninitializedWeightParameter,
     GGUFUninitializedWeightTypeParameter,
@@ -80,8 +81,13 @@ except AttributeError as error:
 class GGUFLinearMethod(LinearMethodBase):
     """Linear method for GGUF."""
 
-    def __init__(self, quant_config):
+    def __init__(
+        self,
+        quant_config,
+        layout: GGUFLinearLayout | None = None,
+    ) -> None:
         self.quant_config = quant_config
+        self.layout = layout
 
     def create_weights(
         self,
@@ -93,7 +99,7 @@ class GGUFLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        del input_size, output_size
+        del output_size
         self.params_dtype = params_dtype
         output_size_per_partition = sum(output_partition_sizes)
         fallback_weight_loader = extra_weight_attrs.pop("weight_loader", None)
@@ -134,6 +140,16 @@ class GGUFLinearMethod(LinearMethodBase):
         )
         set_weight_attrs(qweight_type, extra_weight_attrs)
         layer.register_parameter("qweight_type", qweight_type)
+
+        if self.layout is not None:
+            set_weight_attrs(
+                qweight,
+                {
+                    "gguf_layout": self.layout,
+                    "gguf_logical_input_size": input_size,
+                    "gguf_weight_type_parameter": qweight_type,
+                },
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         self._materialize_gguf_parameters(layer)
@@ -211,6 +227,9 @@ class GGUFLinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         from . import fused_mul_mat_gguf as fused_mul_mat_gguf_op
+
+        if self.layout is not None:
+            x = self.layout.input_to_gguf(x)
 
         shard_id = layer.qweight.shard_id
         if shard_id:

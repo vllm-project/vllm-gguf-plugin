@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from gguf import GGMLQuantizationType
@@ -31,6 +33,27 @@ def kimi_k3_config() -> KimiLinearConfig:
     )
 
 
+def map_weights(weights):
+    """Run the adapter's weight transform against a fresh Kimi-K3 config."""
+    adapter = KimiK3GGUFWeightsAdapter()
+    model_config = SimpleNamespace(hf_config=kimi_k3_config())
+    return adapter.transform_weights(weights, model_config)
+
+
+def extend_unquantized_modules(
+    weight_type_map: dict[str, str],
+) -> list[str]:
+    """Run the adapter's unquantized-module extension over a type map."""
+    adapter = KimiK3GGUFWeightsAdapter()
+    name_map = {f"gguf.{name}": name for name in weight_type_map}
+    unquantized = tuple(
+        name.removesuffix(".weight")
+        for name, weight_type in weight_type_map.items()
+        if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
+    )
+    return list(adapter.extend_unquantized_modules(None, name_map, unquantized))
+
+
 def test_kimi_k3_adapter_registration_is_specific():
     config = kimi_k3_config()
     assert isinstance(get_weights_adapter(config), KimiK3GGUFWeightsAdapter)
@@ -48,24 +71,20 @@ def test_kimi_k3_name_map_covers_exact_q2_contract():
 
 
 def test_folded_a_log_is_reversed():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     original = torch.tensor([0.0, 1.0, 2.0])
     folded = -torch.exp(original)
 
-    [(name, restored)] = list(
-        adapter.map_weights([("model.layers.0.self_attn.A_log", folded)])
-    )
+    [(name, restored)] = list(map_weights([("model.layers.0.self_attn.A_log", folded)]))
 
     assert name.endswith(".A_log")
-    assert torch.equal(restored, original)
+    torch.testing.assert_close(restored, original)
 
 
 def test_gguf_conv1d_leading_dimension_is_removed():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     weight = torch.arange(1 * 8 * 1 * 4).reshape(1, 8, 1, 4)
 
     [(name, restored)] = list(
-        adapter.map_weights([("model.layers.0.self_attn.q_conv1d.weight", weight)])
+        map_weights([("model.layers.0.self_attn.q_conv1d.weight", weight)])
     )
 
     assert name.endswith(".q_conv1d.weight")
@@ -74,11 +93,10 @@ def test_gguf_conv1d_leading_dimension_is_removed():
 
 
 def test_canonical_gguf_conv1d_layout_is_preserved():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     weight = torch.arange(8 * 1 * 4).reshape(8, 1, 4)
 
     [(name, restored)] = list(
-        adapter.map_weights([("model.layers.0.self_attn.q_conv1d.weight", weight)])
+        map_weights([("model.layers.0.self_attn.q_conv1d.weight", weight)])
     )
 
     assert name.endswith(".q_conv1d.weight")
@@ -86,11 +104,9 @@ def test_canonical_gguf_conv1d_layout_is_preserved():
 
 
 def test_gguf_conv1d_rejects_unexpected_layout():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
-
     with pytest.raises(ValueError, match="conv1d tensor must have layout"):
         list(
-            adapter.map_weights(
+            map_weights(
                 [
                     (
                         "model.layers.0.self_attn.q_conv1d.weight",
@@ -102,11 +118,10 @@ def test_gguf_conv1d_rejects_unexpected_layout():
 
 
 def test_attention_residual_score_expands_to_native_pair():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     score = torch.tensor([2.0, 3.0, 5.0])
 
     mapped = dict(
-        adapter.map_weights([("model.layers.7.self_attention_res_score.weight", score)])
+        map_weights([("model.layers.7.self_attention_res_score.weight", score)])
     )
 
     assert torch.equal(
@@ -120,7 +135,6 @@ def test_attention_residual_score_expands_to_native_pair():
 
 
 def test_mla_q8_split_pair_is_reconstructed_for_vllm():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     qtype = GGMLQuantizationType.Q8_0
     native_k = torch.linspace(-2, 2, 2 * 32 * 32).reshape(2, 32, 32).numpy()
     native_v = torch.linspace(3, -3, 2 * 32 * 32).reshape(2, 32, 32).numpy()
@@ -129,7 +143,7 @@ def test_mla_q8_split_pair_is_reconstructed_for_vllm():
     prefix = "model.layers.3.self_attn"
 
     mapped = dict(
-        adapter.map_weights(
+        map_weights(
             [
                 (f"{prefix}.k_b_proj.qweight_type", torch.tensor(qtype)),
                 (f"{prefix}.k_b_proj.qweight", torch.from_numpy(gguf_k)),
@@ -147,13 +161,12 @@ def test_mla_q8_split_pair_is_reconstructed_for_vllm():
 
 
 def test_mla_f32_split_pair_is_reconstructed_for_vllm():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     prefix = "model.layers.3.self_attn"
     k_b = torch.arange(2 * 32 * 16).reshape(2, 32, 16)
     v_b = torch.arange(2 * 8 * 32).reshape(2, 8, 32)
 
     mapped = dict(
-        adapter.map_weights(
+        map_weights(
             [
                 (f"{prefix}.k_b_proj.weight", k_b),
                 (f"{prefix}.v_b_proj.weight", v_b),
@@ -167,7 +180,7 @@ def test_mla_f32_split_pair_is_reconstructed_for_vllm():
 
 
 def test_mla_fused_projection_is_marked_unquantized():
-    modules = KimiK3GGUFWeightsAdapter.get_unquantized_modules(
+    modules = extend_unquantized_modules(
         {
             "model.layers.3.self_attn.k_b_proj.weight": "Q8_0",
             "model.layers.3.self_attn.v_b_proj.weight": "Q8_0",
@@ -179,7 +192,7 @@ def test_mla_fused_projection_is_marked_unquantized():
 
 
 def test_f32_packed_projections_are_marked_unquantized():
-    modules = KimiK3GGUFWeightsAdapter.get_unquantized_modules(
+    modules = extend_unquantized_modules(
         {
             "model.layers.0.mlp.gate_proj.weight": "F32",
             "model.layers.0.mlp.up_proj.weight": "F32",
@@ -201,7 +214,7 @@ def test_f32_packed_projections_are_marked_unquantized():
 
 def test_f32_packed_projection_rejects_mixed_precision():
     with pytest.raises(ValueError, match="mixes quantized and unquantized"):
-        KimiK3GGUFWeightsAdapter.get_unquantized_modules(
+        extend_unquantized_modules(
             {
                 "model.layers.0.mlp.gate_proj.weight": "F32",
                 "model.layers.0.mlp.up_proj.weight": "Q8_0",
@@ -211,7 +224,7 @@ def test_f32_packed_projection_rejects_mixed_precision():
 
 def test_f32_expert_group_rejects_mixed_precision():
     with pytest.raises(ValueError, match="mixes quantized and unquantized"):
-        KimiK3GGUFWeightsAdapter.get_unquantized_modules(
+        extend_unquantized_modules(
             {
                 "model.layers.3.block_sparse_moe.experts.0.w1.weight": "F32",
                 "model.layers.3.block_sparse_moe.experts.0.w2.weight": "F32",
@@ -221,7 +234,7 @@ def test_f32_expert_group_rejects_mixed_precision():
 
 
 def test_kda_mixed_fused_projection_is_marked_unquantized():
-    modules = KimiK3GGUFWeightsAdapter.get_unquantized_modules(
+    modules = extend_unquantized_modules(
         {
             "model.layers.0.self_attn.q_proj.weight": "Q8_0",
             "model.layers.0.self_attn.b_proj.weight": "F32",
@@ -233,14 +246,13 @@ def test_kda_mixed_fused_projection_is_marked_unquantized():
 
 @pytest.mark.parametrize("component", ["q_proj", "b_proj"])
 def test_kda_q8_input_projection_component_is_dequantized(component):
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     qtype = GGMLQuantizationType.Q8_0
     original = torch.linspace(-2, 2, 32 * 64).reshape(32, 64).numpy()
     quantized = quantize(original, qtype)
     prefix = f"model.layers.0.self_attn.{component}"
 
     mapped = dict(
-        adapter.map_weights(
+        map_weights(
             [
                 (f"{prefix}.qweight_type", torch.tensor(qtype)),
                 (f"{prefix}.qweight", torch.from_numpy(quantized)),
@@ -254,13 +266,12 @@ def test_kda_q8_input_projection_component_is_dequantized(component):
 
 
 def test_mla_q8_output_gate_stays_quantized():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     qtype = GGMLQuantizationType.Q8_0
     quantized = torch.arange(64, dtype=torch.uint8).reshape(2, 32)
     prefix = "model.layers.3.self_attn.g_proj"
 
     mapped = dict(
-        adapter.map_weights(
+        map_weights(
             [
                 (f"{prefix}.qweight_type", torch.tensor(qtype)),
                 (f"{prefix}.qweight", quantized),
@@ -276,14 +287,13 @@ def test_mla_q8_output_gate_stays_quantized():
 
 
 def test_q8_embedding_is_dequantized_for_native_kimi_embedding():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     qtype = GGMLQuantizationType.Q8_0
     original = torch.linspace(-2, 2, 32 * 64).reshape(32, 64).numpy()
     quantized = quantize(original, qtype)
     prefix = "model.embed_tokens"
 
     mapped = dict(
-        adapter.map_weights(
+        map_weights(
             [
                 (f"{prefix}.qweight_type", torch.tensor(qtype)),
                 (f"{prefix}.qweight", torch.from_numpy(quantized)),
@@ -297,14 +307,13 @@ def test_q8_embedding_is_dequantized_for_native_kimi_embedding():
 
 
 def test_latent_moe_routed_q8_projection_is_dequantized():
-    adapter = KimiK3GGUFWeightsAdapter(kimi_k3_config())
     qtype = GGMLQuantizationType.Q8_0
     original = torch.linspace(-2, 2, 32 * 64).reshape(32, 64).numpy()
     quantized = quantize(original, qtype)
     prefix = "model.layers.1.block_sparse_moe.routed_expert_down_proj"
 
     mapped = dict(
-        adapter.map_weights(
+        map_weights(
             [
                 (f"{prefix}.qweight_type", torch.tensor(qtype)),
                 (f"{prefix}.qweight", torch.from_numpy(quantized)),

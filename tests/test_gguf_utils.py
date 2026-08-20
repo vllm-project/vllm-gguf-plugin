@@ -7,11 +7,63 @@ import pytest
 
 from vllm_gguf_plugin.gguf_utils import (
     extract_lm_head_from_gguf,
+    get_remote_gguf_repo_id,
     is_gguf,
     is_local_gguf_quant,
     is_remote_gguf,
+    resolve_explicit_mm_proj,
     split_remote_gguf,
 )
+
+
+def test_get_remote_gguf_repo_id(tmp_path):
+    local_file = tmp_path / "model.gguf"
+    local_file.write_bytes(b"GGUF")
+
+    assert get_remote_gguf_repo_id("org/model:Q4_K_M") == "org/model"
+    assert get_remote_gguf_repo_id("org/model/model-Q4.gguf") == "org/model"
+    assert get_remote_gguf_repo_id(local_file) is None
+    assert get_remote_gguf_repo_id("not-a-gguf-reference") is None
+
+
+def test_resolve_explicit_mm_proj_local_and_sibling(tmp_path):
+    model_path = tmp_path / "model.gguf"
+    mm_proj = tmp_path / "mmproj-BF16.gguf"
+    model_path.write_bytes(b"GGUF")
+    mm_proj.write_bytes(b"GGUF")
+
+    assert resolve_explicit_mm_proj(mm_proj, model_path) == str(mm_proj)
+    assert resolve_explicit_mm_proj(mm_proj.name, model_path) == str(mm_proj)
+
+
+def test_resolve_explicit_mm_proj_remote(monkeypatch):
+    download_calls = []
+
+    def fake_download(**kwargs):
+        download_calls.append(kwargs)
+        return "/cache/mmproj.gguf"
+
+    monkeypatch.setattr(
+        "vllm_gguf_plugin.gguf_utils.hf_hub_download",
+        fake_download,
+    )
+
+    result = resolve_explicit_mm_proj(
+        "org/model/mmproj.gguf",
+        "/cache/model.gguf",
+        cache_dir="/cache",
+        revision="main",
+    )
+
+    assert result == "/cache/mmproj.gguf"
+    assert download_calls == [
+        {
+            "repo_id": "org/model",
+            "filename": "mmproj.gguf",
+            "cache_dir": "/cache",
+            "revision": "main",
+        }
+    ]
 
 
 class TestIsRemoteGGUF:

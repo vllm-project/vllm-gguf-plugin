@@ -3,18 +3,16 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-import torch
 from vllm.model_executor.models.utils import WeightsMapper
 
-from ..gguf_utils import detect_gguf_multimodal, maybe_patch_hf_config_from_gguf
-from ..weight_utils import (
-    get_gguf_unquantized_params,
-    gguf_quant_weights_iterator_multi,
-)
-from .base import BaseGGUFWeightsAdapter, GGUFLoadSpec
+from ..gguf_files import GGUFModelFiles
+from ..gguf_utils import maybe_patch_hf_config_from_gguf
+from ..weight_utils import get_gguf_tensor_names
+from .base import BaseGGUFWeightsAdapter, GGUFWeight
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -63,6 +61,10 @@ def build_gemma3_mapper(is_multimodal: bool) -> WeightsMapper:
     }
 
     return WeightsMapper(
+        orig_to_new_regex={
+            re.compile(r"^(v\.blk\.\d+)\.ffn_up\."): r"\1.mlp.fc2.",
+            re.compile(r"^(v\.blk\.\d+)\.ffn_down\."): r"\1.mlp.fc1.",
+        },
         orig_to_new_prefix=orig_to_new_prefix,
         orig_to_new_substr=orig_to_new_substr,
     )
@@ -71,58 +73,40 @@ def build_gemma3_mapper(is_multimodal: bool) -> WeightsMapper:
 class Gemma3GGUFAdapter(BaseGGUFWeightsAdapter):
     """Adapter for Gemma3 GGUF models."""
 
-    mapper = None
-    load_spec = None
-
     @classmethod
     def matches(cls, config) -> bool:
         return config.model_type in ("gemma3", "gemma3_text")
 
-    def patch_hf_config(self, model_path: str, hf_config: PretrainedConfig):
-        return maybe_patch_hf_config_from_gguf(model_path, hf_config)
-
-    def prepare_weights(
-        self, model_config: ModelConfig
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        """Return HF-style weights."""
-        orig_weights = gguf_quant_weights_iterator_multi(self.load_spec.weights_source)
-        yield from self.transform_weight(self.mapper.apply(orig_weights))
-
-    def prepare_loading(
+    def patch_hf_config(
         self,
-        model_path: str,
+        files: GGUFModelFiles,
+        hf_config: PretrainedConfig,
+    ):
+        return maybe_patch_hf_config_from_gguf(
+            files.primary_backbone,
+            hf_config,
+            mmproj_path=files.mm_proj,
+        )
+
+    def build_name_map(
+        self,
+        files: GGUFModelFiles,
         model_config: ModelConfig,
-    ) -> GGUFLoadSpec:
-        model_config.hf_config = self.patch_hf_config(
-            model_path, model_config.hf_config
-        )
-        gguf_files = [model_path]
-        mm_proj_path = detect_gguf_multimodal(model_path)
-        if mm_proj_path:
-            gguf_files.append(mm_proj_path)
-        self.mapper = build_gemma3_mapper(is_multimodal=mm_proj_path is not None)
-        unquantized_params = get_gguf_unquantized_params(gguf_files)
-        unquantized_modules = list(
-            {
-                param.rsplit(".", 1)[0] if param.endswith(".weight") else param
-                for param in self.mapper.apply_list(unquantized_params)
-            }
-        )
-        self.load_spec = GGUFLoadSpec(
-            weights_source=gguf_files,
-            unquantized_modules=unquantized_modules,
-        )
+    ) -> dict[str, str]:
+        del model_config
+        mapper = build_gemma3_mapper(is_multimodal=files.mm_proj is not None)
+        gguf_names = sorted(get_gguf_tensor_names(files.all_files))
+        hf_names = mapper.apply_list(gguf_names)
+        return dict(zip(gguf_names, hf_names, strict=True))
 
-    def transform_weight(
+    def transform_weights(
         self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        """Transform raw GGUF weights to HF-style weights."""
+        weights: Iterable[GGUFWeight],
+        model_config: ModelConfig,
+    ) -> Iterable[GGUFWeight]:
+        """Transform mapped GGUF weights to the Gemma3 representation."""
+        del model_config
         for name, weight in weights:
             if name.endswith("norm.weight") and not name.startswith("vision_tower"):
                 weight = weight - 1
-            elif name.startswith("vision_tower") and "mlp.up_proj." in name:
-                name = name.replace("mlp.up_proj.", "mlp.fc2.")
-            elif name.startswith("vision_tower") and "mlp.down_proj." in name:
-                name = name.replace("mlp.down_proj.", "mlp.fc1.")
             yield name, weight

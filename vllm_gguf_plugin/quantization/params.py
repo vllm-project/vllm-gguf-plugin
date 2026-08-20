@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gguf
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
 from vllm.distributed import (
@@ -41,6 +42,10 @@ def _resolve_gguf_weight_type_loader(
     def _gguf_weight_type_loader_v2(param, loaded_weight, loaded_shard_id=None):
         if loaded_shard_id is None and hasattr(param, "_store"):
             param._store(loaded_weight)
+            return
+        if isinstance(loaded_shard_id, tuple) and hasattr(param, "_store"):
+            for shard_id in loaded_shard_id:
+                param._store(loaded_weight, shard_id=shard_id)
             return
         base_loader(param, loaded_weight, loaded_shard_id)
 
@@ -233,7 +238,25 @@ class _GGUFParamLoadMixin:
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
-        if tp_size > 1 and loaded_weight.ndim >= 2:
+        layout = getattr(self, "gguf_layout", None)
+        if tp_size > 1 and layout is not None:
+            weight_type_param = self.gguf_weight_type_parameter
+            weight_type = weight_type_param.weight_type
+            if weight_type not in gguf.GGML_QUANT_SIZES:
+                raise ValueError(
+                    f"Unknown GGUF weight type {weight_type} while sharding "
+                    "a transformed row-parallel weight"
+                )
+            block_size, _ = gguf.GGML_QUANT_SIZES[weight_type]
+            loaded_weight = layout.shard_weight(
+                loaded_weight,
+                dim=self.input_dim,
+                logical_size=self.gguf_logical_input_size,
+                block_size=block_size,
+                tp_rank=tp_rank,
+                tp_size=tp_size,
+            )
+        elif tp_size > 1 and loaded_weight.ndim >= 2:
             shard_size = loaded_weight.shape[1] // tp_size
             if shard_size > 0:
                 loaded_weight = loaded_weight.narrow(
@@ -243,7 +266,6 @@ class _GGUFParamLoadMixin:
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_id = kwargs.get("shard_id")
-        tp_rank = get_tensor_model_parallel_rank()
         shard_size = kwargs.get("shard_size")
         if (
             shard_size is not None
@@ -251,12 +273,12 @@ class _GGUFParamLoadMixin:
             and shard_size > 0
             and shard_size < loaded_weight.shape[0]
         ):
+            tp_rank = get_tensor_model_parallel_rank()
             loaded_weight = loaded_weight.narrow(0, tp_rank * shard_size, shard_size)
         self._store(loaded_weight, shard_id=shard_id)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_id = kwargs.get("shard_id")
-        tp_rank = get_tensor_model_parallel_rank()
         shard_size = kwargs.get("shard_size")
         num_kv_head_replicas = kwargs.get("num_heads", 1)
         if (
@@ -265,6 +287,7 @@ class _GGUFParamLoadMixin:
             and shard_size > 0
             and shard_size < loaded_weight.shape[0]
         ):
+            tp_rank = get_tensor_model_parallel_rank()
             effective_tp_rank = (
                 tp_rank // num_kv_head_replicas if shard_id in ("k", "v") else tp_rank
             )
@@ -352,6 +375,13 @@ def _materialize_gguf_weight_parameter(
     qweight.shard_id_map = dict(raw_param.shard_id_map)
     if hasattr(raw_param, "ignore_warning"):
         qweight.ignore_warning = raw_param.ignore_warning
+    # Hand the shard tensors over rather than sharing them: the source param
+    # outlives this call, and a second reference to the shards would keep them
+    # resident after _create_padded_weight_param builds the concatenated copy,
+    # leaving every fused layer in VRAM twice.
+    raw_param.data_container.clear()
+    raw_param.shard_id.clear()
+    raw_param.shard_id_map.clear()
     layer.register_parameter(param_name, qweight)
 
 

@@ -14,9 +14,17 @@ from .gguf_utils import (
     maybe_patch_hf_config_from_gguf,
     split_remote_gguf,
 )
+from .weights_adapter import get_adapter_architecture
+from .weights_adapter.kimi_k3 import (
+    KIMI_K3_GGUF_TEXT_ARCH,
+    KIMI_K3_GGUF_TEXT_MARKER,
+)
 
-KIMI_K3_GGUF_TEXT_ARCH = "KimiK3GGUFForCausalLM"
-KIMI_K3_GGUF_TEXT_MARKER = "_gguf_kimi_k3_text_only"
+__all__ = [
+    "GGUFConfigParser",
+    "KIMI_K3_GGUF_TEXT_ARCH",
+    "KIMI_K3_GGUF_TEXT_MARKER",
+]
 
 
 class GGUFConfigParser(ConfigParserBase):
@@ -61,12 +69,17 @@ class GGUFConfigParser(ConfigParserBase):
             )
             return config_dict, config
 
-        if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+        architecture = get_adapter_architecture(config)
+        if (
+            architecture is None
+            and config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+        ):
+            architecture = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
+        if architecture is None:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
 
-        model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
-        config_dict["architectures"] = [model_type]
-        config.update({"architectures": [model_type]})
+        config_dict["architectures"] = [architecture]
+        config.update({"architectures": [architecture]})
 
         if is_gguf(original_model):
             config = maybe_patch_hf_config_from_gguf(str(original_model), config)

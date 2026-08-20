@@ -3,14 +3,16 @@
 import glob
 import itertools
 import os
-from collections.abc import Generator
+import re
+from collections.abc import Generator, Iterable
 from pathlib import Path
 
 import gguf
 import numpy as np
 import torch
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from vllm.logger import init_logger
+from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
@@ -53,6 +55,44 @@ def download_gguf(
     return local_files[0]
 
 
+def download_mmproj(
+    repo_id: str,
+    cache_dir: str | None = None,
+    revision: str | None = None,
+) -> str | None:
+    """Download one multimodal projector from a GGUF repository."""
+    candidates = list_filtered_repo_files(
+        repo_id,
+        allow_patterns=["*mmproj*.gguf"],
+        revision=revision,
+    )
+    if not candidates:
+        return None
+
+    precision_order = ("BF16", "F16", "F32")
+
+    def candidate_key(filename: str) -> tuple[int, str]:
+        upper_name = filename.upper()
+        precision = next(
+            (
+                index
+                for index, value in enumerate(precision_order)
+                if value in upper_name
+            ),
+            len(precision_order),
+        )
+        return precision, filename
+
+    filename = min(candidates, key=candidate_key)
+    logger.info("Downloading multimodal projector %s from %s", filename, repo_id)
+    return hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        cache_dir=cache_dir,
+        revision=revision,
+    )
+
+
 def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     """Find a GGUF file matching *quant_type* in a local directory."""
     import glob as glob_mod
@@ -74,24 +114,35 @@ def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     return matches[0]
 
 
-def get_gguf_extra_tensor_names(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> list[str]:
-    reader = gguf.GGUFReader(gguf_file)
-    expected_gguf_keys = set(gguf_to_hf_name_map.keys())
-    exact_gguf_keys = {tensor.name for tensor in reader.tensors}
-    extra_keys = expected_gguf_keys - exact_gguf_keys
-    return [gguf_to_hf_name_map[key] for key in extra_keys]
+def get_gguf_shard_files(model_path: str) -> list[str]:
+    """Return every shard belonging to *model_path*, or the path itself."""
+    match = re.search(r"-(\d+)-of-(\d+)\.gguf$", model_path)
+    if not match:
+        return [model_path]
+
+    total = int(match.group(2))
+    num_digits = len(match.group(1))
+    prefix = model_path[: match.start(1)]
+    suffix = model_path[match.end(2) :]
+    files = [
+        f"{prefix}{index:0{num_digits}d}-of-{total:0{num_digits}d}{suffix}"
+        for index in range(1, total + 1)
+    ]
+    missing = [path for path in files if not os.path.isfile(path)]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing {len(missing)} of {total} GGUF shard files: {missing}"
+        )
+    logger.info("Discovered %d GGUF shard files", len(files))
+    return files
 
 
-def get_gguf_weight_type_map(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> dict[str, str]:
-    reader = gguf.GGUFReader(gguf_file)
+def get_gguf_tensor_names(gguf_files: Iterable[str]) -> set[str]:
+    """Return raw tensor names across all supplied GGUF files."""
     return {
-        gguf_to_hf_name_map[tensor.name]: tensor.tensor_type.name
-        for tensor in reader.tensors
-        if tensor.name in gguf_to_hf_name_map
+        tensor.name
+        for gguf_file in gguf_files
+        for tensor in gguf.GGUFReader(gguf_file).tensors
     }
 
 
@@ -102,7 +153,8 @@ def gguf_quant_weights_iterator(
 
 
 def gguf_quant_weights_iterator_multi(
-    gguf_files: list[str], gguf_to_hf_name_map: dict[str, str] | None = None
+    gguf_files: list[str],
+    gguf_to_hf_name_map: dict[str, str] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Yield ``(name, tensor)`` for all tensors in *gguf_files*.
 
@@ -139,6 +191,19 @@ def gguf_quant_weights_iterator_multi(
             yield name, param
 
 
+def split_stacked_experts(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Split stacked GGUF expert tensors into vLLM per-expert weights."""
+    for name, weight in weights:
+        if weight.ndim == 3 and ".experts.0." in name:
+            for expert_id, expert_weight in enumerate(weight.unbind()):
+                expert_name = name.replace(".experts.0.", f".experts.{expert_id}.")
+                yield expert_name, expert_weight
+        else:
+            yield name, weight
+
+
 def get_gguf_unquantized_params(gguf_files: list[str]) -> list[str]:
     _QUANT_TYPES = ("F32", "BF16", "F16")
     return list(
@@ -149,8 +214,3 @@ def get_gguf_unquantized_params(gguf_files: list[str]) -> list[str]:
             if tensor.tensor_type.name in _QUANT_TYPES
         }
     )
-    # for gguf_file in gguf_files:
-    #     reader = gguf.GGUFReader(gguf_file)
-    #     for tensor in reader.tensors:
-    #         if tensor.tensor_type.name in unquant_types:
-    #             yield tensor.name.rsplit(".", 1)[0]
