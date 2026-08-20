@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
+import inspect
 import weakref
 
+import pytest
 import torch
 import vllm.engine.arg_utils as arg_utils_module
+import vllm.envs as envs_module
 import vllm.model_executor.layers.linear as linear_module
 import vllm.model_executor.layers.vocab_parallel_embedding as vocab_embedding_module
 import vllm.model_executor.parameter as parameter_module
@@ -21,25 +24,54 @@ from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.transformers_utils.config import get_config_parser
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 import vllm_gguf_plugin.config_parser as gguf_config_parser_module
 import vllm_gguf_plugin.quantization as gguf_quantization
 import vllm_gguf_plugin.quantization.params as gguf_params_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
-from vllm_gguf_plugin.config_parser import GGUFConfigParser
+from vllm_gguf_plugin.config_parser import (
+    KIMI_K3_GGUF_TEXT_ARCH,
+    KIMI_K3_GGUF_TEXT_MARKER,
+    GGUFConfigParser,
+)
+from vllm_gguf_plugin.loader import (
+    _load_weights_strict,
+    _normalize_kimi_k3_mla_context_parallelism,
+)
 from vllm_gguf_plugin.quantization import (
     GGUFUninitializedParameter,
+    GGUFUninitializedWeightParameter,
     GGUFWeightParameter,
     GGUFWeightTypeParameter,
 )
 
+try:
+    from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
+except ImportError:
+    KimiK3Config = None
 
+requires_kimi_k3_vllm = pytest.mark.skipif(
+    KimiK3Config is None,
+    reason="installed vLLM lacks native Kimi-K3 support",
+)
+
+requires_native_mla_cache_spec = pytest.mark.skipif(
+    "non_causal_multi_token_decode"
+    not in inspect.signature(MLAAttentionSpec).parameters,
+    reason="installed vLLM MLAAttentionSpec lacks non_causal_multi_token_decode",
+)
+
+
+@requires_kimi_k3_vllm
 def test_register_overrides_gguf_config():
     register()
 
     quant_config = get_quantization_config("gguf")
 
     assert quant_config is OOTGGUFConfig
+    assert config_module._CONFIG_REGISTRY["kimi_k3"] is KimiK3Config
 
 
 def test_register_overrides_gguf_loader():
@@ -59,6 +91,105 @@ def test_register_is_idempotent():
         get_model_loader(LoadConfig(load_format="gguf")), OOTGGUFModelLoader
     )
     assert isinstance(get_config_parser("gguf"), GGUFConfigParser)
+
+
+@requires_native_mla_cache_spec
+def test_register_preserves_native_kimi_k3_mla_cache_spec():
+    register()
+
+    spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=256,
+        dtype=torch.bfloat16,
+        non_causal_multi_token_decode=False,
+    )
+
+    assert spec.block_size == 16
+    assert spec.head_size == 256
+
+    non_causal_spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=256,
+        dtype=torch.bfloat16,
+        non_causal_multi_token_decode=True,
+    )
+    assert non_causal_spec.non_causal_multi_token_decode
+
+
+def test_register_restores_kimi_k3_routed_down_proj_threshold(monkeypatch):
+    monkeypatch.setenv("VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD", "17")
+    register()
+
+    assert envs_module.VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD == 17
+
+
+@requires_kimi_k3_vllm
+def test_loader_normalizes_kimi_k3_mla_disabled_cp_sentinel():
+    from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
+
+    attention = MultiHeadLatentAttention.__new__(MultiHeadLatentAttention)
+    torch.nn.Module.__init__(attention)
+    attention.impl = type("AttentionImpl", (), {"dcp_world_size": -1, "dcp_rank": -1})()
+    model = torch.nn.Sequential(attention)
+
+    _normalize_kimi_k3_mla_context_parallelism(model)
+
+    assert attention.impl.dcp_world_size == 1
+    assert attention.impl.dcp_rank == 0
+
+
+def test_loader_strict_weight_audit_accepts_complete_parameter_set():
+    class CompleteModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.first = torch.nn.Parameter(torch.empty(1))
+            self.second = torch.nn.Parameter(torch.empty(1))
+
+        def load_weights(self, weights):
+            return {name for name, _ in weights}
+
+    model = CompleteModel()
+
+    loaded = _load_weights_strict(
+        model,
+        [("first", torch.ones(1)), ("second", torch.ones(1))],
+    )
+
+    assert loaded == {"first", "second"}
+
+
+def test_loader_strict_weight_audit_rejects_silently_skipped_parameter():
+    class IncompleteModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.first = torch.nn.Parameter(torch.empty(1))
+            self.second = torch.nn.Parameter(torch.empty(1))
+
+        def load_weights(self, weights):
+            return {"first"}
+
+    model = IncompleteModel()
+
+    with pytest.raises(
+        ValueError,
+        match=r"not initialized.*\n  second",
+    ):
+        _load_weights_strict(model, [("first", torch.ones(1))])
+
+
+def test_loader_strict_weight_audit_requires_tracking_result():
+    class UntrackedModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(1))
+
+        def load_weights(self, weights):
+            return None
+
+    with pytest.raises(ValueError, match="did not report"):
+        _load_weights_strict(UntrackedModel(), [("weight", torch.ones(1))])
 
 
 def test_oot_config_reuses_in_tree_behavior():
@@ -81,6 +212,7 @@ def test_supported_act_dtypes_includes_bfloat16():
 def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(gguf_params_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
@@ -115,6 +247,34 @@ def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     assert layer.qweight_type.shard_weight_type == {0: 3, 1: 4}
 
 
+def test_gguf_merged_column_loader_uses_distributed_tp_rank(monkeypatch):
+    monkeypatch.setattr(gguf_params_module, "get_tensor_model_parallel_rank", lambda: 2)
+    param = GGUFUninitializedWeightParameter()
+    param.data_container = []
+    param.shard_id = []
+    param.shard_id_map = {}
+    loaded = torch.arange(16 * 4, dtype=torch.uint8).reshape(16, 4)
+
+    param.load_merged_column_weight(loaded, shard_id=0, shard_size=4)
+
+    assert torch.equal(param.data_container[0], loaded[8:12])
+
+
+def test_gguf_qkv_loader_uses_distributed_tp_rank(monkeypatch):
+    monkeypatch.setattr(gguf_params_module, "get_tensor_model_parallel_rank", lambda: 3)
+    param = GGUFUninitializedWeightParameter()
+    param.data_container = []
+    param.shard_id = []
+    param.shard_id_map = {}
+    loaded = torch.arange(8 * 4, dtype=torch.uint8).reshape(8, 4)
+
+    param.load_qkv_weight(loaded, shard_id="q", shard_size=2, num_heads=2)
+    param.load_qkv_weight(loaded, shard_id="k", shard_size=2, num_heads=2)
+
+    assert torch.equal(param.data_container[0], loaded[6:8])
+    assert torch.equal(param.data_container[1], loaded[2:4])
+
+
 def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
     monkeypatch.setattr(
         vocab_embedding_module, "get_tensor_model_parallel_rank", lambda: 0
@@ -123,6 +283,7 @@ def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
         vocab_embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(gguf_params_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
@@ -154,6 +315,7 @@ def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
 def test_gguf_linear_same_type_shards_skip_concat(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(gguf_params_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
@@ -221,6 +383,34 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     assert config.architectures == ["Qwen3MoeForCausalLM"]
 
 
+@requires_kimi_k3_vllm
+def test_gguf_config_parser_selects_kimi_k3_text_model(monkeypatch):
+    outer_config = KimiK3Config(
+        text_config=KimiLinearConfig(
+            hidden_size=7168,
+            num_hidden_layers=93,
+            architectures=["KimiLinearForCausalLM"],
+            quantization_config={"quant_method": "compressed-tensors"},
+        )
+    )
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        lambda *args, **kwargs: (outer_config.to_dict(), outer_config),
+    )
+
+    config_dict, config = GGUFConfigParser().parse(
+        "moonshotai/Kimi-K3", trust_remote_code=False
+    )
+
+    assert isinstance(config, KimiLinearConfig)
+    assert config.architectures == [KIMI_K3_GGUF_TEXT_ARCH]
+    assert getattr(config, KIMI_K3_GGUF_TEXT_MARKER)
+    assert config.quantization_config is None
+    assert "quantization_config" not in config_dict
+
+
 def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     register()
     captured = {}
@@ -263,6 +453,7 @@ def test_register_skips_speculator_probe_for_gguf():
 def test_gguf_qkv_shards_are_padded_in_qkv_order(monkeypatch):
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(gguf_params_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
@@ -375,6 +566,7 @@ def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
 
     register()
     monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(gguf_params_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )

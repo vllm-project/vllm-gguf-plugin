@@ -11,7 +11,11 @@ from vllm.config.load import LoadConfig
 import vllm_gguf_plugin.loader as loader_module
 from vllm_gguf_plugin.gguf_files import GGUFModelFiles
 from vllm_gguf_plugin.loader import GGUFModelLoader
-from vllm_gguf_plugin.weight_utils import download_gguf, download_mmproj
+from vllm_gguf_plugin.weight_utils import (
+    download_gguf,
+    download_mmproj,
+    resolve_local_gguf,
+)
 
 
 class TestGGUFDownload:
@@ -70,21 +74,24 @@ class TestGGUFDownload:
             assert result == f"{mock_folder}/model-Q2_K-00001-of-00002.gguf"
 
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
-    def test_download_gguf_subdir(self, mock_download):
+    def test_download_gguf_subdir(self, mock_download, tmp_path):
         """Test downloading GGUF files from subdirectory."""
-        mock_folder = "/tmp/mock_cache"
-        mock_download.return_value = mock_folder
+        quant_dir = tmp_path / "Q2_K"
+        quant_dir.mkdir()
+        model = quant_dir / "model-Q2_K.gguf"
+        model.touch()
+        mock_download.return_value = str(tmp_path)
 
-        with patch("glob.glob") as mock_glob:
-            mock_glob.side_effect = lambda pattern, **kwargs: (
-                [f"{mock_folder}/Q2_K/model-Q2_K.gguf"]
-                if "Q2_K" in pattern or "**/*.gguf" in pattern
-                else []
-            )
+        result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
 
-            result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
+        assert result == str(model)
 
-            assert result == f"{mock_folder}/Q2_K/model-Q2_K.gguf"
+    def test_resolve_local_gguf_subdir(self, tmp_path):
+        quant_dir = tmp_path / "UD-Q2_K_XL"
+        quant_dir.mkdir()
+        model = quant_dir / "Kimi-K3-UD-Q2_K_XL-00001-of-00019.gguf"
+        model.touch()
+        assert resolve_local_gguf(str(tmp_path), "UD-Q2_K_XL") == str(model)
 
     @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
     @patch("glob.glob", return_value=[])

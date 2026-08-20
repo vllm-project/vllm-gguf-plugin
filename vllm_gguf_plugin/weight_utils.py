@@ -42,14 +42,16 @@ def download_gguf(
 
     local_files: list[str] = []
     for pattern in allow_patterns:
-        local_files.extend(glob.glob(os.path.join(folder, pattern)))
+        local_files.extend(
+            glob.glob(os.path.join(folder, "**", pattern), recursive=True)
+        )
 
     if not local_files:
         raise ValueError(
             f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
         )
 
-    local_files.sort(key=lambda x: (x.count("-"), x))
+    local_files = sorted(set(local_files), key=lambda x: (Path(x).name.count("-"), x))
     return local_files[0]
 
 
@@ -101,12 +103,14 @@ def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     ]
     matches: list[str] = []
     for pat in patterns:
-        matches.extend(glob_mod.glob(os.path.join(local_dir, pat)))
+        matches.extend(
+            glob_mod.glob(os.path.join(local_dir, "**", pat), recursive=True)
+        )
     if not matches:
         raise ValueError(
             f"No GGUF file matching quant_type '{quant_type}' found in {local_dir}"
         )
-    matches.sort(key=lambda x: (x.count("-"), x))
+    matches = sorted(set(matches), key=lambda x: (Path(x).name.count("-"), x))
     return matches[0]
 
 

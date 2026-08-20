@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 import torch
@@ -40,6 +41,50 @@ if TYPE_CHECKING:
     from .quantization.layout import GGUFLinearLayout
 
 logger = init_logger(__name__)
+
+
+def _load_weights_strict(
+    model: nn.Module,
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> set[str]:
+    """Load weights and reject parameters silently skipped by model loaders."""
+    loaded = model.load_weights(weights)
+    if loaded is None:
+        raise ValueError(
+            f"{model.__class__.__name__}.load_weights() did not report which "
+            "parameters were initialized; strict GGUF loading requires a set."
+        )
+
+    loaded = set(loaded)
+    expected = {name for name, _ in model.named_parameters()}
+    missing = expected - loaded
+    if missing:
+        formatted = "\n  ".join(sorted(missing))
+        raise ValueError(
+            "Following model parameters were not initialized from the GGUF "
+            f"checkpoint ({len(missing)}):\n  {formatted}"
+        )
+
+    logger.info(
+        "Strict GGUF weight audit passed: %d model parameters initialized.",
+        len(expected),
+    )
+    return loaded
+
+
+def _normalize_kimi_k3_mla_context_parallelism(model: nn.Module) -> None:
+    """Resolve Kimi-K3's disabled-CP sentinel for the FA3 decode kernel."""
+    for module in model.modules():
+        if (
+            module.__class__.__module__ == "vllm.models.kimi_k3.nvidia.mla"
+            and module.__class__.__name__ == "MultiHeadLatentAttention"
+            and getattr(module.impl, "dcp_world_size", -1) < 1
+        ):
+            # Kimi-K3's fused MLA wrapper rejects context parallelism but calls
+            # the backend directly, bypassing the regular MLAAttention wrapper
+            # that resolves this sentinel. FA3 requires the neutral value 1.
+            module.impl.dcp_world_size = 1
+            module.impl.dcp_rank = 0
 
 
 class GGUFLoadPlan(NamedTuple):
@@ -176,6 +221,9 @@ class GGUFModelLoader(BaseModelLoader):
         unquantized_modules = _get_unquantized_modules(files, name_map) + tuple(
             adapter.extra_unquantized_modules
         )
+        unquantized_modules += tuple(
+            adapter.extend_unquantized_modules(files, name_map, unquantized_modules)
+        )
         linear_layouts = adapter.get_linear_layouts(files, model_config, name_map)
         return adapter, GGUFLoadPlan(
             files, name_map, unquantized_modules, linear_layouts
@@ -196,9 +244,22 @@ class GGUFModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_model_files(model_config)
 
+    @staticmethod
+    def _load_model_weights(
+        model: nn.Module,
+        adapter: BaseGGUFWeightsAdapter,
+        weights,
+    ) -> None:
+        if adapter.strict_weight_audit:
+            _load_weights_strict(model, weights)
+        else:
+            model.load_weights(weights)
+
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         adapter, plan = self._prepare_adapter(model_config)
-        model.load_weights(self._iter_weights(adapter, plan, model_config))
+        self._load_model_weights(
+            model, adapter, self._iter_weights(adapter, plan, model_config)
+        )
 
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
@@ -226,8 +287,11 @@ class GGUFModelLoader(BaseModelLoader):
                     vllm_config.quant_config,
                     prefix=prefix,
                 )
-            model.load_weights(
+            self._load_model_weights(
+                model,
+                adapter,
                 self._iter_weights(adapter, plan, model_config),
             )
             process_weights_after_loading(model, model_config, target_device)
+            _normalize_kimi_k3_mla_context_parallelism(model)
         return model

@@ -28,6 +28,10 @@ class BaseGGUFWeightsAdapter(ABC):
     #: model in speculative decoding) and must stay unquantized.
     extra_unquantized_modules: tuple[str, ...] = ()
 
+    #: Fail loading when the model does not report every parameter as
+    #: initialized (guards against silently skipped GGUF tensors).
+    strict_weight_audit: bool = False
+
     @classmethod
     @abstractmethod
     def matches(cls, config: PretrainedConfig) -> bool:
@@ -46,6 +50,22 @@ class BaseGGUFWeightsAdapter(ABC):
         model_config: ModelConfig,
     ) -> dict[str, str]:
         """Map raw GGUF tensor names to names accepted by the model."""
+
+    def extend_unquantized_modules(
+        self,
+        files: GGUFModelFiles,
+        name_map: dict[str, str],
+        unquantized_modules: tuple[str, ...],
+    ) -> Iterable[str]:
+        """Return additional module names that must stay unquantized.
+
+        *unquantized_modules* holds the modules detected as unquantized from
+        the GGUF tensor types plus :attr:`extra_unquantized_modules`. Adapters
+        that fuse several GGUF tensors into one vLLM module can map those
+        shard states onto the fused destination module here.
+        """
+        del files, name_map, unquantized_modules
+        return ()
 
     def patch_hf_config(
         self,

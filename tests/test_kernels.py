@@ -352,9 +352,12 @@ def test_moe(
         torch.tensor(w2.data, device="cuda"),
         topk_weights,
         topk_ids,
+        torch.empty(0, dtype=torch.int32, device="cuda"),
         quant_type,
         quant_type,
         "silu",
+        -1.0,
+        -1.0,
     )
 
     ref_output = fused_experts(

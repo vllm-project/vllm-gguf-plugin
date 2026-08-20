@@ -15,6 +15,16 @@ from .gguf_utils import (
     split_remote_gguf,
 )
 from .weights_adapter import get_adapter_architecture
+from .weights_adapter.kimi_k3 import (
+    KIMI_K3_GGUF_TEXT_ARCH,
+    KIMI_K3_GGUF_TEXT_MARKER,
+)
+
+__all__ = [
+    "GGUFConfigParser",
+    "KIMI_K3_GGUF_TEXT_ARCH",
+    "KIMI_K3_GGUF_TEXT_MARKER",
+]
 
 
 class GGUFConfigParser(ConfigParserBase):
@@ -39,6 +49,25 @@ class GGUFConfigParser(ConfigParserBase):
         if config.model_type == "qwen3_moe" and "norm_topk_prob" not in config_dict:
             config_dict["norm_topk_prob"] = True
             config.update({"norm_topk_prob": True})
+
+        if config.model_type == "kimi_k3":
+            config = config.get_text_config()
+            config_dict = config.to_dict()
+            config_dict.pop("quantization_config", None)
+            config.update(
+                {
+                    "architectures": [KIMI_K3_GGUF_TEXT_ARCH],
+                    KIMI_K3_GGUF_TEXT_MARKER: True,
+                    "quantization_config": None,
+                }
+            )
+            config_dict.update(
+                {
+                    "architectures": [KIMI_K3_GGUF_TEXT_ARCH],
+                    KIMI_K3_GGUF_TEXT_MARKER: True,
+                }
+            )
+            return config_dict, config
 
         architecture = get_adapter_architecture(config)
         if (
