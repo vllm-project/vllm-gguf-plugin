@@ -14,6 +14,7 @@ from vllm_gguf_plugin.tools.gguf_map import (
     group,
     is_remote_ref,
     parse_gguf_header,
+    parse_safetensors_header,
     reconcile,
     score,
     templatize,
@@ -213,7 +214,7 @@ class TestMapperRules:
             group({"blk.0.attn_q.weight": (8, 8)}),
             group({"model.layers.0.self_attn.q_proj.weight": (8, 8)}),
         ).matched
-        prefix, substr = build_mapper_rules(matched)
+        prefix, substr, _ = build_mapper_rules(matched)
         assert prefix["blk."] == "model.layers."
         assert substr["attn_q."] == "self_attn.q_proj."
 
@@ -224,7 +225,7 @@ class TestMapperRules:
             group({"blk.0.ssm_a": (4,)}),
             group({"model.layers.0.linear_attn.A_log": (4,)}),
         ).matched
-        _, substr = build_mapper_rules(matched)
+        _, substr, _ = build_mapper_rules(matched)
         assert substr["ssm_a"] == "linear_attn.A_log"
         assert "ssm_a." not in substr
 
@@ -375,10 +376,11 @@ class TestAgainstHandWrittenAdapter:
         result = reconcile(group(OLMOE_GGUF), group(OLMOE_VLLM))
         assert not result.unmatched_source
         assert not result.unmatched_target
-        prefix, substr = build_mapper_rules(result.matched)
+        prefix, substr, regex = build_mapper_rules(result.matched)
         expected = build_olmoe_mapper()
         assert prefix == expected.orig_to_new_prefix
         assert substr == expected.orig_to_new_substr
+        assert not regex  # no leaf is context dependent in a text-only stack
 
     def test_stacked_experts_pin_slot_zero_and_are_flagged(self):
         # split_stacked_experts() keys on ".experts.0.", so the rename must
@@ -389,3 +391,97 @@ class TestAgainstHandWrittenAdapter:
         text = format_adapter(matched)
         assert "{i}" not in text.split("MAPPER = ", 1)[1]
         assert "split_stacked_experts()" in text
+
+
+class TestContextDependentLeaves:
+    """A leaf that means two different modules cannot be a substring rule."""
+
+    # Muse Glimmer: ffn_up is mlp.up_proj under blk and mlp.fc1 under v.blk.
+    _MATCH = {
+        "blk.{i}.ffn_up.weight": "model.language_model.layers.{i}.mlp.up_proj.weight",
+        "v.blk.{i}.ffn_up.weight": "model.vision_tower.layers.{i}.mlp.fc1.weight",
+        "v.blk.{i}.ln1.weight": "model.vision_tower.layers.{i}.norm1.weight",
+    }
+
+    def _rules(self):
+        from vllm_gguf_plugin.tools.gguf_map import Match
+
+        matched = {k: Match(v, "test") for k, v in self._MATCH.items()}
+        return build_mapper_rules(matched)
+
+    def test_colliding_leaf_becomes_a_regex_not_a_lossy_substr(self):
+        _, substr, regex = self._rules()
+        assert "ffn_up." not in substr
+        assert len(regex) == 2
+        assert "ln1." in substr  # uncontested leaves stay cheap
+
+    def test_regex_rules_rewrite_each_tower_correctly(self):
+        import re as _re
+
+        _, _, regex = self._rules()
+        compiled = {_re.compile(k): v for k, v in regex.items()}
+
+        def apply(name):
+            for pattern, repl in compiled.items():
+                if pattern.search(name):
+                    return pattern.sub(repl, name)
+            return name
+
+        assert apply("blk.7.ffn_up.weight") == (
+            "model.language_model.layers.7.mlp.up_proj.weight"
+        )
+        assert apply("v.blk.7.ffn_up.weight") == (
+            "model.vision_tower.layers.7.mlp.fc1.weight"
+        )
+
+    def test_text_pattern_does_not_capture_the_vision_tower(self):
+        import re as _re
+
+        _, _, regex = self._rules()
+        text = next(k for k in regex if not k.startswith("^v"))
+        assert not _re.compile(text).search("v.blk.7.ffn_up.weight")
+
+
+class TestSafetensorsTarget:
+    def test_header_is_read_from_the_length_prefix(self, tmp_path):
+        import json as _json
+
+        header = _json.dumps(
+            {
+                "__metadata__": {"format": "pt"},
+                "model.embed_tokens.weight": {
+                    "dtype": "BF16",
+                    "shape": [32, 8],
+                    "data_offsets": [0, 512],
+                },
+            }
+        ).encode()
+        blob = tmp_path / "model.safetensors"
+        blob.write_bytes(struct.pack("<Q", len(header)) + header + b"\x00" * 512)
+        names = parse_safetensors_header(str(blob))
+        assert names == {"model.embed_tokens.weight": (32, 8)}
+
+
+class TestEnumeratedIndices:
+    def test_distinct_shapes_under_one_index_stay_separate(self):
+        # A projector numbers its stages mm.0/mm.1/mm.2; those are three
+        # modules, not one repeated three times.
+        grouped = group(
+            {
+                "mm.0.weight": (4096, 6144),
+                "mm.1.weight": (4096, 4096),
+                "mm.2.weight": (6656, 4096),
+            }
+        )
+        assert set(grouped) == {"mm.0.weight", "mm.1.weight", "mm.2.weight"}
+
+    def test_repeated_layers_still_collapse(self):
+        grouped = group({f"blk.{i}.attn_q.weight": (8, 8) for i in range(4)})
+        assert set(grouped) == {"blk.{i}.attn_q.weight"}
+        assert grouped["blk.{i}.attn_q.weight"].count == 4
+
+    def test_one_odd_layer_does_not_set_the_template_shape(self):
+        names = {f"blk.{i}.ffn_down.weight": (16, 4) for i in range(5)}
+        names["blk.0.ffn_down.weight"] = (16, 9)
+        grouped = group(names)
+        assert grouped["blk.{i}.ffn_down.weight"].shape == (16, 4)

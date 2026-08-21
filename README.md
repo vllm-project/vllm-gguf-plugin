@@ -87,6 +87,21 @@ python -m vllm_gguf_plugin.tools.gguf_map \
   --target vllm --emit-adapter
 ```
 
+`--target` picks what to reconcile against: `vllm` (the names `load_weights`
+accepts), `hf` (a `transformers` state dict), or `safetensors` (the
+checkpoint's own headers). Only the last works before either library supports
+the architecture, which is the usual case when GGUF support lands first.
+
+Pass `--gguf` more than once for a vision-language model, whose projector ships
+as a separate mmproj file:
+
+```bash
+python -m vllm_gguf_plugin.tools.gguf_map \
+  --gguf meta-models/Muse-Glimmer-30B-GGUF:Muse-Glimmer-30B-KQuant-Dynamic-Q4_K_XL.gguf \
+         meta-models/Muse-Glimmer-30B-GGUF:mmproj-Muse-Glimmer-30B-Q4_K_M.gguf \
+  --target-model meta-models/Muse-Glimmer-30B --target safetensors
+```
+
 `--emit-adapter` prints a `WeightsMapper` skeleton to start from. It is a
 starting point, not a result: value-level transforms produce neither a name nor
 a shape mismatch, so confirm numerics separately.

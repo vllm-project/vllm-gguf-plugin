@@ -20,7 +20,12 @@ the latter two read the header over an HTTP range request.
 ``--target hf`` maps to ``transformers`` state-dict names. ``--target vllm``
 maps to the names vLLM's ``load_weights`` accepts, which differ for fused and
 MoE layers -- vLLM stacks experts into ``w13_weight`` but its loader consumes
-per-expert ``experts.{i}.gate_proj.weight``.
+per-expert ``experts.{i}.gate_proj.weight``. ``--target safetensors`` reads the
+checkpoint's own headers, which is the only target that works before either
+library supports the architecture.
+
+Pass ``--gguf`` more than once for a vision-language model, whose projector
+ships as a separate mmproj file.
 
 For a sharded GGUF, point at the first shard: each shard carries its own
 header, and shard 1 holds every distinct name pattern because layers repeat.
@@ -34,9 +39,13 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
+import os
 import re
 import struct
+import urllib.error
 import urllib.request
+from collections import Counter
 
 import gguf
 import torch
@@ -159,6 +168,63 @@ def collect_gguf(ref: str, header_bytes: int = DEFAULT_HEADER_BYTES):
     }
 
 
+def _read_range(url_or_path: str, start: int, length: int) -> bytes:
+    if url_or_path.startswith(("http://", "https://")):
+        request = urllib.request.Request(
+            url_or_path, headers={"Range": f"bytes={start}-{start + length - 1}"}
+        )
+        with urllib.request.urlopen(request) as response:
+            return response.read()
+    with open(url_or_path, "rb") as handle:
+        handle.seek(start)
+        return handle.read(length)
+
+
+def parse_safetensors_header(source: str) -> dict[str, tuple[int, ...]]:
+    """Parameter name -> shape from one safetensors file's JSON header.
+
+    The first 8 bytes are the header length, so two ranged reads suffice.
+    """
+    size = struct.unpack("<Q", _read_range(source, 0, 8))[0]
+    header = json.loads(_read_range(source, 8, size))
+    return {
+        name: tuple(entry["shape"])
+        for name, entry in header.items()
+        if name != "__metadata__"
+    }
+
+
+def collect_safetensors(model_ref: str) -> dict[str, tuple[int, ...]]:
+    """Parameter names and shapes read from the checkpoint's own headers.
+
+    Unlike the hf and vllm targets this needs no support for the architecture
+    in either library, which is the usual situation when GGUF support lands
+    first. It is also the ground truth: it is what the checkpoint actually
+    contains, rather than what an instantiated module tree implies.
+    """
+    if os.path.isdir(model_ref):
+        base = model_ref.rstrip("/") + "/"
+    else:
+        base = f"https://huggingface.co/{model_ref}/resolve/main/"
+
+    index = base + "model.safetensors.index.json"
+    try:
+        if index.startswith("https://"):
+            with urllib.request.urlopen(index) as response:
+                weight_map = json.load(response)["weight_map"]
+        else:
+            with open(index) as handle:
+                weight_map = json.load(handle)["weight_map"]
+        shards = sorted(set(weight_map.values()))
+    except (urllib.error.HTTPError, FileNotFoundError):
+        shards = ["model.safetensors"]  # unsharded
+
+    names: dict[str, tuple[int, ...]] = {}
+    for shard in shards:
+        names.update(parse_safetensors_header(base + shard))
+    return names
+
+
 def collect_hf(model_ref: str, trust_remote_code: bool = False):
     """``transformers`` state-dict names and shapes, via a meta instantiation."""
     from transformers import AutoConfig, AutoModelForCausalLM
@@ -191,8 +257,6 @@ def collect_vllm(
     names and splits them on the way in. Reconstruct that contract from the
     instantiated module tree rather than from the parameter names.
     """
-    import os
-
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", str(port))
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
@@ -334,13 +398,36 @@ class Template:
 
 
 def group(names: dict[str, tuple[int, ...]]) -> dict[str, Template]:
-    """Collapse per-layer repetition: ~1000 names become ~25 templates."""
-    grouped: dict[str, Template] = {}
+    """Collapse per-layer repetition: ~1000 names become ~25 templates.
+
+    Not every integer in a name is a layer index. A projector numbers its
+    stages ``mm.0``, ``mm.1``, ``mm.2``, and those are three different modules;
+    collapsing them into one template would hide two of the three behind a
+    single shape and leave their targets uncovered. When no two members share
+    a shape the index is enumerating modules rather than repeating one, so
+    those members stay separate.
+    """
+    buckets: dict[str, list[tuple[str, tuple[int, ...], tuple[int, ...]]]] = {}
     for name, shape in names.items():
         key, indices = templatize(name)
-        if key not in grouped:
-            grouped[key] = Template(shape, name, len(indices))
-        grouped[key].add(indices)
+        buckets.setdefault(key, []).append((name, shape, indices))
+
+    grouped: dict[str, Template] = {}
+    for key, members in buckets.items():
+        shapes = [shape for _, shape, _ in members]
+        if len(members) > 1 and len(set(shapes)) == len(members):
+            for name, shape, _ in members:
+                grouped[name] = Template(shape, name, 0)
+                grouped[name].add(())
+            continue
+        # Most common, not first seen: one odd layer should not set the shape
+        # the whole template is matched on.
+        template = Template(
+            Counter(shapes).most_common(1)[0][0], members[0][0], len(members[0][2])
+        )
+        for _, _, indices in members:
+            template.add(indices)
+        grouped[key] = template
     return grouped
 
 
@@ -611,10 +698,15 @@ def _pin_expert_slot(target: str) -> str:
 
 def build_mapper_rules(
     matched: dict[str, Match],
-) -> tuple[dict[str, str], dict[str, str]]:
-    """Derive ``WeightsMapper`` prefix and substring rules from matches."""
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Derive ``WeightsMapper`` prefix, substring and regex rules from matches.
+
+    ``WeightsMapper`` applies regex, then substring, then prefix.
+    """
     prefix: dict[str, str] = {}
-    substr: dict[str, str] = {}
+    # src_tail -> src_head -> (dst_head, dst_tail, shared suffix)
+    tails: dict[str, dict[str, tuple[str, str, str]]] = {}
+
     for source, match in sorted(matched.items()):
         src_parts, dst_parts = source.split("."), match.target.split(".")
         if "{i}" in src_parts and "{i}" in dst_parts:
@@ -633,24 +725,46 @@ def build_mapper_rules(
                     dst_tail = dst_tail[: -len(suffix)]
                     shared = suffix
                     break
-            # Only a shared .weight/.bias suffix makes these module prefixes.
-            # Otherwise the target is a bare parameter (A_log, dt_bias) and the
-            # rule must rewrite the whole name, with no trailing dot.
-            if shared:
-                substr[src_tail + "."] = _pin_expert_slot(dst_tail) + "."
-            else:
-                substr[src_tail] = _pin_expert_slot(dst_tail)
+            tails.setdefault(src_tail, {})[src_head] = (dst_head, dst_tail, shared)
         else:
             src_base = source.removesuffix(".weight").removesuffix(".bias")
             dst_base = match.target.removesuffix(".weight").removesuffix(".bias")
             if src_base != dst_base:
                 prefix[src_base + "."] = _pin_expert_slot(dst_base) + "."
-    return prefix, substr
+
+    substr: dict[str, str] = {}
+    regex: dict[str, str] = {}
+    for src_tail, by_head in tails.items():
+        if len({dst_tail for _, dst_tail, _ in by_head.values()}) == 1:
+            dst_head, dst_tail, shared = next(iter(by_head.values()))
+            # Only a shared .weight/.bias suffix makes these module prefixes.
+            # Otherwise the target is a bare parameter (A_log, dt_bias) and the
+            # rule must rewrite the whole name, with no trailing dot.
+            dot = "." if shared else ""
+            substr[src_tail + dot] = _pin_expert_slot(dst_tail) + dot
+            continue
+        # The same GGUF leaf means different modules under different towers:
+        # ffn_up is mlp.up_proj in the text stack and mlp.fc1 in the vision
+        # one. A substring rule cannot say which, and whichever is emitted
+        # last silently wins, so scope each by the prefix it appeared under.
+        for src_head, (dst_head, dst_tail, shared) in by_head.items():
+            dot = "." if shared else ""
+            pattern = (
+                rf"^{re.escape(src_head)}\.(\d+)\."
+                rf"{re.escape(src_tail)}{re.escape(dot)}"
+            )
+            regex[pattern] = f"{dst_head}.\\1.{_pin_expert_slot(dst_tail)}{dot}"
+    return prefix, substr, regex
 
 
 def format_adapter(matched: dict[str, Match]) -> str:
-    prefix, substr = build_mapper_rules(matched)
-    lines = ["from vllm.model_executor.models.utils import WeightsMapper", ""]
+    prefix, substr, regex = build_mapper_rules(matched)
+    lines = [
+        "import re",
+        "",
+        "from vllm.model_executor.models.utils import WeightsMapper",
+        "",
+    ]
     stacked = sorted(k for k, m in matched.items() if m.target.count("{i}") > 1)
     if stacked:
         lines += [
@@ -658,18 +772,22 @@ def format_adapter(matched: dict[str, Match]) -> str:
             "# split_stacked_experts() in the adapter's weight stream.",
             *(f"#   {name}" for name in stacked),
         ]
-    lines += [
-        "MAPPER = WeightsMapper(",
-        "    orig_to_new_prefix={",
-    ]
-    lines += [f'        "{k}": "{v}",' for k, v in sorted(prefix.items())]
-    lines += ["    },", "    orig_to_new_substr={"]
+    lines.append("MAPPER = WeightsMapper(")
+    if regex:
+        lines.append("    orig_to_new_regex={")
+        lines += [
+            f'        re.compile(r"{k}"): r"{v}",' for k, v in sorted(regex.items())
+        ]
+        lines.append("    },")
+    lines.append("    orig_to_new_substr={")
     # Longest first: substring rules are order sensitive, and a short key can
     # be a prefix of a longer one (``ssm_a`` inside ``ssm_alpha``).
     lines += [
         f'        "{k}": "{v}",'
         for k, v in sorted(substr.items(), key=lambda kv: -len(kv[0]))
     ]
+    lines += ["    },", "    orig_to_new_prefix={"]
+    lines += [f'        "{k}": "{v}",' for k, v in sorted(prefix.items())]
     lines += ["    },", ")"]
     return "\n".join(lines)
 
@@ -725,14 +843,18 @@ def format_report(result: Reconciliation, max_unmatched: int = 25) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--gguf", required=True, help="local path, URL, or repo_id:filename"
+        "--gguf",
+        required=True,
+        nargs="+",
+        help="local path, URL, or repo_id:filename; repeat for a VLM's "
+        "backbone plus its mmproj",
     )
     parser.add_argument(
         "--target-model",
         required=True,
         help="HF model id or local path for the target config",
     )
-    parser.add_argument("--target", choices=("hf", "vllm"), default="hf")
+    parser.add_argument("--target", choices=("hf", "vllm", "safetensors"), default="hf")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--emit-adapter", action="store_true")
     parser.add_argument("--min-score", type=float, default=3.0)
@@ -740,9 +862,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--header-bytes", type=int, default=DEFAULT_HEADER_BYTES)
     args = parser.parse_args(argv)
 
-    gguf_names = collect_gguf(args.gguf, args.header_bytes)
+    gguf_names: dict[str, tuple[int, ...]] = {}
+    for ref in args.gguf:
+        gguf_names.update(collect_gguf(ref, args.header_bytes))
     if args.target == "vllm":
         target_names = collect_vllm(args.target_model, args.trust_remote_code)
+    elif args.target == "safetensors":
+        target_names = collect_safetensors(args.target_model)
     else:
         target_names = collect_hf(args.target_model, args.trust_remote_code)
 
