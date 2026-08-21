@@ -243,7 +243,10 @@ def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     assert engine_args.load_format == "gguf"
 
 
-def test_register_skips_speculator_probe_for_gguf():
+def test_a_gguf_reference_survives_the_speculators_probe():
+    """vLLM's probe treats a reference it cannot read as "not a speculators
+    model", which is what lets a GGUF target reach this plugin's config parser.
+    The plugin used to have to monkeypatch the probe to get here."""
     register()
 
     model, tokenizer, speculative_config = (

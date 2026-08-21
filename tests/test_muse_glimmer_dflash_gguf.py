@@ -35,7 +35,10 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 
-from vllm_gguf_plugin.plugin import _redirect_draft_to_its_config_source
+from vllm_gguf_plugin.plugin import (
+    _name_the_drafts_config_source,
+    _open_the_drafts_declaration_channel,
+)
 from vllm_gguf_plugin.quantization.config import GGUFConfig
 from vllm_gguf_plugin.quantization.linear import GGUFLinearMethod
 from vllm_gguf_plugin.quantization.params import (
@@ -501,29 +504,40 @@ def engine_args(speculative_config):
     return SimpleNamespace(speculative_config=speculative_config)
 
 
-def test_a_draft_is_redirected_to_the_config_directory_it_was_given(tmp_path):
+def test_the_weights_reference_is_left_pointing_at_the_file(tmp_path):
+    """``model`` names the weights, ``hf_config_path`` names the config."""
     config_dir = tmp_path / "assistant"
     config_dir.mkdir()
     (config_dir / "config.json").write_text("{}")
     draft = str(tmp_path / "draft.gguf")
 
     args = engine_args({"model": draft, "hf_config_path": str(config_dir)})
-    weights = _redirect_draft_to_its_config_source(args)
+    _name_the_drafts_config_source(args)
 
-    assert weights == draft, "the file has to come back as the weights source"
-    assert args.speculative_config["model"] == str(config_dir)
+    assert args.speculative_config["model"] == draft
+    assert args.speculative_config["hf_config_path"] == str(config_dir)
     assert args.speculative_config["quantization"] == "gguf"
-    assert "hf_config_path" not in args.speculative_config, (
-        "SpeculativeConfig rejects fields it does not declare"
-    )
 
 
-def test_redirecting_twice_still_reports_the_weights(tmp_path):
-    """The rewrite edits the caller's dict, so a second pass sees no GGUF path.
+def test_the_config_source_is_derived_when_none_was_given(tmp_path):
+    """Matches what ``create_model_config`` derives for the target: a local
+    file's own directory, which is right whenever the draft ships with one."""
+    draft = tmp_path / "draft.gguf"
+    draft.write_bytes(b"")
+    (tmp_path / "config.json").write_text("{}")
+    args = engine_args({"model": str(draft)})
 
-    Losing the weights path there is not an error: the draft keeps the config
-    directory as its weights source and loads whatever checkpoint is sitting in
-    it, which for this layout is the unquantized one.
+    _name_the_drafts_config_source(args)
+
+    assert args.speculative_config["hf_config_path"] == str(tmp_path)
+
+
+def test_naming_the_source_twice_changes_nothing(tmp_path):
+    """Idempotent by construction now that nothing is overwritten.
+
+    The previous shape rewrote ``model`` in the caller's dict, so a second pass
+    no longer saw a GGUF path and needed a remembered weights path to avoid
+    quietly loading the unquantized checkpoint next door.
     """
     config_dir = tmp_path / "assistant"
     config_dir.mkdir()
@@ -531,10 +545,11 @@ def test_redirecting_twice_still_reports_the_weights(tmp_path):
     draft = str(tmp_path / "draft.gguf")
     args = engine_args({"model": draft, "hf_config_path": str(config_dir)})
 
-    first = _redirect_draft_to_its_config_source(args)
-    second = _redirect_draft_to_its_config_source(args)
+    _name_the_drafts_config_source(args)
+    once = dict(args.speculative_config)
+    _name_the_drafts_config_source(args)
 
-    assert first == second == draft
+    assert args.speculative_config == once
 
 
 def test_a_draft_without_a_config_says_what_to_pass(tmp_path):
@@ -544,19 +559,44 @@ def test_a_draft_without_a_config_says_what_to_pass(tmp_path):
     args = engine_args({"model": str(draft)})
 
     with pytest.raises(ValueError, match="hf_config_path"):
-        _redirect_draft_to_its_config_source(args)
+        _name_the_drafts_config_source(args)
 
 
 def test_an_unquantized_draft_is_left_alone():
     args = engine_args({"model": "/models/some-draft", "num_speculative_tokens": 3})
 
-    assert _redirect_draft_to_its_config_source(args) is None
-    assert args.speculative_config["model"] == "/models/some-draft"
-    assert "quantization" not in args.speculative_config
+    _name_the_drafts_config_source(args)
+
+    assert args.speculative_config == {
+        "model": "/models/some-draft",
+        "num_speculative_tokens": 3,
+    }
 
 
 def test_no_speculative_config_is_left_alone():
-    assert _redirect_draft_to_its_config_source(engine_args(None)) is None
+    _name_the_drafts_config_source(engine_args(None))
+
+
+def test_the_draft_gets_a_dict_for_the_loader_to_declare_into():
+    """Without one, ``_publish_declaration_for_a_draft`` has nowhere to write and
+    returns silently, and the draft then builds quantized layers for the modules
+    its GGUF file stores dense."""
+    draft_model_config = SimpleNamespace(hf_config=SimpleNamespace())
+
+    _open_the_drafts_declaration_channel(draft_model_config)
+
+    assert isinstance(draft_model_config.hf_config.quantization_config, dict)
+
+
+def test_a_declaration_already_present_is_not_clobbered():
+    declared = {"quant_method": "gguf", "unquantized_modules": ["embed_tokens"]}
+    draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(quantization_config=declared)
+    )
+
+    _open_the_drafts_declaration_channel(draft_model_config)
+
+    assert draft_model_config.hf_config.quantization_config is declared
 
 
 def test_an_explicit_quantization_choice_is_respected(tmp_path):
@@ -571,6 +611,6 @@ def test_an_explicit_quantization_choice_is_respected(tmp_path):
         }
     )
 
-    _redirect_draft_to_its_config_source(args)
+    _name_the_drafts_config_source(args)
 
     assert args.speculative_config["quantization"] == "awq"
