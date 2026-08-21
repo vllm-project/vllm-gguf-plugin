@@ -259,18 +259,27 @@ def expand_vllm_params(model: torch.nn.Module) -> dict[str, tuple[int, ...]]:
         )
         sizes = getattr(module, "output_sizes", None)
         parts = packed.get(leaf)
+        split: list[tuple[str, int]] = []
         if sizes and parts and len(sizes) == len(parts) and in_features:
-            for size, part in zip(sizes, parts):
-                names[f"{parent}.{part}.weight"] = (int(size), in_features)
-            continue
-        if kind == "QKVParallelLinear" and hasattr(module, "num_heads") and in_features:
+            split = [(part, int(size)) for size, part in zip(sizes, parts)]
+        elif (
+            kind == "QKVParallelLinear" and hasattr(module, "num_heads") and in_features
+        ):
             head = int(module.head_size)
-            for part, count in (
-                ("q_proj", int(module.num_heads)),
-                ("k_proj", int(module.num_kv_heads)),
-                ("v_proj", int(module.num_kv_heads)),
-            ):
-                names[f"{parent}.{part}.weight"] = (count * head, in_features)
+            split = [
+                ("q_proj", int(module.num_heads) * head),
+                ("k_proj", int(module.num_kv_heads) * head),
+                ("v_proj", int(module.num_kv_heads) * head),
+            ]
+        if split:
+            # A fused linear concatenates its bias too, so each part
+            # contributes one. Omitting them leaves attn_q.bias and friends
+            # unmatched on any architecture with attention_bias set.
+            has_bias = own.get("bias") is not None
+            for part, size in split:
+                names[f"{parent}.{part}.weight"] = (size, in_features)
+                if has_bias:
+                    names[f"{parent}.{part}.bias"] = (size,)
             continue
 
         for param_name, param in own.items():

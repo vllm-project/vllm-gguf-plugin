@@ -263,12 +263,14 @@ _FakeMoE.__name__ = "FusedMoE"
 
 
 class _FakeMerged(torch.nn.Module):
-    def __init__(self, sizes, in_features):
+    def __init__(self, sizes, in_features, bias=False):
         super().__init__()
         self.output_sizes = list(sizes)
         self.weight = torch.nn.Parameter(
             torch.empty(sum(sizes), in_features, device="meta")
         )
+        if bias:
+            self.bias = torch.nn.Parameter(torch.empty(sum(sizes), device="meta"))
 
 
 _FakeMerged.__name__ = "MergedColumnParallelLinear"
@@ -297,6 +299,31 @@ class TestVllmTargetExpansion:
         assert names["mlp.gate_proj.weight"] == (6, 4)
         assert names["mlp.up_proj.weight"] == (6, 4)
         assert "mlp.gate_up_proj.weight" not in names
+
+    def test_fused_bias_is_split_across_the_parts(self):
+        # A fused linear concatenates its bias; without splitting it, every
+        # attention_bias architecture leaves attn_q.bias unmatched.
+        root = torch.nn.Module()
+        root.mlp = torch.nn.Module()
+        root.mlp.gate_up_proj = _FakeMerged((6, 6), 4, bias=True)
+        type(root).packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+        try:
+            names = expand_vllm_params(root)
+        finally:
+            del type(root).packed_modules_mapping
+        assert names["mlp.gate_proj.bias"] == (6,)
+        assert names["mlp.up_proj.bias"] == (6,)
+
+    def test_no_bias_emits_no_bias_names(self):
+        root = torch.nn.Module()
+        root.mlp = torch.nn.Module()
+        root.mlp.gate_up_proj = _FakeMerged((6, 6), 4)
+        type(root).packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+        try:
+            names = expand_vllm_params(root)
+        finally:
+            del type(root).packed_modules_mapping
+        assert not any(n.endswith(".bias") for n in names)
 
 
 # Real OLMoE-1B-7B-0924-Instruct names and shapes: GGUF header vs the params
