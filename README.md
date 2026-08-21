@@ -73,6 +73,24 @@ vllm serve unsloth/Qwen3.5-4B-MTP-GGUF:Q4_K_M \
 For a GGUF without a `nextn` block, omit `--speculative-config`; the backbone
 loads normally without MTP.
 
+## Adding an architecture
+
+`gguf_map` diffs a GGUF's tensor names against the parameter names the target
+model expects, and reports what is left over on each side and where shapes
+disagree. It reads headers over an HTTP range request and builds the target on
+meta tensors, so it needs no GPU and downloads no weights.
+
+```bash
+python -m vllm_gguf_plugin.tools.gguf_map \
+  --gguf allenai/OLMoE-1B-7B-0924-Instruct-GGUF:olmoe-1b-7b-0924-instruct-q4_k_m.gguf \
+  --target-model allenai/OLMoE-1B-7B-0924-Instruct \
+  --target vllm --emit-adapter
+```
+
+`--emit-adapter` prints a `WeightsMapper` skeleton to start from. It is a
+starting point, not a result: value-level transforms produce neither a name nor
+a shape mismatch, so confirm numerics separately.
+
 ## Tested model coverage
 
 The plugin uses vLLM's model implementations and a generic GGUF weight
