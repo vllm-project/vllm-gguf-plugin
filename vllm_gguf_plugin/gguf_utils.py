@@ -241,6 +241,37 @@ def detect_gguf_multimodal(model: str) -> Path | None:
         return None
 
 
+def gguf_has_vision_tensors(model_path: str | PathLike) -> bool:
+    """Whether a GGUF backbone carries vision-tower tensors (``v.``/``mm.``)."""
+    if not check_gguf_file(model_path):
+        return False
+    try:
+        reader = gguf.GGUFReader(str(model_path))
+    except Exception as e:
+        # Detection must not fail the run; a file that cannot be read here
+        # raises a proper error later when its weights are loaded.
+        logger.debug("Error reading GGUF file %s: %s", model_path, e)
+        return False
+    return any(tensor.name.startswith(("v.", "mm.")) for tensor in reader.tensors)
+
+
+def is_text_only_gguf(model: str | PathLike, explicit_mm_proj: object = None) -> bool:
+    """Whether *model* can only ever be served as a text model.
+
+    A local backbone with no vision tensors, no ``*mmproj*.gguf`` sibling and no
+    explicitly configured projector can never gain one later (the loader only
+    downloads a projector for ``repo_id:quant_type`` references), so the model
+    must be built from the text config instead of the multimodal one.
+    """
+    if explicit_mm_proj is not None:
+        return False
+    if not check_gguf_file(model):
+        return False
+    if detect_gguf_multimodal(str(model)) is not None:
+        return False
+    return not gguf_has_vision_tensors(model)
+
+
 def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | None":
     """Extract vision config parameters from mmproj.gguf metadata.
 

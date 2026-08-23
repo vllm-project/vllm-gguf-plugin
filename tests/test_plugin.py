@@ -27,6 +27,8 @@ import vllm_gguf_plugin.quantization as gguf_quantization
 import vllm_gguf_plugin.quantization.params as gguf_params_module
 from vllm_gguf_plugin import OOTGGUFConfig, OOTGGUFModelLoader, register
 from vllm_gguf_plugin.config_parser import GGUFConfigParser
+from vllm_gguf_plugin.gguf_context import set_gguf_request
+from vllm_gguf_plugin.gguf_utils import is_text_only_gguf
 from vllm_gguf_plugin.quantization import (
     GGUFUninitializedParameter,
     GGUFWeightParameter,
@@ -219,6 +221,82 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     assert calls["trust_remote_code"] is False
     assert config_dict["norm_topk_prob"] is True
     assert config.architectures == ["Qwen3MoeForCausalLM"]
+
+
+def test_gguf_config_parser_builds_text_only_architecture(tmp_path, monkeypatch):
+    """A backbone with no vision tensors is built as its text architecture."""
+    gguf_path = tmp_path / "Qwen3.8-27B-Q4_K_M.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    text_config = PretrainedConfig(model_type="qwen3_5_text")
+    multimodal_config = PretrainedConfig(model_type="qwen3_5")
+    multimodal_config.vision_config = PretrainedConfig(model_type="qwen3_5_vision")
+    monkeypatch.setattr(
+        type(multimodal_config), "get_text_config", lambda self, **kw: text_config
+    )
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        lambda self, model, trust_remote_code, revision=None, code_revision=None, **kw: (
+            {},
+            multimodal_config,
+        ),
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+    set_gguf_request(str(gguf_path), None)
+    try:
+        _, config = GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
+    finally:
+        set_gguf_request(None, None)
+
+    assert config is text_config
+    assert config.architectures == ["Qwen3_5ForCausalLM"]
+
+
+def test_gguf_config_parser_keeps_multimodal_with_explicit_mm_proj(
+    tmp_path, monkeypatch
+):
+    """An explicitly configured projector keeps the multimodal architecture."""
+    gguf_path = tmp_path / "Qwen3.8-27B-Q4_K_M.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    multimodal_config = PretrainedConfig(model_type="qwen3_5")
+    multimodal_config.vision_config = PretrainedConfig(model_type="qwen3_5_vision")
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        lambda self, model, trust_remote_code, revision=None, code_revision=None, **kw: (
+            {},
+            multimodal_config,
+        ),
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+    set_gguf_request(str(gguf_path), str(tmp_path / "mmproj.gguf"))
+    try:
+        _, config = GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
+    finally:
+        set_gguf_request(None, None)
+
+    assert config.architectures == ["Qwen3_5ForConditionalGeneration"]
+
+
+def test_is_text_only_gguf_detects_mmproj_sibling(tmp_path):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+    assert is_text_only_gguf(gguf_path) is True
+
+    (tmp_path / "mmproj-F16.gguf").write_bytes(b"GGUF")
+    assert is_text_only_gguf(gguf_path) is False
 
 
 def test_register_sets_engine_args_for_gguf_model(monkeypatch):

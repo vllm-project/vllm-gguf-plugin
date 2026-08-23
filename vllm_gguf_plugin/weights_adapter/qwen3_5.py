@@ -15,7 +15,7 @@ from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
 from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 from ..gguf_files import GGUFModelFiles
-from ..gguf_utils import maybe_patch_hf_config_from_gguf
+from ..gguf_utils import gguf_has_vision_tensors, maybe_patch_hf_config_from_gguf
 from ..quantization.layout import GGUFHeadTilingLayout, GGUFLinearLayout
 from ..weight_utils import get_gguf_tensor_names, split_stacked_experts
 from .base import BaseGGUFWeightsAdapter, GGUFWeight
@@ -40,6 +40,15 @@ QWEN35_ARCHITECTURES = {
     "qwen3_5_text": "Qwen3_5ForConditionalGeneration",
     "qwen3_5_moe": "Qwen3_5MoeForConditionalGeneration",
     "qwen3_5_moe_text": "Qwen3_5MoeForConditionalGeneration",
+}
+
+#: Used when the GGUF files carry no vision tower, so the model is built from
+#: the text config as a plain causal LM.
+QWEN35_TEXT_ARCHITECTURES = {
+    "qwen3_5": "Qwen3_5ForCausalLM",
+    "qwen3_5_text": "Qwen3_5ForCausalLM",
+    "qwen3_5_moe": "Qwen3_5MoeForCausalLM",
+    "qwen3_5_moe_text": "Qwen3_5MoeForCausalLM",
 }
 
 QWEN35_ATTN_SUBSTR: dict[str, str] = {
@@ -190,8 +199,9 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
         return config.model_type in QWEN35_MODEL_TYPES
 
     @classmethod
-    def architecture(cls, config) -> str | None:
-        return QWEN35_ARCHITECTURES.get(config.model_type)
+    def architecture(cls, config, text_only: bool = False) -> str | None:
+        table = QWEN35_TEXT_ARCHITECTURES if text_only else QWEN35_ARCHITECTURES
+        return table.get(config.model_type)
 
     def patch_hf_config(
         self,
@@ -199,7 +209,10 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
         hf_config: PretrainedConfig,
     ) -> PretrainedConfig:
         model_type = hf_config.model_type
-        architecture = QWEN35_ARCHITECTURES[model_type]
+        text_only = files.mm_proj is None
+        architecture = (
+            QWEN35_TEXT_ARCHITECTURES if text_only else QWEN35_ARCHITECTURES
+        )[model_type]
         patched = maybe_patch_hf_config_from_gguf(
             files.primary_backbone,
             hf_config,
@@ -208,11 +221,22 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
         has_vision = getattr(patched, "vision_config", None) is not None
 
         if has_vision and files.mm_proj is None:
-            raise RuntimeError(
-                "Could not find mm_proj for multimodal Qwen3.5/3.6 GGUF. "
-                "Place *mmproj*.gguf beside the backbone or pass "
-                "model_loader_extra_config={'mm_proj': ...}."
+            if gguf_has_vision_tensors(files.primary_backbone):
+                raise RuntimeError(
+                    "Could not find mm_proj for multimodal Qwen3.5/3.6 GGUF. "
+                    "Place *mmproj*.gguf beside the backbone or pass "
+                    "model_loader_extra_config={'mm_proj': ...}."
+                )
+            # Text-only backbone served against a multimodal HF config: drop
+            # the vision half instead of demanding a projector that would
+            # never be used.
+            logger.info(
+                "No vision tensors and no mm_proj for %s; "
+                "serving it as text-only %s.",
+                files.primary_backbone,
+                architecture,
             )
+            patched = patched.get_text_config()
 
         if files.mm_proj is not None and not has_vision:
             config_cls = (
