@@ -121,7 +121,7 @@ starting points:
 | Vision-language | Qwen 3.6 | UD-IQ2_XXS backbone with BF16 projector |
 | Image generation | Z-Image-Turbo | Q4_0 |
 | Image generation | FLUX.2-klein | Q8_0 |
-| Video+audio generation | MiniMax-H3 FL2VA (non-pruned, single partition) | Q4_K_M |
+| Video generation | MiniMax-H3 | Q4_K_M |
 
 Other vLLM-supported architectures may work when their GGUF tensor names map
 to the corresponding Hugging Face model. A model appearing in vLLM's general
