@@ -54,6 +54,7 @@ def test_quantized_qkv_keeps_converter_fused_layout(
 
     weights = dict(MiniMaxH3DiffusionGGUFAdapter("dummy.gguf").weights_iterator())
 
+    assert weights["blocks.0.attn.qkv_proj.qweight_type"].item() == 10
     assert weights["blocks.0.attn.qkv_proj.qweight"] is qweight
 
 
@@ -89,5 +90,25 @@ def test_pruned_adaln_layout_is_rejected_early(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(h3_module.gguf, "GGUFReader", lambda _path: reader)
 
     adapter = MiniMaxH3DiffusionGGUFAdapter("pruned.gguf")
-    with pytest.raises(ValueError, match="Pruned MiniMax-H3 GGUF"):
+    with pytest.raises(ValueError, match="Unsupported MiniMax-H3 GGUF schema"):
+        adapter.unquantized_module_names()
+
+
+def test_incomplete_time_embedder_layout_is_rejected_early(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import vllm_gguf_plugin.weights_adapter.diffusion.minimax_h3 as h3_module
+
+    reader = SimpleNamespace(
+        tensors=[
+            SimpleNamespace(
+                name="time_embedder.proj_in.weight",
+                tensor_type=SimpleNamespace(name="F32"),
+            )
+        ]
+    )
+    monkeypatch.setattr(h3_module.gguf, "GGUFReader", lambda _path: reader)
+
+    adapter = MiniMaxH3DiffusionGGUFAdapter("incomplete.gguf")
+    with pytest.raises(ValueError, match="Unsupported MiniMax-H3 GGUF schema"):
         adapter.unquantized_module_names()

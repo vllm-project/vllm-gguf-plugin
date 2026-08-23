@@ -78,8 +78,9 @@ class MiniMaxH3DiffusionGGUFAdapter(DiffusionGGUFAdapter):
             tensor_names
         ):
             raise ValueError(
-                "Pruned MiniMax-H3 GGUF checkpoints are not supported by the "
-                "current vLLM-Omni MiniMax-H3 architecture. Use a non-pruned "
+                "Unsupported MiniMax-H3 GGUF schema. The current vLLM-Omni "
+                "MiniMax-H3 architecture requires the complete time_embedder "
+                "weights and does not support adaln_t_table. Use a non-pruned "
                 "FL2VA or Ref2VA GGUF checkpoint."
             )
 

@@ -75,8 +75,8 @@ loads normally without MTP.
 
 ### vLLM-Omni MiniMax-H3
 
-MiniMax-H3 can use a non-pruned DiT GGUF while its text encoder and VAEs stay
-on their Hugging Face weights:
+The validated MiniMax-H3 path uses a non-pruned DiT GGUF while its text encoder
+and VAEs stay on their Hugging Face weights:
 
 ```python
 from vllm_omni.entrypoints.omni import Omni
@@ -122,6 +122,10 @@ starting points:
 | Image generation | Z-Image-Turbo | Q4_0 |
 | Image generation | FLUX.2-klein | Q8_0 |
 | Video generation | MiniMax-H3 | Q4_K_M |
+
+The MiniMax-H3 row is intentionally family-level. Its current end-to-end test
+artifact is the non-pruned FL2VA Q4_K_M partition; it does not claim Ref2VA or
+combined-service validation.
 
 Other vLLM-supported architectures may work when their GGUF tensor names map
 to the corresponding Hugging Face model. A model appearing in vLLM's general
