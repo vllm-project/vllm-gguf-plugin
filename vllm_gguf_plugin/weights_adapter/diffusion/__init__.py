@@ -9,10 +9,12 @@ from .loader import (
     load_diffusion_gguf_weights,
     resolve_gguf_model_path,
 )
+from .minimax_h3 import MiniMaxH3DiffusionGGUFAdapter
 from .qwen_image import QwenImageDiffusionGGUFAdapter
 from .z_image import ZImageDiffusionGGUFAdapter
 
 _ADAPTER_CLASSES: list[type[DiffusionGGUFAdapter]] = [
+    MiniMaxH3DiffusionGGUFAdapter,
     QwenImageDiffusionGGUFAdapter,
     ZImageDiffusionGGUFAdapter,
     Flux2KleinDiffusionGGUFAdapter,
@@ -40,6 +42,7 @@ __all__ = [
     "DiffusionWeightSource",
     "Flux2KleinDiffusionGGUFAdapter",
     "MappedTensor",
+    "MiniMaxH3DiffusionGGUFAdapter",
     "QwenImageDiffusionGGUFAdapter",
     "ZImageDiffusionGGUFAdapter",
     "get_diffusion_gguf_adapter",

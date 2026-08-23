@@ -73,6 +73,33 @@ vllm serve unsloth/Qwen3.5-4B-MTP-GGUF:Q4_K_M \
 For a GGUF without a `nextn` block, omit `--speculative-config`; the backbone
 loads normally without MTP.
 
+### vLLM-Omni MiniMax-H3
+
+MiniMax-H3 can use a non-pruned DiT GGUF while its text encoder and VAEs stay
+on their Hugging Face weights:
+
+```python
+from vllm_omni.entrypoints.omni import Omni
+
+omni = Omni(
+    model="/path/to/MiniMax-H3/FL2VA",
+    tensor_parallel_size=1,
+    text_encoder_tp_size=1,
+    diffusion_quantization_config={
+        "method": "gguf",
+        "gguf_model": (
+            "leejet/MiniMax-H3-GGUF/"
+            "minimax_h3_fl2va-Q4_K_M.gguf"
+        ),
+    },
+)
+```
+
+Use one partition per process. A single `gguf_model` cannot initialize H3's
+combined FL2VA and Ref2VA DiTs. Pruned checkpoints containing
+`adaln_t_table` are not yet supported; use a file without `pruned` in its
+name.
+
 ## Tested model coverage
 
 The plugin uses vLLM's model implementations and a generic GGUF weight
@@ -94,6 +121,7 @@ starting points:
 | Vision-language | Qwen 3.6 | UD-IQ2_XXS backbone with BF16 projector |
 | Image generation | Z-Image-Turbo | Q4_0 |
 | Image generation | FLUX.2-klein | Q8_0 |
+| Video+audio generation | MiniMax-H3 FL2VA (non-pruned, single partition) | Q4_K_M |
 
 Other vLLM-supported architectures may work when their GGUF tensor names map
 to the corresponding Hugging Face model. A model appearing in vLLM's general
