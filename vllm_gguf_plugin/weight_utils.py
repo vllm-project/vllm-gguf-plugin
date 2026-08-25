@@ -42,7 +42,11 @@ def download_gguf(
 
     local_files: list[str] = []
     for pattern in allow_patterns:
-        local_files.extend(glob.glob(os.path.join(folder, pattern)))
+        # backbone shards may live in per-quant subdirectories
+        # (e.g. unsloth/Kimi-K3-GGUF "UD-IQ1_M/*.gguf")
+        local_files.extend(
+            glob.glob(os.path.join(folder, "**", pattern), recursive=True)
+        )
 
     if not local_files:
         raise ValueError(
@@ -102,6 +106,9 @@ def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     matches: list[str] = []
     for pat in patterns:
         matches.extend(glob_mod.glob(os.path.join(local_dir, pat)))
+    # A sibling mmproj projector shares the F16/F32-style suffix but is not a
+    # model backbone.
+    matches = [m for m in matches if "mmproj" not in os.path.basename(m).lower()]
     if not matches:
         raise ValueError(
             f"No GGUF file matching quant_type '{quant_type}' found in {local_dir}"
@@ -198,6 +205,34 @@ def split_stacked_experts(
                 yield expert_name, expert_weight
         else:
             yield name, weight
+
+
+def dequantize_gguf_tensor(
+    weight: torch.Tensor, weight_type: int | None
+) -> torch.Tensor:
+    """Return a float tensor for a GGUF payload of any storage type.
+
+    Quantized payloads go through the plugin's dequant kernel (CUDA, with a
+    Triton fallback); F32/F16/BF16 payloads are just cast. Runs on GPU — GGUF
+    inference requires CUDA anyway.
+    """
+    if weight_type is None or weight_type in (
+        gguf.GGMLQuantizationType.F32,
+        gguf.GGMLQuantizationType.F16,
+        gguf.GGMLQuantizationType.BF16,
+    ):
+        return weight.float()
+    from . import ops
+
+    weight_2d = weight.reshape(-1, weight.shape[-1]).contiguous().cuda()
+    block_size, type_size = gguf.GGML_QUANT_SIZES[
+        gguf.GGMLQuantizationType(weight_type)
+    ]
+    n = weight_2d.shape[1] // type_size * block_size
+    dequantized = ops.ggml_dequantize(
+        weight_2d, weight_type, weight_2d.shape[0], n, torch.float32
+    )
+    return dequantized.reshape(*weight.shape[:-1], n)
 
 
 def get_gguf_unquantized_params(gguf_files: list[str]) -> list[str]:

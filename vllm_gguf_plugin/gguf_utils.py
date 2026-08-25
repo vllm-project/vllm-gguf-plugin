@@ -351,6 +351,15 @@ def extract_lm_head_from_gguf(model_path: str | Path) -> bool:
     return any(tensor.name == "output.weight" for tensor in reader.tensors)
 
 
+def _update_config_attr(config: PretrainedConfig, key: str, value) -> None:
+    """Set a config attribute, skipping read-only property proxies."""
+    attr = getattr(type(config), key, None)
+    if isinstance(attr, property) and attr.fset is None:
+        return
+    if hasattr(config, key):
+        config.update({key: value})
+
+
 def maybe_patch_hf_config_from_gguf(
     model: str,
     hf_config: PretrainedConfig,
@@ -375,11 +384,9 @@ def maybe_patch_hf_config_from_gguf(
     """
     vocab_size = extract_vocab_size_from_gguf(model)
     if vocab_size is not None:
-        if hasattr(hf_config, "vocab_size"):
-            hf_config.update({"vocab_size": vocab_size})
+        _update_config_attr(hf_config, "vocab_size", vocab_size)
         text_config = hf_config.get_text_config()
-        if hasattr(text_config, "vocab_size"):
-            text_config.update({"vocab_size": vocab_size})
+        _update_config_attr(text_config, "vocab_size", vocab_size)
 
     has_lm_head = extract_lm_head_from_gguf(model)
     if has_lm_head is not None:

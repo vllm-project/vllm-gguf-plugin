@@ -313,6 +313,10 @@ class GGUFWeightParameter(_GGUFParamLoadMixin, BasevLLMParameter):
         self.data_container: list[torch.Tensor] = []
         self.shard_id: list[int | str] = []
         self.shard_id_map: dict[int | str, int] = {}
+        # Per-shard storage for mixed-precision merged parameters; mutually
+        # exclusive with the padded single-buffer storage.
+        self.shard_buffers: list[torch.Tensor] | None = None
+        self.shard_buffer_types: list[int] | None = None
         super().__init__(data=data, weight_loader=weight_loader)
 
     @property

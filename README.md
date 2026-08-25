@@ -92,6 +92,7 @@ starting points:
 | Vision-language | Gemma 3 | Q4_0 backbone with F16 projector |
 | Vision-language | Qwen 3.5 | Q4_K_M backbone with BF16 projector |
 | Vision-language | Qwen 3.6 | UD-IQ2_XXS backbone with BF16 projector |
+| Vision-language | Kimi K3 | UD quants (e.g. UD-IQ1_M) with BF16/F16/F32 projector |
 | Image generation | Z-Image-Turbo | Q4_0 |
 | Image generation | FLUX.2-klein | Q8_0 |
 

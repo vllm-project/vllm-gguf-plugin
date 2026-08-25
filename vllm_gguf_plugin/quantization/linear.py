@@ -42,6 +42,10 @@ def _fused_mul_mat_gguf(
     if x.shape[0] == 0:
         return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
     if qweight_type in UNQUANTIZED_TYPES:
+        if qweight.dtype != x.dtype:
+            # Float shards stored next to quantized ones (mixed-precision
+            # merged parameters) may not match the activation dtype.
+            qweight = qweight.to(x.dtype)
         return x @ qweight.T
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
@@ -123,6 +127,18 @@ class GGUFLinearMethod(LinearMethodBase):
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qweight", qweight)
 
+        # Some fused layers (e.g. Kimi-K3 in_proj_qkvgfab) touch `.weight`
+        # directly during __init__ to zero alignment-padding rows. Give GGUF
+        # layers an empty placeholder so that stays a harmless no-op; padding
+        # rows in the GGUF buffers are already zero.
+        layer.register_parameter(
+            "weight",
+            torch.nn.Parameter(
+                torch.empty(0, dtype=params_dtype),
+                requires_grad=False,
+            ),
+        )
+
         weight_loader_type = _resolve_gguf_weight_type_loader(
             layer, fallback_weight_loader
         )
@@ -178,12 +194,19 @@ class GGUFLinearMethod(LinearMethodBase):
         shard_id = qweight.shard_id
         if len(data_container := qweight.data_container) > 1:
             dtype = {data.dtype for data in data_container}
-            assert len(dtype) == 1, ValueError(
-                f"Data container has mixed dtypes: {dtype}"
-            )
+            if len(dtype) != 1:
+                # Shards of different precisions (e.g. quantized weights fused
+                # with an unquantized one) cannot share a padded byte buffer;
+                # keep one tensor per shard instead.
+                self._create_shard_buffer_param(layer)
+                return
             dtype = next(iter(dtype))
             padded_side = max(x.size(1) for x in data_container)
-            concat_side = sum(x.size(0) for x in data_container)
+            # Output rows of fused partitions that no GGUF tensor loads into
+            # (alignment padding) stay zero in the buffer.
+            concat_side = max(
+                sum(x.size(0) for x in data_container), qweight.tensor_shape[0]
+            )
             padded_data = torch.zeros(
                 (concat_side, padded_side), dtype=dtype, device=qweight.device
             )
@@ -220,6 +243,59 @@ class GGUFLinearMethod(LinearMethodBase):
                 )
             layer.register_parameter("qweight", padded_param)
 
+    def _create_shard_buffer_param(self, layer: torch.nn.Module) -> None:
+        """Keep one weight buffer per shard for mixed-precision mergers.
+
+        The padded-buffer path requires all shards to share one dtype;
+        quantized shards stored as raw bytes cannot be concatenated with
+        float shards (e.g. Kimi-K3's fused in_proj_qkvgfab, where the beta
+        projection stays unquantized). Each shard keeps its own tensor and
+        GGUF weight type, and ``apply`` concatenates per-shard matmuls.
+        """
+        qweight = layer.qweight
+        ordered_shard_ids = _gguf_ordered_shard_ids(qweight.shard_id)
+        buffers = [
+            qweight.data_container[qweight.shard_id_map[idx]]
+            for idx in ordered_shard_ids
+        ]
+        buffer_types = [
+            layer.qweight_type.shard_weight_type.get(
+                idx, layer.qweight_type.weight_type
+            )
+            for idx in ordered_shard_ids
+        ]
+        # Output rows of fused partitions that no GGUF tensor loads into
+        # (alignment padding) still have to appear in the matmul output.
+        missing = qweight.tensor_shape[0] - sum(buf.size(0) for buf in buffers)
+        if missing > 0:
+            buffers.append(
+                torch.zeros(
+                    missing,
+                    qweight.tensor_shape[1],
+                    dtype=torch.bfloat16,
+                    device=buffers[0].device,
+                )
+            )
+            buffer_types.append(int(gguf.GGMLQuantizationType.BF16))
+
+        buffer_param = GGUFWeightParameter(
+            data=torch.empty(0, dtype=torch.uint8, device=buffers[0].device),
+            weight_loader=qweight.weight_loader,
+            input_dim=qweight.input_dim,
+            output_dim=qweight.output_dim,
+            tensor_shape=qweight.tensor_shape,
+        )
+        buffer_param.shard_buffers = buffers
+        buffer_param.shard_buffer_types = buffer_types
+        if hasattr(qweight, "ignore_warning"):
+            buffer_param.ignore_warning = qweight.ignore_warning
+        qweight.data_container.clear()
+        qweight.shard_id.clear()
+        qweight.shard_id_map.clear()
+        if qweight.data.numel() > 0:
+            qweight.data = torch.empty(0, dtype=qweight.dtype, device=qweight.device)
+        layer.register_parameter("qweight", buffer_param)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -230,6 +306,20 @@ class GGUFLinearMethod(LinearMethodBase):
 
         if self.layout is not None:
             x = self.layout.input_to_gguf(x)
+
+        shard_buffers = getattr(layer.qweight, "shard_buffers", None)
+        if shard_buffers is not None:
+            # Mixed-precision merged parameter: one matmul per shard buffer.
+            parts = [
+                fused_mul_mat_gguf_op(x, buffer, weight_type)
+                for buffer, weight_type in zip(
+                    shard_buffers, layer.qweight.shard_buffer_types
+                )
+            ]
+            out = parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
+            if bias is not None:
+                out.add_(bias)
+            return out
 
         shard_id = layer.qweight.shard_id
         if shard_id:
@@ -257,6 +347,11 @@ class GGUFLinearMethod(LinearMethodBase):
                     )
                 )
             out = torch.cat(result, axis=1)
+            # Padding partitions are never loaded as shards; their rows stay
+            # zero in the buffer, so reproduce them in the output.
+            pad_rows = qweight.tensor_shape[0] - out.shape[1]
+            if pad_rows > 0:
+                out = torch.cat([out, out.new_zeros(x.shape[0], pad_rows)], dim=1)
         else:
             qweight = layer.qweight
             qweight_type = layer.qweight_type.weight_type

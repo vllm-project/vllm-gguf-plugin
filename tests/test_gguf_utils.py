@@ -36,6 +36,18 @@ def test_resolve_explicit_mm_proj_local_and_sibling(tmp_path):
     assert resolve_explicit_mm_proj(mm_proj.name, model_path) == str(mm_proj)
 
 
+def test_resolve_local_gguf_excludes_mmproj(tmp_path):
+    """A sibling mmproj must never be picked as the backbone."""
+    from vllm_gguf_plugin.weight_utils import resolve_local_gguf
+
+    backbone = tmp_path / "model-F32.gguf"
+    mm_proj = tmp_path / "mmproj-F32.gguf"
+    backbone.write_bytes(b"GGUF")
+    mm_proj.write_bytes(b"GGUF")
+
+    assert resolve_local_gguf(str(tmp_path), "F32") == str(backbone)
+
+
 def test_resolve_explicit_mm_proj_remote(monkeypatch):
     download_calls = []
 
