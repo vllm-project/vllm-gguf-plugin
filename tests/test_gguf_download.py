@@ -111,6 +111,7 @@ class TestGGUFDownload:
     def test_download_gguf_finds_quant_published_in_a_subdirectory(
         self, mock_download, tmp_path
     ):
+        """snapshot_download's fnmatch spans '/', so the local scan must too."""
         folder = self._make_repo(
             tmp_path,
             [
@@ -133,6 +134,30 @@ class TestGGUFDownload:
         result = download_gguf("unsloth/Some-GGUF", "Q6_K")
 
         assert result == f"{folder}/model-Q6_K.gguf"
+
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_skips_the_multimodal_projector(
+        self, mock_download, tmp_path
+    ):
+        """A bare precision quant type also matches ``mmproj-BF16.gguf``."""
+        folder = self._make_repo(
+            tmp_path, ["mmproj-BF16.gguf", "gemma-3-4b-it-BF16.gguf"]
+        )
+        mock_download.return_value = folder
+
+        result = download_gguf("unsloth/gemma-3-4b-it-GGUF", "BF16")
+
+        assert result == f"{folder}/gemma-3-4b-it-BF16.gguf"
+
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_raises_when_only_a_projector_matches(
+        self, mock_download, tmp_path
+    ):
+        folder = self._make_repo(tmp_path, ["mmproj-F16.gguf"])
+        mock_download.return_value = folder
+
+        with pytest.raises(ValueError, match="Downloaded GGUF files not found"):
+            download_gguf("unsloth/gemma-3-4b-it-GGUF", "F16")
 
     @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
     @patch("vllm_gguf_plugin.weight_utils.list_filtered_repo_files")

@@ -42,19 +42,28 @@ def download_gguf(
 
     matched: set[str] = set()
     for pattern in allow_patterns:
-        # snapshot_download matched these patterns with fnmatch against
-        # repo-relative paths, where * spans "/". glob does not cross a
-        # directory separator, so "**" is needed to see the same files.
+        # ``snapshot_download`` matched these same patterns with fnmatch against
+        # repo-relative paths, where ``*`` spans ``/``. Plain ``glob`` does not
+        # cross a directory separator, so a quant published in a per-quant
+        # subdirectory was downloaded and then reported as missing. ``**`` with
+        # recursive=True matches zero or more directories, which covers both
+        # layouts.
         matched.update(glob.glob(os.path.join(folder, "**", pattern), recursive=True))
 
-    local_files = list(matched)
+    # A bare precision quant type such as BF16 also matches ``mmproj-BF16.gguf``.
+    # The projector is resolved separately by ``download_mmproj``; returning it
+    # here would load the vision tower as the backbone.
+    local_files = [
+        path for path in matched if "mmproj" not in os.path.basename(path).lower()
+    ]
 
     if not local_files:
         raise ValueError(
             f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
         )
 
-    # Rank on the file name; a subdirectory would skew the shard heuristic.
+    # Rank on the file name alone: a subdirectory component would otherwise
+    # count towards the shard heuristic and reorder the candidates.
     local_files.sort(key=lambda path: (os.path.basename(path).count("-"), path))
     return local_files[0]
 
