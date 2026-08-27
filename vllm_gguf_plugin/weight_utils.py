@@ -40,16 +40,22 @@ def download_gguf(
         ignore_patterns=ignore_patterns,
     )
 
-    local_files: list[str] = []
+    matched: set[str] = set()
     for pattern in allow_patterns:
-        local_files.extend(glob.glob(os.path.join(folder, pattern)))
+        # snapshot_download matched these patterns with fnmatch against
+        # repo-relative paths, where * spans "/". glob does not cross a
+        # directory separator, so "**" is needed to see the same files.
+        matched.update(glob.glob(os.path.join(folder, "**", pattern), recursive=True))
+
+    local_files = list(matched)
 
     if not local_files:
         raise ValueError(
             f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
         )
 
-    local_files.sort(key=lambda x: (x.count("-"), x))
+    # Rank on the file name; a subdirectory would skew the shard heuristic.
+    local_files.sort(key=lambda path: (os.path.basename(path).count("-"), path))
     return local_files[0]
 
 
