@@ -173,8 +173,7 @@ def gguf_quant_weights_iterator_multi(
 
             weight_type = tensor.tensor_type
             if weight_type.name not in _QUANT_TYPES:
-                yield name.replace("weight", "qweight_type"), torch.tensor(weight_type)
-                name = name.replace("weight", "qweight")
+                yield name.replace("weight", "weight_type"), torch.tensor(weight_type)
 
             weight = tensor.data
             if weight_type.name == "BF16" and weight.dtype == np.uint8:

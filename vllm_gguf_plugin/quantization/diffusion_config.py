@@ -19,14 +19,14 @@ from .utils import UNQUANTIZED_TYPES, is_layer_skipped_gguf
 
 
 def dequant_gemm_gguf(
-    x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
+    x: torch.Tensor, weight: torch.Tensor, weight_type: int
 ) -> torch.Tensor:
-    if qweight_type in UNQUANTIZED_TYPES:
-        return x @ qweight.T
+    if weight_type in UNQUANTIZED_TYPES:
+        return x @ weight.T
 
-    block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
-    shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
-    weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
+    block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
+    shape = (weight.shape[0], weight.shape[1] // type_size * block_size)
+    weight = ops.ggml_dequantize(weight, weight_type, *shape, x.dtype)
     return x @ weight.T
 
 
@@ -39,40 +39,40 @@ class DiffusionGGUFLinearMethod(GGUFLinearMethod):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        shard_id = getattr(layer.qweight, "shard_id", [])
+        shard_id = getattr(layer.weight, "shard_id", [])
         if shard_id:
             shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
-            qweight = layer.qweight
-            fallback_wtype = getattr(layer.qweight_type, "weight_type", None)
+            weight = layer.weight
+            fallback_wtype = getattr(layer.weight_type, "weight_type", None)
             if fallback_wtype is None:
                 fallback_wtype = next(
-                    iter(layer.qweight_type.shard_weight_type.values())
+                    iter(layer.weight_type.shard_weight_type.values())
                 )
             shard_weight_types = [
-                layer.qweight_type.shard_weight_type.get(idx, fallback_wtype)
+                layer.weight_type.shard_weight_type.get(idx, fallback_wtype)
                 for idx in shard_id
             ]
             if len(set(shard_weight_types)) == 1:
-                out = dequant_gemm_gguf(x, qweight, shard_weight_types[0])
+                out = dequant_gemm_gguf(x, weight, shard_weight_types[0])
                 if bias is not None:
                     out.add_(bias)
                 return out
             result = []
             for idx in shard_id:
-                start, end, offset = layer.qweight.shard_offset_map[idx]
-                qweight_type = layer.qweight_type.shard_weight_type.get(
+                start, end, offset = layer.weight.shard_offset_map[idx]
+                weight_type = layer.weight_type.shard_weight_type.get(
                     idx, fallback_wtype
                 )
                 result.append(
                     dequant_gemm_gguf(
-                        x, qweight[start:end, :offset].contiguous(), qweight_type
+                        x, weight[start:end, :offset].contiguous(), weight_type
                     )
                 )
             out = torch.cat(result, axis=1)
         else:
-            qweight = layer.qweight
-            qweight_type = layer.qweight_type.weight_type
-            out = dequant_gemm_gguf(x, qweight, qweight_type)
+            weight = layer.weight
+            weight_type = layer.weight_type.weight_type
+            out = dequant_gemm_gguf(x, weight, weight_type)
         if bias is not None:
             out.add_(bias)
         return out

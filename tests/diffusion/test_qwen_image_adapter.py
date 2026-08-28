@@ -44,12 +44,12 @@ def test_qwen_adapter_preserves_split_projection_names(monkeypatch: pytest.Monke
         "gguf_quant_weights_iterator",
         lambda _path: iter(
             [
-                ("transformer_blocks.0.attn.to_q.qweight_type", 1),
-                ("transformer_blocks.0.attn.to_q.qweight", 2),
-                ("transformer_blocks.0.attn.to_k.qweight_type", 3),
-                ("transformer_blocks.0.attn.to_k.qweight", 4),
-                ("transformer_blocks.0.attn.to_out.0.qweight_type", 5),
-                ("transformer_blocks.0.attn.to_out.0.qweight", 6),
+                ("transformer_blocks.0.attn.to_q.weight_type", 1),
+                ("transformer_blocks.0.attn.to_q.weight", 2),
+                ("transformer_blocks.0.attn.to_k.weight_type", 3),
+                ("transformer_blocks.0.attn.to_k.weight", 4),
+                ("transformer_blocks.0.attn.to_out.0.weight_type", 5),
+                ("transformer_blocks.0.attn.to_out.0.weight", 6),
             ]
         ),
     )
@@ -58,12 +58,12 @@ def test_qwen_adapter_preserves_split_projection_names(monkeypatch: pytest.Monke
 
     weights = list(adapter.weights_iterator())
 
-    assert ("transformer_blocks.0.attn.to_q.qweight_type", 1) in weights
-    assert ("transformer_blocks.0.attn.to_q.qweight", 2) in weights
-    assert ("transformer_blocks.0.attn.to_k.qweight_type", 3) in weights
-    assert ("transformer_blocks.0.attn.to_k.qweight", 4) in weights
-    assert ("transformer_blocks.0.attn.to_out.0.qweight_type", 5) in weights
-    assert ("transformer_blocks.0.attn.to_out.0.qweight", 6) in weights
+    assert ("transformer_blocks.0.attn.to_q.weight_type", 1) in weights
+    assert ("transformer_blocks.0.attn.to_q.weight", 2) in weights
+    assert ("transformer_blocks.0.attn.to_k.weight_type", 3) in weights
+    assert ("transformer_blocks.0.attn.to_k.weight", 4) in weights
+    assert ("transformer_blocks.0.attn.to_out.0.weight_type", 5) in weights
+    assert ("transformer_blocks.0.attn.to_out.0.weight", 6) in weights
 
 
 def test_qwen_adapter_keeps_top_level_quantized_weights(
@@ -76,10 +76,10 @@ def test_qwen_adapter_keeps_top_level_quantized_weights(
         "gguf_quant_weights_iterator",
         lambda _path: iter(
             [
-                ("img_in.qweight_type", 1),
-                ("img_in.qweight", 2),
-                ("time_text_embed.timestep_embedder.linear_1.qweight_type", 3),
-                ("time_text_embed.timestep_embedder.linear_1.qweight", 4),
+                ("img_in.weight_type", 1),
+                ("img_in.weight", 2),
+                ("time_text_embed.timestep_embedder.linear_1.weight_type", 3),
+                ("time_text_embed.timestep_embedder.linear_1.weight", 4),
             ]
         ),
     )
@@ -88,10 +88,10 @@ def test_qwen_adapter_keeps_top_level_quantized_weights(
 
     weights = list(adapter.weights_iterator())
 
-    assert ("img_in.qweight_type", 1) in weights
-    assert ("img_in.qweight", 2) in weights
-    assert ("time_text_embed.timestep_embedder.linear_1.qweight_type", 3) in weights
-    assert ("time_text_embed.timestep_embedder.linear_1.qweight", 4) in weights
+    assert ("img_in.weight_type", 1) in weights
+    assert ("img_in.weight", 2) in weights
+    assert ("time_text_embed.timestep_embedder.linear_1.weight_type", 3) in weights
+    assert ("time_text_embed.timestep_embedder.linear_1.weight", 4) in weights
 
 
 def test_qwen_adapter_keeps_modulation_quantized_weights(
@@ -104,10 +104,10 @@ def test_qwen_adapter_keeps_modulation_quantized_weights(
         "gguf_quant_weights_iterator",
         lambda _path: iter(
             [
-                ("transformer_blocks.0.img_mod.1.qweight_type", 1),
-                ("transformer_blocks.0.img_mod.1.qweight", 2),
-                ("transformer_blocks.0.txt_mod.1.qweight_type", 3),
-                ("transformer_blocks.0.txt_mod.1.qweight", 4),
+                ("transformer_blocks.0.img_mod.1.weight_type", 1),
+                ("transformer_blocks.0.img_mod.1.weight", 2),
+                ("transformer_blocks.0.txt_mod.1.weight_type", 3),
+                ("transformer_blocks.0.txt_mod.1.weight", 4),
             ]
         ),
     )
@@ -116,7 +116,7 @@ def test_qwen_adapter_keeps_modulation_quantized_weights(
 
     weights = list(adapter.weights_iterator())
 
-    assert ("transformer_blocks.0.img_mod.1.qweight_type", 1) in weights
-    assert ("transformer_blocks.0.img_mod.1.qweight", 2) in weights
-    assert ("transformer_blocks.0.txt_mod.1.qweight_type", 3) in weights
-    assert ("transformer_blocks.0.txt_mod.1.qweight", 4) in weights
+    assert ("transformer_blocks.0.img_mod.1.weight_type", 1) in weights
+    assert ("transformer_blocks.0.img_mod.1.weight", 2) in weights
+    assert ("transformer_blocks.0.txt_mod.1.weight_type", 3) in weights
+    assert ("transformer_blocks.0.txt_mod.1.weight", 4) in weights

@@ -33,37 +33,37 @@ from .utils import (
 
 
 def _fused_mul_mat_gguf(
-    x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
+    x: torch.Tensor, weight: torch.Tensor, weight_type: int
 ) -> torch.Tensor:
-    if qweight_type in IMATRIX_QUANT_TYPES:
-        mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
+    if weight_type in IMATRIX_QUANT_TYPES:
+        mmvq_safe = 8 if weight.shape[0] > 5120 else 16
     else:
-        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
+        mmvq_safe = 2 if weight.shape[0] > 5120 else 6
     if x.shape[0] == 0:
-        return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
-    if qweight_type in UNQUANTIZED_TYPES:
-        return x @ qweight.T
-    if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
-        y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
-    elif qweight_type in MMQ_QUANT_TYPES:
-        y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
-    elif qweight_type in DEQUANT_TYPES:
-        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
-        shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
-        weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
+        return torch.empty(x.shape[0], weight.shape[0], dtype=x.dtype, device=x.device)
+    if weight_type in UNQUANTIZED_TYPES:
+        return x @ weight.T
+    if x.shape[0] <= mmvq_safe and weight_type in MMVQ_QUANT_TYPES:
+        y = ops.ggml_mul_mat_vec_a8(weight, x, weight_type, weight.shape[0])
+    elif weight_type in MMQ_QUANT_TYPES:
+        y = ops.ggml_mul_mat_a8(weight, x, weight_type, weight.shape[0])
+    elif weight_type in DEQUANT_TYPES:
+        block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
+        shape = (weight.shape[0], weight.shape[1] // type_size * block_size)
+        weight = ops.ggml_dequantize(weight, weight_type, *shape, x.dtype)
         y = x @ weight.T
     else:
-        qweight_type = WeightType(qweight_type)
-        raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
+        weight_type = WeightType(weight_type)
+        raise NotImplementedError(f"Unsupported GGUF quantization type: {weight_type}")
     return y
 
 
 def _fused_mul_mat_gguf_fake(
     x: torch.Tensor,
-    qweight: torch.Tensor,
-    qweight_type: int,
+    weight: torch.Tensor,
+    weight_type: int,
 ) -> torch.Tensor:
-    return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
+    return torch.empty(x.shape[0], weight.shape[0], dtype=x.dtype, device=x.device)
 
 
 try:
@@ -107,9 +107,9 @@ class GGUFLinearMethod(LinearMethodBase):
         assert weight_loader is not None
 
         tensor_shape = (output_size_per_partition, input_size_per_partition)
-        qweight = GGUFUninitializedWeightParameter(requires_grad=False)
+        weight = GGUFUninitializedWeightParameter(requires_grad=False)
         set_weight_attrs(
-            qweight,
+            weight,
             {
                 "weight_loader": weight_loader,
                 "input_dim": 1,
@@ -120,16 +120,16 @@ class GGUFLinearMethod(LinearMethodBase):
                 "shard_id_map": {},
             },
         )
-        set_weight_attrs(qweight, extra_weight_attrs)
-        layer.register_parameter("qweight", qweight)
+        set_weight_attrs(weight, extra_weight_attrs)
+        layer.register_parameter("weight", weight)
 
         weight_loader_type = _resolve_gguf_weight_type_loader(
             layer, fallback_weight_loader
         )
         assert weight_loader_type is not None
-        qweight_type = GGUFUninitializedWeightTypeParameter(requires_grad=False)
+        weight_type = GGUFUninitializedWeightTypeParameter(requires_grad=False)
         set_weight_attrs(
-            qweight_type,
+            weight_type,
             {
                 "weight_loader": weight_loader_type,
                 "weight_type": 0,
@@ -138,45 +138,45 @@ class GGUFLinearMethod(LinearMethodBase):
                 "ignore_warning": True,
             },
         )
-        set_weight_attrs(qweight_type, extra_weight_attrs)
-        layer.register_parameter("qweight_type", qweight_type)
+        set_weight_attrs(weight_type, extra_weight_attrs)
+        layer.register_parameter("weight_type", weight_type)
 
         if self.layout is not None:
             set_weight_attrs(
-                qweight,
+                weight,
                 {
                     "gguf_layout": self.layout,
                     "gguf_logical_input_size": input_size,
-                    "gguf_weight_type_parameter": qweight_type,
+                    "gguf_weight_type_parameter": weight_type,
                 },
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         self._materialize_gguf_parameters(layer)
-        qweight_type = layer.qweight_type.weight_type
-        if not (qweight_type in UNQUANTIZED_TYPES or qweight_type in DEQUANT_TYPES):
-            qweight_type = WeightType(qweight_type)
+        weight_type = layer.weight_type.weight_type
+        if not (weight_type in UNQUANTIZED_TYPES or weight_type in DEQUANT_TYPES):
+            weight_type = WeightType(weight_type)
             raise ValueError(
-                f"Unsupported GGUF quantization type {qweight_type} in layer {layer}."
+                f"Unsupported GGUF quantization type {weight_type} in layer {layer}."
             )
         self._create_padded_weight_param(layer)
 
     def _materialize_gguf_parameters(self, layer: torch.nn.Module) -> None:
-        self._materialize_qweight(layer)
-        self._materialize_qweight_type(layer)
+        self._materialize_weight(layer)
+        self._materialize_weight_type(layer)
 
-    def _materialize_qweight(self, layer: torch.nn.Module) -> None:
-        _materialize_gguf_weight_parameter(layer, "qweight")
+    def _materialize_weight(self, layer: torch.nn.Module) -> None:
+        _materialize_gguf_weight_parameter(layer, "weight")
 
-    def _materialize_qweight_type(self, layer: torch.nn.Module) -> None:
-        _materialize_gguf_weight_type_parameter(layer, "qweight_type")
+    def _materialize_weight_type(self, layer: torch.nn.Module) -> None:
+        _materialize_gguf_weight_type_parameter(layer, "weight_type")
 
     def _create_padded_weight_param(self, layer: torch.nn.Module):
         """Create padded weight parameter for GGUF MergedLinear layer."""
-        qweight = layer.qweight
-        shard_id_map = qweight.shard_id_map
-        shard_id = qweight.shard_id
-        if len(data_container := qweight.data_container) > 1:
+        weight = layer.weight
+        shard_id_map = weight.shard_id_map
+        shard_id = weight.shard_id
+        if len(data_container := weight.data_container) > 1:
             dtype = {data.dtype for data in data_container}
             assert len(dtype) == 1, ValueError(
                 f"Data container has mixed dtypes: {dtype}"
@@ -185,7 +185,7 @@ class GGUFLinearMethod(LinearMethodBase):
             padded_side = max(x.size(1) for x in data_container)
             concat_side = sum(x.size(0) for x in data_container)
             padded_data = torch.zeros(
-                (concat_side, padded_side), dtype=dtype, device=qweight.device
+                (concat_side, padded_side), dtype=dtype, device=weight.device
             )
             shard_offset_map = dict[str, tuple[int, int, int]]()
             ordered_shard_ids = _gguf_ordered_shard_ids(shard_id)
@@ -200,25 +200,23 @@ class GGUFLinearMethod(LinearMethodBase):
                 current_offset = end
             padded_param = GGUFWeightParameter(
                 data=padded_data,
-                weight_loader=qweight.weight_loader,
-                input_dim=qweight.input_dim,
-                output_dim=qweight.output_dim,
-                tensor_shape=qweight.tensor_shape,
+                weight_loader=weight.weight_loader,
+                input_dim=weight.input_dim,
+                output_dim=weight.output_dim,
+                tensor_shape=weight.tensor_shape,
             )
             padded_param.data_container = []
             padded_param.shard_id = ordered_shard_ids
-            padded_param.shard_id_map = dict(qweight.shard_id_map)
-            if hasattr(qweight, "ignore_warning"):
-                padded_param.ignore_warning = qweight.ignore_warning
+            padded_param.shard_id_map = dict(weight.shard_id_map)
+            if hasattr(weight, "ignore_warning"):
+                padded_param.ignore_warning = weight.ignore_warning
             set_weight_attrs(padded_param, {"shard_offset_map": shard_offset_map})
-            qweight.data_container.clear()
-            qweight.shard_id.clear()
-            qweight.shard_id_map.clear()
-            if qweight.data.numel() > 0:
-                qweight.data = torch.empty(
-                    0, dtype=qweight.dtype, device=qweight.device
-                )
-            layer.register_parameter("qweight", padded_param)
+            weight.data_container.clear()
+            weight.shard_id.clear()
+            weight.shard_id_map.clear()
+            if weight.data.numel() > 0:
+                weight.data = torch.empty(0, dtype=weight.dtype, device=weight.device)
+            layer.register_parameter("weight", padded_param)
 
     def apply(
         self,
@@ -231,36 +229,36 @@ class GGUFLinearMethod(LinearMethodBase):
         if self.layout is not None:
             x = self.layout.input_to_gguf(x)
 
-        shard_id = layer.qweight.shard_id
+        shard_id = layer.weight.shard_id
         if shard_id:
             shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
-            qweight = layer.qweight
-            fallback_wtype = layer.qweight_type.weight_type
+            weight = layer.weight
+            fallback_wtype = layer.weight_type.weight_type
             shard_weight_types = [
-                layer.qweight_type.shard_weight_type.get(idx, fallback_wtype)
+                layer.weight_type.shard_weight_type.get(idx, fallback_wtype)
                 for idx in shard_id
             ]
             if len(set(shard_weight_types)) == 1:
-                out = fused_mul_mat_gguf_op(x, qweight, shard_weight_types[0])
+                out = fused_mul_mat_gguf_op(x, weight, shard_weight_types[0])
                 if bias is not None:
                     out.add_(bias)
                 return out
             result = []
             for idx in shard_id:
-                start, end, offset = layer.qweight.shard_offset_map[idx]
-                qweight_type = layer.qweight_type.shard_weight_type.get(
+                start, end, offset = layer.weight.shard_offset_map[idx]
+                weight_type = layer.weight_type.shard_weight_type.get(
                     idx, fallback_wtype
                 )
                 result.append(
                     fused_mul_mat_gguf_op(
-                        x, qweight[start:end, :offset].contiguous(), qweight_type
+                        x, weight[start:end, :offset].contiguous(), weight_type
                     )
                 )
             out = torch.cat(result, axis=1)
         else:
-            qweight = layer.qweight
-            qweight_type = layer.qweight_type.weight_type
-            out = fused_mul_mat_gguf_op(x, qweight, qweight_type)
+            weight = layer.weight
+            weight_type = layer.weight_type.weight_type
+            out = fused_mul_mat_gguf_op(x, weight, weight_type)
         if bias is not None:
             out.add_(bias)
         return out
