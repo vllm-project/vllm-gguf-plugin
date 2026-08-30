@@ -9,6 +9,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parameter import BasevLLMParameter
 
@@ -19,15 +20,25 @@ def _clone_loaded_weight(loaded_weight: torch.Tensor) -> torch.Tensor:
     return loaded_weight.detach().clone()
 
 
+def _gguf_replicated_weight_loader(param, loaded_weight, loaded_shard_id=None):
+    """Load a whole GGUF weight into an unsharded parameter."""
+    param._store(loaded_weight, shard_id=loaded_shard_id)
+
+
 def _resolve_gguf_weight_loader(
     layer: torch.nn.Module,
     fallback_weight_loader=None,
 ):
-    return (
-        layer.weight_loader_v2
-        if hasattr(layer, "weight_loader_v2")
-        else fallback_weight_loader
-    )
+    if hasattr(layer, "weight_loader_v2"):
+        return layer.weight_loader_v2
+    if isinstance(layer, ReplicatedLinear):
+        # ReplicatedLinear is the one linear layer with no v2 loader, and its
+        # v1 loader asserts that the parameter already has the loaded weight's
+        # shape.  GGUF parameters start out empty and take their shape from the
+        # packed bytes, so that assertion fires on the first tensor.  Nothing is
+        # sharded here, so storing the tensor whole is the entire job.
+        return _gguf_replicated_weight_loader
+    return fallback_weight_loader
 
 
 def _resolve_gguf_weight_type_loader(
