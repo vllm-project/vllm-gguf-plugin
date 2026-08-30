@@ -217,5 +217,24 @@ class TransformersGGUFWeightsAdapter(BaseGGUFWeightsAdapter):
         weights: Iterable[GGUFWeight],
         model_config: ModelConfig,
     ) -> Iterable[GGUFWeight]:
-        del model_config
-        yield from split_stacked_experts(weights)
+        # vLLM's GPT2 transposes every ``.weight`` of c_attn/c_proj/c_fc at
+        # load time (HF Conv1D layout). Packed quantized GGUF tensors must
+        # keep their GGUF layout, so pre-transpose them to cancel it out.
+        is_gpt2 = model_config.hf_config.model_type == "gpt2"
+
+        def transformed() -> Iterable[GGUFWeight]:
+            quantized_bases: set[str] = set()
+            for name, weight in weights:
+                # weight_type entries arrive before their packed weight data.
+                if name.endswith(".weight_type"):
+                    quantized_bases.add(name.removesuffix(".weight_type"))
+                elif (
+                    is_gpt2
+                    and name.endswith(".weight")
+                    and any(proj in name for proj in ("c_attn", "c_proj", "c_fc"))
+                    and name.removesuffix(".weight") in quantized_bases
+                ):
+                    weight = weight.t()
+                yield name, weight
+
+        yield from split_stacked_experts(transformed())

@@ -201,15 +201,15 @@ def test_load_gguf_does_not_fallback_to_hf_for_missing_transformer_weights(
     assert hf_seen == ["vae"]
 
 
-def test_load_gguf_restores_plain_weight_from_gguf_qweight(
+def test_load_gguf_restores_plain_weight_from_gguf_weight(
     monkeypatch: pytest.MonkeyPatch,
 ):
     model = _FakeModel()
 
     class _Adapter:
         def weights_iterator(self):
-            yield "qweight_type", torch.tensor(WeightType.F32)
-            yield "qweight", torch.full((2, 2), 3.0)
+            yield "weight_type", torch.tensor(WeightType.F32)
+            yield "weight", torch.full((2, 2), 3.0)
 
     import vllm_gguf_plugin.weights_adapter.diffusion.loader as _loader_mod
 
@@ -238,6 +238,76 @@ def test_load_gguf_restores_plain_weight_from_gguf_qweight(
     assert "transformer.weight" in loaded
     assert torch.allclose(model.transformer.weight, torch.full((2, 2), 3.0))
     assert hf_calls == []
+
+
+class _FakeMergedModel(nn.Module):
+    """Model with a fused ``w13`` projection loaded from ``w1``/``w3`` shards."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        w13 = nn.Module()
+        w13.register_parameter("weight", nn.Parameter(torch.zeros(4, 2)))
+        w13.register_parameter(
+            "weight_type", nn.Parameter(torch.zeros(1), requires_grad=False)
+        )
+        self.transformer = nn.ModuleDict({"w13": w13})
+        self.received: dict[str, torch.Tensor] = {}
+
+    def load_weights(self, weights) -> set[str]:
+        loadable = dict(self.named_parameters())
+        loaded: set[str] = set()
+        for name, tensor in weights:
+            for shard_name in (".w1.", ".w3."):
+                if shard_name in name:
+                    name = name.replace(shard_name, ".w13.")
+                    break
+            if name in loadable:
+                self.received[name] = tensor
+                loaded.add(name)
+        return loaded
+
+
+def test_load_gguf_passes_packed_shards_through_merged_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """GGUF ``w1.weight[_type]`` entries must reach a fused ``w13`` param.
+
+    The stacked-params mapping lives inside ``model.load_weights``, so the
+    loader cannot resolve ``w1`` names against ``named_parameters``; packed
+    shards and their weight types must pass through untouched.
+    """
+    model = _FakeMergedModel()
+    packed = torch.zeros((2, 2), dtype=torch.uint8)
+
+    class _Adapter:
+        def weights_iterator(self):
+            yield "w1.weight_type", torch.tensor(WeightType.Q4_0)
+            yield "w3.weight_type", torch.tensor(WeightType.Q4_0)
+            yield "w1.weight", packed
+            yield "w3.weight", packed
+
+    import vllm_gguf_plugin.weights_adapter.diffusion.loader as _loader_mod
+
+    monkeypatch.setattr(
+        _loader_mod, "resolve_gguf_model_path", lambda **kw: "dummy.gguf"
+    )
+    monkeypatch.setattr(
+        _loader_mod, "get_diffusion_gguf_adapter", lambda *a, **kw: _Adapter()
+    )
+
+    loaded = load_diffusion_gguf_weights(
+        gguf_model="dummy.gguf",
+        model=model,
+        model_class_name=None,
+        model_type=None,
+        sources=[DiffusionWeightSource(prefix="transformer.", subfolder="transformer")],
+        hf_weights_fn=lambda source: iter(()),
+    )
+
+    assert "transformer.w13.weight" in loaded
+    assert "transformer.w13.weight_type" in loaded
+    # Packed data must not be dequantized before reaching the fused param.
+    assert model.received["transformer.w13.weight"].dtype == torch.uint8
 
 
 def test_load_gguf_source_is_selected_by_adapter(monkeypatch: pytest.MonkeyPatch):

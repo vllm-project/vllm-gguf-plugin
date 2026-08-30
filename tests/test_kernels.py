@@ -108,20 +108,18 @@ def test_gguf_embedding(
 ):
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     for tensor in tensors:
-        qweight = torch.tensor(tensor.data, device="cuda")
-        weight = torch.tensor(dequantize(tensor.data, quant_type), device="cuda").to(
-            dtype
-        )
+        weight = torch.tensor(tensor.data, device="cuda")
+        dense_weight = torch.tensor(
+            dequantize(tensor.data, quant_type), device="cuda"
+        ).to(dtype)
         ids = torch.tensor(
-            [[0, qweight.shape[0] - 1], [qweight.shape[0] // 2, 0]],
+            [[0, dense_weight.shape[0] - 1], [dense_weight.shape[0] // 2, 0]],
             device="cuda",
             dtype=torch.long,
         )
 
-        output = apply_gguf_embedding(
-            ids, qweight, quant_type, hidden_size, dtype=dtype
-        )
-        ref_output = torch.embedding(weight, ids)
+        output = apply_gguf_embedding(ids, weight, quant_type, hidden_size, dtype=dtype)
+        ref_output = torch.embedding(dense_weight, ids)
 
         torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=4e-2)
 
@@ -141,8 +139,8 @@ def test_mmvq(hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantization
         )
         ref_output = x @ weight.T
 
-        qweight = torch.tensor(tensor.data, device="cuda")
-        output = ops.ggml_mul_mat_vec_a8(qweight, x, quant_type, qweight.shape[0]).to(
+        weight = torch.tensor(tensor.data, device="cuda")
+        output = ops.ggml_mul_mat_vec_a8(weight, x, quant_type, weight.shape[0]).to(
             dtype
         )
 
@@ -185,8 +183,8 @@ def test_mmq(
         )
         ref_output = x @ weight.T
 
-        qweight = torch.tensor(tensor.data, device="cuda")
-        output = ops.ggml_mul_mat_a8(qweight, x, quant_type, qweight.shape[0]).to(dtype)
+        weight = torch.tensor(tensor.data, device="cuda")
+        output = ops.ggml_mul_mat_a8(weight, x, quant_type, weight.shape[0]).to(dtype)
 
         atols = {torch.half: 1, torch.bfloat16: 1.5, torch.float: 1.2}
         # test matrix has inputs centered around 0 and lower precision from
@@ -244,8 +242,8 @@ def test_mmq_triton_dispatch(
         )
         ref_output = x @ weight.T
 
-        qweight = torch.tensor(tensor.data, device="cuda")
-        output = ggml_mul_mat_a8_triton(qweight, x, quant_type, qweight.shape[0])
+        weight = torch.tensor(tensor.data, device="cuda")
+        output = ggml_mul_mat_a8_triton(weight, x, quant_type, weight.shape[0])
 
         atols = {torch.half: 1, torch.bfloat16: 5, torch.float: 1.2}
         # test matrix has inputs centered around 0 and lower precision from
@@ -296,8 +294,8 @@ def test_mmq_batching(
         )
         ref_output = x @ weight.T
 
-        qweight = torch.tensor(tensor.data, device="cuda")
-        output = ops.ggml_mul_mat_a8(qweight, x, quant_type, qweight.shape[0]).to(dtype)
+        weight = torch.tensor(tensor.data, device="cuda")
+        output = ops.ggml_mul_mat_a8(weight, x, quant_type, weight.shape[0]).to(dtype)
 
         atols = {torch.half: 1, torch.bfloat16: 2, torch.float: 1}
         # test matrix has inputs centered around 0 and lower precision from

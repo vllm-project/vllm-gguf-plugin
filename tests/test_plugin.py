@@ -94,25 +94,25 @@ def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     )
 
     assert "GGUFLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED
-    assert isinstance(layer.qweight, GGUFUninitializedParameter)
-    assert isinstance(layer.qweight_type, GGUFUninitializedParameter)
-    assert layer.qweight.weight_loader.__name__.endswith("weight_loader_v2")
+    assert isinstance(layer.weight, GGUFUninitializedParameter)
+    assert isinstance(layer.weight_type, GGUFUninitializedParameter)
+    assert layer.weight.weight_loader.__name__.endswith("weight_loader_v2")
 
-    layer.weight_loader_v2(layer.qweight, torch.ones((4, 4), dtype=torch.uint8), 0)
-    layer.weight_loader_v2(layer.qweight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 0)
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(4, dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.weight, torch.ones((4, 4), dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(4, dtype=torch.uint8), 1)
 
-    assert isinstance(layer.qweight, GGUFUninitializedParameter)
-    assert len(layer.qweight.data_container) == 2
-    assert isinstance(layer.qweight_type, GGUFUninitializedParameter)
+    assert isinstance(layer.weight, GGUFUninitializedParameter)
+    assert len(layer.weight.data_container) == 2
+    assert isinstance(layer.weight_type, GGUFUninitializedParameter)
 
     layer.quant_method.process_weights_after_loading(layer)
 
-    assert isinstance(layer.qweight, GGUFWeightParameter)
-    assert isinstance(layer.qweight_type, GGUFWeightTypeParameter)
-    assert layer.qweight.shard_id == [0, 1]
-    assert layer.qweight_type.shard_weight_type == {0: 3, 1: 4}
+    assert isinstance(layer.weight, GGUFWeightParameter)
+    assert isinstance(layer.weight_type, GGUFWeightTypeParameter)
+    assert layer.weight.shard_id == [0, 1]
+    assert layer.weight_type.shard_weight_type == {0: 3, 1: 4}
 
 
 def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
@@ -135,20 +135,20 @@ def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
         quant_config=OOTGGUFConfig.from_config({}),
     )
 
-    loaded_qweight = torch.arange(60, dtype=torch.uint8).reshape(10, 6)
-    layer.qweight.weight_loader(layer.qweight, loaded_qweight)
-    layer.qweight_type.weight_loader(
-        layer.qweight_type, torch.tensor(7, dtype=torch.uint8)
+    loaded_weight = torch.arange(60, dtype=torch.uint8).reshape(10, 6)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    layer.weight_type.weight_loader(
+        layer.weight_type, torch.tensor(7, dtype=torch.uint8)
     )
     layer.quant_method.process_weights_after_loading(layer)
 
-    assert isinstance(layer.qweight, GGUFWeightParameter)
-    assert isinstance(layer.qweight_type, GGUFWeightTypeParameter)
-    assert layer.qweight.shape == (16, 6)
-    assert torch.equal(layer.qweight[:10], loaded_qweight)
-    assert torch.equal(layer.qweight[10:], torch.zeros((6, 6), dtype=torch.uint8))
-    assert torch.equal(layer.qweight_type, torch.tensor([7], dtype=torch.uint8))
-    assert layer.qweight_type.weight_type == 7
+    assert isinstance(layer.weight, GGUFWeightParameter)
+    assert isinstance(layer.weight_type, GGUFWeightTypeParameter)
+    assert layer.weight.shape == (16, 6)
+    assert torch.equal(layer.weight[:10], loaded_weight)
+    assert torch.equal(layer.weight[10:], torch.zeros((6, 6), dtype=torch.uint8))
+    assert torch.equal(layer.weight_type, torch.tensor([7], dtype=torch.uint8))
+    assert layer.weight_type.weight_type == 7
 
 
 def test_gguf_linear_same_type_shards_skip_concat(monkeypatch):
@@ -166,19 +166,19 @@ def test_gguf_linear_same_type_shards_skip_concat(monkeypatch):
         quant_config=quant_config,
         disable_tp=True,
     )
-    layer.weight_loader_v2(layer.qweight, torch.ones((4, 4), dtype=torch.uint8), 0)
-    layer.weight_loader_v2(layer.qweight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 0)
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.weight, torch.ones((4, 4), dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), 1)
     layer.quant_method.process_weights_after_loading(layer)
 
-    assert isinstance(layer.qweight, torch.nn.Parameter)
+    assert isinstance(layer.weight, torch.nn.Parameter)
     calls: list[tuple[tuple[int, ...], int]] = []
 
-    def fake_fused_mul_mat_gguf(x, qweight, qweight_type):
-        calls.append((tuple(qweight.shape), qweight_type))
+    def fake_fused_mul_mat_gguf(x, weight, weight_type):
+        calls.append((tuple(weight.shape), weight_type))
         return torch.zeros(
-            (x.shape[0], qweight.shape[0]), dtype=x.dtype, device=x.device
+            (x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device
         )
 
     monkeypatch.setattr(
@@ -281,24 +281,24 @@ def test_gguf_qkv_shards_are_padded_in_qkv_order(monkeypatch):
     k = torch.full((2, 4), 2, dtype=torch.uint8)
     v = torch.full((2, 4), 3, dtype=torch.uint8)
     # Load out of canonical order to match GGUF tensor iteration order.
-    layer.weight_loader_v2(layer.qweight, k, "k")
-    layer.weight_loader_v2(layer.qweight, q, "q")
-    layer.weight_loader_v2(layer.qweight, v, "v")
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), "k")
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), "q")
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), "v")
+    layer.weight_loader_v2(layer.weight, k, "k")
+    layer.weight_loader_v2(layer.weight, q, "q")
+    layer.weight_loader_v2(layer.weight, v, "v")
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), "k")
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), "q")
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), "v")
 
     layer.quant_method.process_weights_after_loading(layer)
 
-    assert layer.qweight.shard_id == ["q", "k", "v"]
-    assert layer.qweight.shard_offset_map == {
+    assert layer.weight.shard_id == ["q", "k", "v"]
+    assert layer.weight.shard_offset_map == {
         "q": (0, 4, 4),
         "k": (4, 6, 4),
         "v": (6, 8, 4),
     }
-    assert torch.equal(layer.qweight[:4], q)
-    assert torch.equal(layer.qweight[4:6], k)
-    assert torch.equal(layer.qweight[6:8], v)
+    assert torch.equal(layer.weight[:4], q)
+    assert torch.equal(layer.weight[4:6], k)
+    assert torch.equal(layer.weight[6:8], v)
 
 
 def _patch_tp(monkeypatch, tp_rank: int, tp_size: int):
@@ -319,9 +319,9 @@ def _load_merged_column_shard(monkeypatch, tp_rank, loaded_weight):
         bias=False,
         quant_config=OOTGGUFConfig.from_config({}),
     )
-    layer.weight_loader_v2(layer.qweight, loaded_weight, 0)
+    layer.weight_loader_v2(layer.weight, loaded_weight, 0)
 
-    return layer.qweight.data_container[0]
+    return layer.weight.data_container[0]
 
 
 def _load_qkv_shard(monkeypatch, tp_rank, shard_id, loaded_weight):
@@ -335,9 +335,9 @@ def _load_qkv_shard(monkeypatch, tp_rank, shard_id, loaded_weight):
         bias=False,
         quant_config=OOTGGUFConfig.from_config({}),
     )
-    layer.weight_loader_v2(layer.qweight, loaded_weight, shard_id)
+    layer.weight_loader_v2(layer.weight, loaded_weight, shard_id)
 
-    return layer.qweight.data_container[0]
+    return layer.weight.data_container[0]
 
 
 def test_gguf_merged_column_shard_follows_tp_rank(monkeypatch):
@@ -388,14 +388,14 @@ def test_gguf_linear_preserves_cuda_weight_device(monkeypatch):
             disable_tp=True,
         )
 
-    layer.weight_loader_v2(layer.qweight, torch.ones((4, 4), dtype=torch.uint8), 0)
-    layer.weight_loader_v2(layer.qweight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 0)
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.weight, torch.ones((4, 4), dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), 1)
     layer.quant_method.process_weights_after_loading(layer)
 
-    assert layer.qweight.device.type == "cuda"
-    assert layer.qweight_type.device.type == "cuda"
+    assert layer.weight.device.type == "cuda"
+    assert layer.weight_type.device.type == "cuda"
 
 
 def test_gguf_merged_column_releases_shards_after_concat(monkeypatch):
@@ -413,20 +413,20 @@ def test_gguf_merged_column_releases_shards_after_concat(monkeypatch):
         quant_config=quant_config,
         disable_tp=True,
     )
-    layer.weight_loader_v2(layer.qweight, torch.ones((4, 4), dtype=torch.uint8), 0)
-    layer.weight_loader_v2(layer.qweight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 0)
-    layer.weight_loader_v2(layer.qweight_type, torch.tensor(3, dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.weight, torch.ones((4, 4), dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), 1)
 
     # The loading path keeps the pre-materialization parameter alive past
     # process_weights_after_loading; hold it here so the shards can only be
     # freed if materialization handed its containers over instead of copying.
-    source_param = layer.qweight
+    source_param = layer.weight
     shard_refs = [weakref.ref(shard) for shard in source_param.data_container]
 
     layer.quant_method.process_weights_after_loading(layer)
     gc.collect()
 
-    assert layer.qweight is not source_param
+    assert layer.weight is not source_param
     assert not source_param.data_container
     assert all(ref() is None for ref in shard_refs)

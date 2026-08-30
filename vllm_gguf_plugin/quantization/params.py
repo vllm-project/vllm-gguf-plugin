@@ -363,18 +363,18 @@ def _materialize_gguf_weight_parameter(
         data = torch.empty(0, dtype=torch.uint8, device=raw_param.device)
     else:
         data = raw_param.data
-    qweight = GGUFWeightParameter(
+    weight = GGUFWeightParameter(
         data=data,
         weight_loader=weight_loader,
         input_dim=raw_param.input_dim,
         output_dim=raw_param.output_dim,
         tensor_shape=raw_param.tensor_shape,
     )
-    qweight.data_container = list(raw_param.data_container)
-    qweight.shard_id = list(raw_param.shard_id)
-    qweight.shard_id_map = dict(raw_param.shard_id_map)
+    weight.data_container = list(raw_param.data_container)
+    weight.shard_id = list(raw_param.shard_id)
+    weight.shard_id_map = dict(raw_param.shard_id_map)
     if hasattr(raw_param, "ignore_warning"):
-        qweight.ignore_warning = raw_param.ignore_warning
+        weight.ignore_warning = raw_param.ignore_warning
     # Hand the shard tensors over rather than sharing them: the source param
     # outlives this call, and a second reference to the shards would keep them
     # resident after _create_padded_weight_param builds the concatenated copy,
@@ -382,7 +382,7 @@ def _materialize_gguf_weight_parameter(
     raw_param.data_container.clear()
     raw_param.shard_id.clear()
     raw_param.shard_id_map.clear()
-    layer.register_parameter(param_name, qweight)
+    layer.register_parameter(param_name, weight)
 
 
 def _materialize_gguf_weight_type_parameter(
@@ -403,13 +403,13 @@ def _materialize_gguf_weight_type_parameter(
         data = torch.empty(num_elements, dtype=torch.uint8, device=raw_param.device)
     else:
         data = raw_param.data
-    qweight_type = GGUFWeightTypeParameter(data=data, weight_loader=weight_loader)
-    qweight_type.num_elements = num_elements
-    qweight_type.weight_type = raw_param.weight_type
-    qweight_type.shard_weight_type = dict(raw_param.shard_weight_type)
+    weight_type = GGUFWeightTypeParameter(data=data, weight_loader=weight_loader)
+    weight_type.num_elements = num_elements
+    weight_type.weight_type = raw_param.weight_type
+    weight_type.shard_weight_type = dict(raw_param.shard_weight_type)
     if hasattr(raw_param, "ignore_warning"):
-        qweight_type.ignore_warning = raw_param.ignore_warning
-    layer.register_parameter(param_name, qweight_type)
+        weight_type.ignore_warning = raw_param.ignore_warning
+    layer.register_parameter(param_name, weight_type)
 
 
 class GGUFUninitializedParameter(_GGUFParamLoadMixin, UninitializedParameter):

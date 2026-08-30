@@ -37,8 +37,8 @@ def _fused_moe_gguf(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    qweight_type: int,
-    qweight_type2: int,
+    weight_type: int,
+    weight_type2: int,
     activation: str,
 ) -> torch.Tensor:
     activation_enum = MoEActivation.from_str(activation)
@@ -54,14 +54,14 @@ def _fused_moe_gguf(
 
     out_hidden_states = torch.empty_like(x)
     if (
-        qweight_type2 in MMQ_QUANT_TYPES
-        and qweight_type in MMQ_QUANT_TYPES
+        weight_type2 in MMQ_QUANT_TYPES
+        and weight_type in MMQ_QUANT_TYPES
         and x.shape[0] > 64
     ):
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
-        block_size = ops.ggml_moe_get_block_size(qweight_type)
+        block_size = ops.ggml_moe_get_block_size(weight_type)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size, E
@@ -72,7 +72,7 @@ def _fused_moe_gguf(
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
-            qweight_type,
+            weight_type,
             N,
             top_k,
             num_tokens,
@@ -84,7 +84,7 @@ def _fused_moe_gguf(
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
-            qweight_type2,
+            weight_type2,
             w2.shape[1],
             1,
             num_tokens * top_k,
@@ -93,16 +93,16 @@ def _fused_moe_gguf(
             topk_weights.view(num_tokens, top_k, 1)
         )
         ops.moe_sum(out, out_hidden_states)
-    elif qweight_type2 in MMVQ_QUANT_TYPES and qweight_type in MMVQ_QUANT_TYPES:
+    elif weight_type2 in MMVQ_QUANT_TYPES and weight_type in MMVQ_QUANT_TYPES:
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
 
-        out = ops.ggml_moe_a8_vec(x, w1, topk_ids, top_k, qweight_type, N, num_tokens)
+        out = ops.ggml_moe_a8_vec(x, w1, topk_ids, top_k, weight_type, N, num_tokens)
         out = act(out)
 
         out = ops.ggml_moe_a8_vec(
-            out, w2, topk_ids, 1, qweight_type2, w2.shape[1], num_tokens * top_k
+            out, w2, topk_ids, 1, weight_type2, w2.shape[1], num_tokens * top_k
         )
         out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
             topk_weights.view(num_tokens, top_k, 1)
@@ -120,9 +120,9 @@ def _fused_moe_gguf(
             inp = x[tok].reshape((1,) + x.shape[1:])
             current_hidden_state = None
             for ww, ii in zip(w, idx):
-                out = fused_mul_mat_gguf_op(inp, w1[ii], qweight_type)
+                out = fused_mul_mat_gguf_op(inp, w1[ii], weight_type)
                 out = act(out)
-                current_state = fused_mul_mat_gguf_op(out, w2[ii], qweight_type2).mul_(
+                current_state = fused_mul_mat_gguf_op(out, w2[ii], weight_type2).mul_(
                     ww
                 )
                 if current_hidden_state is None:
@@ -139,11 +139,11 @@ def _fused_moe_gguf_fake(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    qweight_type: int,
-    qweight_type2: int,
+    weight_type: int,
+    weight_type2: int,
     activation: str,
 ) -> torch.Tensor:
-    del w1, w2, topk_weights, topk_ids, qweight_type, qweight_type2, activation
+    del w1, w2, topk_weights, topk_ids, weight_type, weight_type2, activation
     return torch.empty_like(x)
 
 
@@ -181,9 +181,9 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         del params_dtype
         base_weight_loader = extra_weight_attrs.pop("weight_loader")
         tensor_shape = (num_experts, 2 * intermediate_size_per_partition, hidden_size)
-        w13_qweight = GGUFUninitializedWeightParameter(requires_grad=False)
+        w13_weight = GGUFUninitializedWeightParameter(requires_grad=False)
         set_weight_attrs(
-            w13_qweight,
+            w13_weight,
             {
                 "weight_loader": partial(
                     _gguf_moe_weight_loader, layer, base_weight_loader
@@ -194,12 +194,12 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                 "data_container": [],
             },
         )
-        set_weight_attrs(w13_qweight, extra_weight_attrs)
-        layer.register_parameter("w13_qweight", w13_qweight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+        layer.register_parameter("w13_weight", w13_weight)
 
-        w13_qweight_type = GGUFUninitializedWeightTypeParameter(requires_grad=False)
+        w13_weight_type = GGUFUninitializedWeightTypeParameter(requires_grad=False)
         set_weight_attrs(
-            w13_qweight_type,
+            w13_weight_type,
             {
                 "weight_loader": _gguf_moe_weight_type_loader,
                 "weight_type": 0,
@@ -208,13 +208,13 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                 "ignore_warning": True,
             },
         )
-        set_weight_attrs(w13_qweight_type, extra_weight_attrs)
-        layer.register_parameter("w13_qweight_type", w13_qweight_type)
+        set_weight_attrs(w13_weight_type, extra_weight_attrs)
+        layer.register_parameter("w13_weight_type", w13_weight_type)
 
         tensor_shape = (num_experts, intermediate_size_per_partition, hidden_size)
-        w2_qweight = GGUFUninitializedWeightParameter(requires_grad=False)
+        w2_weight = GGUFUninitializedWeightParameter(requires_grad=False)
         set_weight_attrs(
-            w2_qweight,
+            w2_weight,
             {
                 "weight_loader": partial(
                     _gguf_moe_weight_loader, layer, base_weight_loader
@@ -225,12 +225,12 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                 "data_container": [],
             },
         )
-        set_weight_attrs(w2_qweight, extra_weight_attrs)
-        layer.register_parameter("w2_qweight", w2_qweight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+        layer.register_parameter("w2_weight", w2_weight)
 
-        w2_qweight_type = GGUFUninitializedWeightTypeParameter(requires_grad=False)
+        w2_weight_type = GGUFUninitializedWeightTypeParameter(requires_grad=False)
         set_weight_attrs(
-            w2_qweight_type,
+            w2_weight_type,
             {
                 "weight_loader": _gguf_moe_weight_type_loader,
                 "weight_type": 0,
@@ -239,8 +239,8 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                 "ignore_warning": True,
             },
         )
-        set_weight_attrs(w2_qweight_type, extra_weight_attrs)
-        layer.register_parameter("w2_qweight_type", w2_qweight_type)
+        set_weight_attrs(w2_weight_type, extra_weight_attrs)
+        layer.register_parameter("w2_weight_type", w2_weight_type)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -268,11 +268,11 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
         return fused_moe_gguf_op(
             x,
-            layer.w13_qweight,
-            layer.w2_qweight,
+            layer.w13_weight,
+            layer.w2_weight,
             topk_weights,
             topk_ids,
-            layer.w13_qweight_type.weight_type,
-            layer.w2_qweight_type.weight_type,
+            layer.w13_weight_type.weight_type,
+            layer.w2_weight_type.weight_type,
             layer.activation.value,
         )

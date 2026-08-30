@@ -118,54 +118,59 @@ def _get_loadable_names(model: nn.Module) -> set[str]:
     }
 
 
-def _dense_weight_from_gguf_qweight(
-    qweight: torch.Tensor,
-    qweight_type: int,
+def _dense_weight_from_gguf_weight(
+    weight: torch.Tensor,
+    weight_type: int,
 ) -> torch.Tensor:
-    qtype = WeightType(qweight_type)
+    qtype = WeightType(weight_type)
     if qtype in UNQUANTIZED_TYPES:
-        return qweight
+        return weight
 
-    if not qweight.is_cuda:
-        weight = dequantize(qweight.detach().cpu().numpy(), qtype)
+    if not weight.is_cuda:
+        weight = dequantize(weight.detach().cpu().numpy(), qtype)
         return torch.from_numpy(weight).to(dtype=torch.float32)
 
     block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
-    shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
-    return ops.ggml_dequantize(qweight, int(qtype), *shape, torch.float32)
+    shape = (weight.shape[0], weight.shape[1] // type_size * block_size)
+    return ops.ggml_dequantize(weight, int(qtype), *shape, torch.float32)
 
 
 def _gguf_weights_for_loadable_names(
     weights: Iterable[tuple[str, torch.Tensor]],
     loadable_names: set[str],
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    qweight_types: dict[str, int] = {}
+    weight_types: dict[str, int] = {}
 
     for name, tensor in weights:
-        if name.endswith(".qweight_type"):
-            base_name = name[: -len(".qweight_type")]
-            qweight_types[base_name] = int(tensor.item())
-            if f"{base_name}.weight" not in loadable_names:
+        if name.endswith(".weight_type"):
+            base_name = name[: -len(".weight_type")]
+            weight_types[base_name] = int(tensor.item())
+            # Drop only when the module keeps a dense weight and no weight_type
+            # parameter (i.e. it intentionally stays unquantized). Names that
+            # do not resolve directly may still be remapped inside
+            # ``model.load_weights`` (e.g. merged ``w13`` shards), so they must
+            # pass through.
+            if name in loadable_names or f"{base_name}.weight" not in loadable_names:
                 yield name, tensor
             continue
 
-        if not name.endswith(".qweight"):
+        base_name = name.removesuffix(".weight")
+        if base_name not in weight_types:
+            # Not a quantized tensor.
             yield name, tensor
             continue
 
-        base_name = name[: -len(".qweight")]
-        weight_name = f"{base_name}.weight"
-        if weight_name not in loadable_names:
+        if name in loadable_names and f"{base_name}.weight_type" not in loadable_names:
+            # The module intentionally keeps this parameter unquantized:
+            # restore the dense weight from the packed GGUF data.
+            yield (
+                name,
+                _dense_weight_from_gguf_weight(tensor, weight_types[base_name]),
+            )
+        else:
+            # Packed path: the module registers a sibling weight_type
+            # parameter, or the name is remapped by ``model.load_weights``.
             yield name, tensor
-            continue
-
-        if base_name not in qweight_types:
-            raise ValueError(f"Missing GGUF qweight_type for {name}")
-
-        yield (
-            weight_name,
-            _dense_weight_from_gguf_qweight(tensor, qweight_types[base_name]),
-        )
 
 
 def _hf_weights_for_loadable_names(
@@ -194,7 +199,7 @@ def load_diffusion_gguf_weights(
 
     For each source:
       - The adapter-selected GGUF source loads exclusively from GGUF.
-        GGUF qweights may be restored to dense tensors when the host module
+        GGUF weights may be restored to dense tensors when the host module
         intentionally keeps that parameter unquantized.
       - All other sources (text encoder, VAE, etc.) load exclusively from HF.
 

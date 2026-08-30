@@ -77,10 +77,10 @@ def gguf_quant_weights_iterator(
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Two-pass iterator over GGUF quantized weights.
 
-    Pass 1 yields all ``qweight_type`` tensors first - weight types MUST
+    Pass 1 yields all ``weight_type`` tensors first - weight types MUST
     come before weight data for packed layers with mixed quant types.
-    Pass 2 yields all weight data (``qweight`` for quantized, original
-    name for unquantized).
+    Pass 2 yields all weight data under the original names (quantized
+    tensors keep their packed data under the ``weight`` name).
     """
 
     reader = gguf.GGUFReader(gguf_file)
@@ -91,7 +91,7 @@ def gguf_quant_weights_iterator(
         name = tensor.name
 
         if weight_type.name not in UNQUANTIZED_GGUF_TYPE_NAMES:
-            weight_type_name = name.replace("weight", "qweight_type")
+            weight_type_name = name.replace("weight", "weight_type")
             weight_type = torch.tensor(weight_type)
             yield weight_type_name, weight_type
 
@@ -100,8 +100,6 @@ def gguf_quant_weights_iterator(
         weight = tensor.data
         weight_type = tensor.tensor_type
         name = tensor.name
-        if weight_type.name not in UNQUANTIZED_GGUF_TYPE_NAMES:
-            name = name.replace("weight", "qweight")
         if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
             # BF16 is currently the only "quantization" type that isn't
             # actually quantized but is read as a raw byte tensor.
