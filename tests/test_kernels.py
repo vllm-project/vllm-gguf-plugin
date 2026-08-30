@@ -1,3 +1,5 @@
+import gguf
+import numpy as np
 import pytest
 import torch
 from gguf import GGMLQuantizationType, dequantize
@@ -9,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
 from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
 import vllm_gguf_plugin.ops as ops
+from vllm_gguf_plugin.quantization import linear
 from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
 from vllm_gguf_plugin.quantization.vocal_embeds import apply_gguf_embedding
 from vllm_gguf_plugin.triton.fused_moe import ggml_moe_a8_triton
@@ -431,3 +434,102 @@ def test_moe_triton(
         x, w13_dequant, w2_dequant, topk_weights, topk_ids
     ).reshape(output.shape)
     torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
+
+
+# Regression tests for the bounded dequantize-plus-matmul workspace in
+# vllm_gguf_plugin/quantization/linear.py: tall weights must be dequantized
+# in row chunks instead of one full-size transient allocation. These build
+# quantized weights in-process rather than using the HF sample tensors so the
+# weight shape can exercise the chunking boundaries exactly.
+
+# block_iq4_nl: one fp16 scale followed by packed 4-bit indices.
+IQ4_NL_BLOCK_VALUES, IQ4_NL_BLOCK_BYTES = gguf.GGML_QUANT_SIZES[
+    GGMLQuantizationType.IQ4_NL
+]
+# Batch size above the mmvq cutoff so _fused_mul_mat_gguf takes the
+# dequantize-plus-matmul fallback path.
+DEQUANT_BATCH_SIZE = 32
+
+
+def make_iq4_nl_qweight(rows: int, cols: int, seed: int = 0) -> torch.Tensor:
+    """Build a valid random IQ4_NL quantized weight of shape (rows, cols)."""
+    assert cols % IQ4_NL_BLOCK_VALUES == 0
+    blocks_per_row = cols // IQ4_NL_BLOCK_VALUES
+    rng = np.random.default_rng(seed)
+    scales = rng.normal(0, 0.05, size=(rows, blocks_per_row, 1)).astype(np.float16)
+    indices = rng.integers(
+        0, 256, size=(rows, blocks_per_row, IQ4_NL_BLOCK_BYTES - 2), dtype=np.uint8
+    )
+    blocks = np.concatenate([scales.view(np.uint8), indices], axis=-1)
+    return torch.tensor(blocks.reshape(rows, -1), device="cuda")
+
+
+def assert_matches_dequant_reference(
+    output: torch.Tensor, x: torch.Tensor, qweight: torch.Tensor
+) -> None:
+    weight = torch.tensor(
+        dequantize(qweight.cpu().numpy(), GGMLQuantizationType.IQ4_NL), device="cuda"
+    ).to(x.dtype)
+    # Chunked and full-size fp16 GEMMs may select different CUDA algorithms;
+    # observed differences against this reference reach ~0.039 absolute on an
+    # RTX 5060 Ti, so the 1e-2 atol used elsewhere in this file is too strict.
+    torch.testing.assert_close(output, x @ weight.T, atol=5e-2, rtol=4e-2)
+
+
+@pytest.fixture
+def dequantize_spy(monkeypatch):
+    """Record the row count of every ops.ggml_dequantize call."""
+    row_counts: list[int] = []
+    wrapped = ops.ggml_dequantize
+
+    def spy(W, quant_type, m, n, dtype):
+        row_counts.append(int(m))
+        return wrapped(W, quant_type, m, n, dtype)
+
+    monkeypatch.setattr(ops, "ggml_dequantize", spy)
+    return row_counts
+
+
+@torch.inference_mode()
+def test_dequant_workspace_bounded(dequantize_spy, monkeypatch):
+    """Tall matrices must be dequantized in row chunks below the workspace
+    bound, including a ragged final chunk, and the chunked result must match
+    an independent full dequantization."""
+    seed_everything(0)
+    # 4128 rows with a 1 MiB bound at 512 fp16 columns gives a 1024-row chunk
+    # size: four full chunks plus a ragged 32-row tail.
+    rows, cols = 4128, 512
+    max_rows = 1024 * 1024 // (cols * torch.float16.itemsize)
+    # raising=False so that on an implementation without the bound the test
+    # fails on the oversized dequantize call itself, not on this setattr.
+    monkeypatch.setattr(
+        linear, "_DEQUANT_MAX_WORKSPACE_BYTES", 1024 * 1024, raising=False
+    )
+
+    qweight = make_iq4_nl_qweight(rows, cols)
+    x = torch.randn(DEQUANT_BATCH_SIZE, cols, device="cuda", dtype=torch.float16)
+
+    output = linear._fused_mul_mat_gguf(x, qweight, GGMLQuantizationType.IQ4_NL)
+
+    assert len(dequantize_spy) > 1, "expected multiple dequantization chunks"
+    assert sum(dequantize_spy) == rows
+    assert all(m <= max_rows for m in dequantize_spy), (
+        f"dequantization call exceeded {max_rows} rows: {dequantize_spy}"
+    )
+    assert output.shape == (DEQUANT_BATCH_SIZE, rows)
+    assert_matches_dequant_reference(output, x, qweight)
+
+
+@torch.inference_mode()
+def test_dequant_small_matrix_single_call(dequantize_spy):
+    """With the default workspace bound, ordinary layer shapes keep the
+    original single full dequantization call."""
+    seed_everything(0)
+    rows, cols = 2048, 512
+    qweight = make_iq4_nl_qweight(rows, cols)
+    x = torch.randn(DEQUANT_BATCH_SIZE, cols, device="cuda", dtype=torch.float16)
+
+    output = linear._fused_mul_mat_gguf(x, qweight, GGMLQuantizationType.IQ4_NL)
+
+    assert dequantize_spy == [rows]
+    assert_matches_dequant_reference(output, x, qweight)

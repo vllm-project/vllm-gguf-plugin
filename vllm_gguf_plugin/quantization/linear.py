@@ -31,6 +31,11 @@ from .utils import (
     UNQUANTIZED_TYPES,
 )
 
+# Cap on the transient dense tensor materialized by the dequantize-plus-matmul
+# fallback: taller weights (e.g. large-vocabulary output heads) are dequantized
+# and multiplied in row chunks, which is exact since rows are independent.
+_DEQUANT_MAX_WORKSPACE_BYTES = 256 * 1024 * 1024
+
 
 def _fused_mul_mat_gguf(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
@@ -50,8 +55,25 @@ def _fused_mul_mat_gguf(
     elif qweight_type in DEQUANT_TYPES:
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
-        weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
-        y = x @ weight.T
+        row_bytes = shape[1] * x.element_size()
+        max_rows = max(_DEQUANT_MAX_WORKSPACE_BYTES // row_bytes, 1)
+        if shape[0] <= max_rows:
+            weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
+            y = x @ weight.T
+        else:
+            y = torch.empty(*x.shape[:-1], shape[0], dtype=x.dtype, device=x.device)
+            for start in range(0, shape[0], max_rows):
+                qweight_chunk = qweight[start : start + max_rows]
+                y[..., start : start + max_rows] = (
+                    x
+                    @ ops.ggml_dequantize(
+                        qweight_chunk,
+                        qweight_type,
+                        qweight_chunk.shape[0],
+                        shape[1],
+                        x.dtype,
+                    ).T
+                )
     else:
         qweight_type = WeightType(qweight_type)
         raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
