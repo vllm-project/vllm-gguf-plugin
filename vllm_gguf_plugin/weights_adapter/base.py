@@ -28,6 +28,21 @@ class BaseGGUFWeightsAdapter(ABC):
     #: model in speculative decoding) and must stay unquantized.
     extra_unquantized_modules: tuple[str, ...] = ()
 
+    #: Suffixes of module paths that must stay unquantized wherever they occur.
+    #: Use this rather than :attr:`extra_unquantized_modules` when the layers in
+    #: question are fused and repeated: naming them individually means spelling
+    #: out a prefix and a layer index, and a draft model's layer indices are
+    #: assigned relative to the target it drafts for.
+    dense_module_suffixes: tuple[str, ...] = ()
+
+    #: Modalities this adapter cannot reconstruct from GGUF weights.  Some
+    #: converters fold away information that one modality needs while leaving
+    #: the rest of the model intact; listing it here drops it from the model's
+    #: supported multimodal limits, so requests carrying it are rejected during
+    #: input validation instead of running against weights that cannot
+    #: represent them.
+    UNSUPPORTED_MODALITIES: tuple[str, ...] = ()
+
     @classmethod
     @abstractmethod
     def matches(cls, config: PretrainedConfig) -> bool:

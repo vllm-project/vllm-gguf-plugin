@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from functools import wraps
+from functools import cached_property, wraps
 from pathlib import Path
 
-import vllm.engine.arg_utils as arg_utils_module
-import vllm.transformers_utils.config as config_module
 from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.quantization import register_quantization_config
@@ -48,6 +46,68 @@ def _get_gguf_config_source(
     return model
 
 
+def _name_the_drafts_config_source(engine_args) -> bool:
+    """Fill in ``hf_config_path`` for a separate-file GGUF draft.
+
+    A ``.gguf`` path carries no config of its own, and the directory a draft
+    sits in belongs to the model it drafts for.  ``SpeculativeConfig`` takes
+    ``hf_config_path`` for exactly this case, so the only thing left to do is
+    derive the default when the caller did not name one, matching what
+    ``create_model_config`` derives for the target.
+
+    Reports whether the draft was given a config source of its own.
+    """
+    speculative_config = engine_args.speculative_config
+    if not isinstance(speculative_config, dict):
+        return False
+    draft_model = speculative_config.get("model")
+    if not _is_gguf_reference(draft_model):
+        return False
+
+    source = _get_gguf_config_source(
+        draft_model, None, speculative_config.get("hf_config_path")
+    )
+    if source == draft_model:
+        return False
+
+    local = Path(source)
+    if local.is_dir() and not (local / "config.json").exists():
+        raise ValueError(
+            f"The GGUF speculative draft {draft_model!r} needs a config, and "
+            f"{source!r} does not contain config.json. GGUF files carry no "
+            "config.json of their own, and the directory a draft sits in "
+            "belongs to the model it drafts for. Pass the draft's own config "
+            'directory as speculative_config={"hf_config_path": ...}.'
+        )
+
+    speculative_config["hf_config_path"] = source
+    if speculative_config.get("quantization") is None:
+        # Without this the draft builds unquantized layers and is then handed
+        # packed bytes.  The target gets the same treatment in
+        # ``create_model_config``.
+        speculative_config["quantization"] = "gguf"
+    return True
+
+
+def _open_the_drafts_declaration_channel(draft_model_config) -> None:
+    """Give the loader a dict to record the draft's declaration in.
+
+    A draft resolves its quantization config separately from the target, by
+    rebuilding it from ``hf_config.quantization_config``.  Nothing the loader
+    records on the config object the target's layers were built against can
+    reach it, so that dict is the only channel for the one thing a draft has to
+    be told before its own layers are built: which of its modules the GGUF file
+    stores unquantized.  ``_publish_declaration_for_a_draft`` writes the
+    declaration there, and can only do so if the dict is already present.
+
+    The contents planted here do not matter -- ``GGUFConfig.from_config`` reads
+    only the declaration, which the loader has not made yet.
+    """
+    hf_config = draft_model_config.hf_config
+    if getattr(hf_config, "quantization_config", None) is None:
+        hf_config.quantization_config = {"quant_method": "gguf"}
+
+
 def _patch_engine_args() -> None:
     if getattr(EngineArgs, "_gguf_create_model_config_patched", False):
         return
@@ -86,6 +146,8 @@ def _patch_engine_args() -> None:
         if self.speculative_config is not None:
             configured_model = configured_model or self.speculative_config.get("model")
 
+        draft_names_its_own_config = _name_the_drafts_config_source(self)
+
         config = original_create_speculative_config(self, *args, **kwargs)
         gguf_model = self.model_weights
         if (
@@ -95,27 +157,59 @@ def _patch_engine_args() -> None:
             and _is_gguf_reference(gguf_model)
         ):
             config.draft_model_config.model_weights = gguf_model
+        if config is not None and draft_names_its_own_config:
+            _open_the_drafts_declaration_channel(config.draft_model_config)
         return config
 
     EngineArgs.create_speculative_config = create_speculative_config
 
 
-def _patch_speculator_probe() -> None:
-    if getattr(arg_utils_module, "_gguf_speculator_probe_patched", False):
+def _gguf_unsupported_modalities(model_config) -> tuple[str, ...]:
+    if getattr(model_config, "quantization", None) != "gguf":
+        return ()
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None:
+        return ()
+
+    from .weights_adapter import get_weights_adapter
+
+    return tuple(get_weights_adapter(hf_config).UNSUPPORTED_MODALITIES)
+
+
+def _patch_mm_limits() -> None:
+    """Hide modalities an adapter cannot reconstruct from its GGUF weights.
+
+    Wrapping the base ``supported_mm_limits`` rather than each model's
+    ``get_supported_mm_limits`` covers every subclass at once, and every
+    consumer -- request validation, the advertised modality list, and profiling
+    -- reads that one property. Dropping a modality from it makes vLLM reject
+    those requests with its usual validation error.
+    """
+    from vllm.multimodal.processing.context import BaseProcessingInfo
+
+    if getattr(BaseProcessingInfo, "_gguf_mm_limits_patched", False):
         return
 
-    original_maybe_override = arg_utils_module.maybe_override_with_speculators
+    original = BaseProcessingInfo.supported_mm_limits.func
 
-    @wraps(original_maybe_override)
-    def maybe_override_with_speculators(model, tokenizer, *args, **kwargs):
-        if _is_gguf_reference(model):
-            return model, tokenizer, kwargs.get("vllm_speculative_config")
-        return original_maybe_override(model, tokenizer, *args, **kwargs)
+    @wraps(original)
+    def supported_mm_limits(self):
+        limits = original(self)
+        unsupported = _gguf_unsupported_modalities(self.ctx.model_config)
+        if not unsupported:
+            return limits
+        return {
+            modality: limit
+            for modality, limit in limits.items()
+            if modality not in unsupported
+        }
 
-    arg_utils_module.maybe_override_with_speculators = maybe_override_with_speculators
-    config_module.maybe_override_with_speculators = maybe_override_with_speculators
-    arg_utils_module._gguf_speculator_probe_patched = True
-    config_module._gguf_speculator_probe_patched = True
+    patched = cached_property(supported_mm_limits)
+    BaseProcessingInfo.supported_mm_limits = patched
+    # Assigning a cached_property after class creation skips __set_name__, which
+    # is what tells it which attribute to cache under.
+    patched.__set_name__(BaseProcessingInfo, "supported_mm_limits")
+    BaseProcessingInfo._gguf_mm_limits_patched = True
 
 
 def _register_omni_diffusion_quantization() -> None:
@@ -144,5 +238,5 @@ def register() -> None:
     if not isinstance(parser, GGUFConfigParser):
         register_config_parser("gguf")(GGUFConfigParser)
     _patch_engine_args()
-    _patch_speculator_probe()
+    _patch_mm_limits()
     _patch_diffusers_loader()
