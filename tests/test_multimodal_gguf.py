@@ -32,6 +32,10 @@ class GGUFMMTestConfig(NamedTuple):
     gguf_model_path: str
     prompts: list[str]
     image_names: list[str]
+    # Per-model, because a model whose image processor emits more patch tokens
+    # than MAX_MODEL_LEN leaves would have its prompt truncated -- and the
+    # comparison against HF would then be measuring the truncation.
+    max_model_len: int = MAX_MODEL_LEN
     mm_processor_kwargs: dict[str, Any] | None = None
 
 
@@ -94,6 +98,30 @@ QWEN35_MOE_CONFIG = GGUFMMTestConfig(
     image_names=_QWEN35_IMAGE_NAMES,
 )
 
+# No ``<|begin_of_text|>``: unlike Gemma 3, this tokenizer's post-processor
+# prepends it, so writing it here would produce two.
+_MUSE_GLIMMER_PROMPTS = [
+    (
+        "<|start|>user<|message|><|patch|>"
+        "What's the content in the center of the image?"
+        "<|eot|><|start|>assistant"
+    ),
+    ("<|start|>user<|message|><|patch|>What is the season?<|eot|><|start|>assistant"),
+]
+
+# The GGUF repo ships neither ``config.json`` nor a tokenizer, so the config has
+# to come from the original repo.  Naming it as the tokenizer is enough: the
+# plugin falls back to the tokenizer path when resolving the GGUF config source.
+MUSE_GLIMMER_CONFIG = GGUFMMTestConfig(
+    original_model="meta-models/Muse-Glimmer-30B",
+    gguf_model_path="meta-models/Muse-Glimmer-30B-GGUF:Q4_K_XL",
+    prompts=_MUSE_GLIMMER_PROMPTS,
+    image_names=_GEMMA3_IMAGE_NAMES,
+    # The image processor emits up to 4096 patch tokens on its own, so leave
+    # room for that plus the prompt.
+    max_model_len=8192,
+)
+
 GEMMA3_MODELS_TO_TEST = [
     pytest.param(GEMMA3_CONFIG, marks=pytest.mark.slow),
     pytest.param(GEMMA3_CONFIG_PAN_AND_SCAN, marks=pytest.mark.slow),
@@ -112,6 +140,7 @@ def _vllm_generate_greedy_logprobs(
     max_tokens: int,
     num_logprobs: int,
     dtype: str,
+    max_model_len: int,
     mm_processor_kwargs: dict[str, Any] | None,
 ) -> list[tuple[list[int], str, list[dict[int, float] | None]]]:
     """Run inference via vllm.LLM and return (token_ids, text, logprobs)."""
@@ -121,7 +150,7 @@ def _vllm_generate_greedy_logprobs(
         enforce_eager=True,
         dtype=dtype,
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-        max_model_len=MAX_MODEL_LEN,
+        max_model_len=max_model_len,
         mm_processor_kwargs=mm_processor_kwargs,
     )
     try:
@@ -260,11 +289,94 @@ def check_logprobs_close(
                 break
 
 
+# Q4_K noise has no direction, so a shift that does is the signature of a
+# conversion the adapter got wrong.  Measured across the shipped prompts and
+# three image scales, the shared prefix drifts by at most 0.20; a norm that never
+# had its offset removed shifts every logprob together and lands far outside
+# this.
+MAX_LOGPROB_BIAS = 0.5
+
+
+def check_logprobs_unbiased(
+    outputs_0_lst: list[tuple[list[int], str, list]],
+    outputs_1_lst: list[tuple[list[int], str, list]],
+    name_0: str,
+    name_1: str,
+) -> None:
+    """Compare the two runs quantitatively wherever that is meaningful.
+
+    Stricter than :func:`check_logprobs_close`, which compares nothing at all
+    while the tokens agree, tolerates the first divergence with a warning, and
+    zips the two sequences without checking their lengths -- so an empty run, a
+    truncated run, and a shared token sequence whose distribution has drifted all
+    pass it.  None of those show up as a load error for Muse Glimmer, whose four
+    conversions each produce fluent output when they are undone wrongly.
+
+    Comparison stops at the first divergence, and that boundary is the whole
+    point rather than a shortcut.  Greedy decoding conditions each step on what it
+    already emitted, so up to and including the divergence both runs share a
+    context and a logprob difference is attributable; past it they are completing
+    different sentences, and position-wise differences measure that instead.  The
+    gap is not subtle -- the same outputs drift by 0.03 to 0.20 across the shared
+    prefix and by up to 1.09 once the contexts have parted.
+
+    So the agreeing prefix, which the older comparison skips, is exactly where a
+    systematic shift is visible, and a bound there is what this adds.
+    """
+    assert len(outputs_0_lst) == len(outputs_1_lst)
+
+    for prompt_idx, (out_0, out_1) in enumerate(zip(outputs_0_lst, outputs_1_lst)):
+        ids_0, text_0, lps_0 = out_0
+        ids_1, text_1, lps_1 = out_1
+        context = f"Test {prompt_idx}:\n{name_0}: {text_0!r}\n{name_1}: {text_1!r}"
+
+        assert len(ids_0) == len(ids_1), (
+            f"{context}\ngenerated {len(ids_0)} and {len(ids_1)} tokens; a "
+            "comparison over the shorter of the two would pass on a run that "
+            "stopped early"
+        )
+        assert ids_0, f"{context}\nboth runs generated nothing"
+
+        diverged = next(
+            (idx for idx, (a, b) in enumerate(zip(ids_0, ids_1)) if a != b), None
+        )
+        if diverged is None:
+            shared = len(ids_0)
+        else:
+            shared = diverged + 1
+            divergence = (
+                f"{context}\nfirst differ at token {diverged}: "
+                f"{name_0} chose {ids_0[diverged]}, {name_1} chose "
+                f"{ids_1[diverged]}"
+            )
+            # Each side's choice has to at least be a candidate for the other.
+            # A row permutation left undone picks tokens the reference would
+            # never rank, which is what this catches.
+            assert ids_0[diverged] in lps_1[diverged], divergence
+            assert ids_1[diverged] in lps_0[diverged], divergence
+
+        differences = [
+            lps_1[idx][tok] - lps_0[idx][tok]
+            for idx, tok in enumerate(ids_0[:shared])
+            if lps_0 and lps_1 and tok in lps_0[idx] and tok in lps_1[idx]
+        ]
+        assert differences, f"{context}\nno position was comparable"
+
+        bias = sum(differences) / len(differences)
+        assert abs(bias) <= MAX_LOGPROB_BIAS, (
+            f"{context}\nmean logprob difference {bias:+.3f} over "
+            f"{len(differences)} shared positions exceeds {MAX_LOGPROB_BIAS}; "
+            "quantization noise has no direction, so a drift this one-sided "
+            "points at a norm offset or a discarded tensor"
+        )
+
+
 def run_multimodal_gguf_test(
     model: GGUFMMTestConfig,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    compare=check_logprobs_close,
 ) -> None:
     images = [ImageAsset(name).pil_image for name in model.image_names]
     size_factors = [0.25, 0.5, 1.0]
@@ -286,6 +398,7 @@ def run_multimodal_gguf_test(
             max_tokens=max_tokens,
             num_logprobs=num_logprobs,
             dtype=dtype,
+            max_model_len=model.max_model_len,
             mm_processor_kwargs=model.mm_processor_kwargs,
         )
         for prompts, scaled_images in inputs_per_image
@@ -304,7 +417,7 @@ def run_multimodal_gguf_test(
     ]
 
     for hf_outputs, gguf_outputs in zip(hf_outputs_per_case, gguf_outputs_per_case):
-        check_logprobs_close(
+        compare(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=gguf_outputs,
             name_0="hf",
@@ -350,3 +463,126 @@ def test_qwen35_mm_gguf(
     num_logprobs: int,
 ) -> None:
     run_multimodal_gguf_test(model, dtype, max_tokens, num_logprobs)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for multimodal GGUF tests.",
+)
+@pytest.mark.parametrize(
+    "model",
+    [pytest.param(MUSE_GLIMMER_CONFIG, marks=pytest.mark.slow)],
+)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [MAX_TOKENS])
+@pytest.mark.parametrize("num_logprobs", [NUM_LOGPROBS])
+def test_muse_glimmer_mm_gguf(
+    model: GGUFMMTestConfig,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+    """Images only, compared quantitatively rather than for fluency.
+
+    Video is out of scope here rather than covered: the converter keeps only the
+    sum of the patch embedding's per-time-step blocks, so it is refused during
+    input validation instead, and ``test_plugin.py`` is what holds that gate in
+    place.
+
+    The comparison is :func:`check_logprobs_unbiased` because every conversion
+    this adapter undoes -- the Q/K row permutation, the norm offset, the
+    discarded synthetic Q/K norms, the patch embedding split -- loads cleanly
+    when it is wrong and produces fluent, incorrect text.  A comparison that
+    tolerates the first divergence cannot tell that apart from quantization
+    noise.
+    """
+    run_multimodal_gguf_test(
+        model, dtype, max_tokens, num_logprobs, compare=check_logprobs_unbiased
+    )
+
+
+def _outputs(tokens: list[int], logprob: float = -0.5, top: float = -0.1):
+    """One prompt's worth of output, with *tokens* chosen at *logprob*."""
+    return [
+        (
+            tokens,
+            "".join(chr(97 + tok % 26) for tok in tokens),
+            [{tok: logprob, -1: top} for tok in tokens],
+        )
+    ]
+
+
+def test_unbiased_check_accepts_an_identical_run():
+    reference = _outputs([1, 2, 3, 4])
+
+    check_logprobs_unbiased(reference, reference, "a", "b")
+
+
+def test_unbiased_check_accepts_noise_without_a_direction():
+    """Q4_K noise is what this comparison has to tolerate."""
+    left = _outputs([1, 2, 3, 4], logprob=-0.5)
+    right = [
+        (
+            left[0][0],
+            left[0][1],
+            [
+                {tok: lp, -1: -0.1}
+                for tok, lp in zip(left[0][0], (-0.4, -0.6, -0.45, -0.55))
+            ],
+        )
+    ]
+
+    check_logprobs_unbiased(left, right, "a", "b")
+
+
+def test_unbiased_check_rejects_a_run_that_stopped_early():
+    """The condition that let a truncated run pass: zip over the shorter side."""
+    with pytest.raises(AssertionError, match="stopped early"):
+        check_logprobs_unbiased(_outputs([1, 2, 3, 4]), _outputs([1, 2]), "a", "b")
+
+
+def test_unbiased_check_rejects_an_empty_run():
+    with pytest.raises(AssertionError, match="generated nothing"):
+        check_logprobs_unbiased(_outputs([]), _outputs([]), "a", "b")
+
+
+def test_unbiased_check_rejects_a_one_sided_logprob_shift():
+    """The condition that mattered most: same tokens, drifted distribution.
+
+    A norm whose offset was never removed looks exactly like this -- every
+    logprob pushed the same way, with the argmax often unchanged.
+    """
+    left = _outputs([1, 2, 3, 4], logprob=-0.5)
+    right = _outputs([1, 2, 3, 4], logprob=-2.0)
+
+    with pytest.raises(AssertionError, match="one-sided"):
+        check_logprobs_unbiased(left, right, "a", "b")
+
+
+def test_unbiased_check_rejects_a_choice_the_reference_would_never_rank():
+    """What an undone Q/K row permutation produces at the divergence."""
+    left = [([1, 2], "a", [{1: -0.1}, {2: -0.5}])]
+    right = [([1, 9], "b", [{1: -0.1}, {9: -0.5}])]
+
+    with pytest.raises(AssertionError, match="first differ at token"):
+        check_logprobs_unbiased(left, right, "a", "b")
+
+
+def test_unbiased_check_ignores_drift_once_the_contexts_have_parted():
+    """Pins the boundary, which is the part easiest to "strengthen" wrongly.
+
+    Greedy decoding conditions on what it already emitted, so past the divergence
+    the two runs are completing different sentences.  Comparing there reported a
+    bias of -1.0 on outputs that were both correct descriptions of the image,
+    which is measuring the divergence rather than the weights.
+    """
+    left = [([1, 2, 3, 4], "a", [{1: -0.1}, {2: -0.5, 9: -0.6}, {3: -0.5}, {4: -0.5}])]
+    right = [
+        (
+            [1, 9, 8, 7],
+            "b",
+            [{1: -0.1}, {9: -0.5, 2: -0.6}, {8: -0.5, 3: -9.0}, {7: -0.5, 4: -9.0}],
+        )
+    ]
+
+    check_logprobs_unbiased(left, right, "a", "b")

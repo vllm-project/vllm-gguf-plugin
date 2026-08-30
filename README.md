@@ -92,6 +92,7 @@ starting points:
 | Vision-language | Gemma 3 | Q4_0 backbone with F16 projector |
 | Vision-language | Qwen 3.5 | Q4_K_M backbone with BF16 projector |
 | Vision-language | Qwen 3.6 | UD-IQ2_XXS backbone with BF16 projector |
+| Vision-language | Muse Glimmer | Q4_K_XL backbone with Q4_K_M projector (images only) |
 | Image generation | Z-Image-Turbo | Q4_0 |
 | Image generation | FLUX.2-klein | Q8_0 |
 
