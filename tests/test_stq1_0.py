@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for STQ1_0 support: codec round-trip, layout ground truth, kernels."""
 
+from types import SimpleNamespace
+
 import gguf
-import numpy as np
 import pytest
 import torch
-from types import SimpleNamespace
 
 from vllm_gguf_plugin.gguf_files import GGUFModelFiles
 from vllm_gguf_plugin.gguf_stq import (
@@ -60,9 +60,7 @@ def test_dequantize_stq1_0_roundtrip():
     original = make_ternary((3, 512))
     raw = encode_stq1_0(original)
     dequantized = dequantize_stq1_0(torch.from_numpy(raw))
-    torch.testing.assert_close(
-        dequantized, torch.from_numpy(original), rtol=0, atol=0
-    )
+    torch.testing.assert_close(dequantized, torch.from_numpy(original), rtol=0, atol=0)
 
 
 @pytest.fixture(scope="module")
@@ -105,9 +103,7 @@ def test_stq1_0_kernel_dequantize():
     original = torch.from_numpy(make_ternary((4, 512)))
     qweight = torch.from_numpy(encode_stq1_0(original.numpy())).cuda()
     output = ops.ggml_dequantize(qweight, STQ1_0_TYPE_ID, 4, 512, torch.float32)
-    torch.testing.assert_close(
-        output.cpu(), original, atol=1e-3, rtol=1e-3
-    )
+    torch.testing.assert_close(output.cpu(), original, atol=1e-3, rtol=1e-3)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -135,8 +131,9 @@ def test_stq1_0_kernel_moe_vec_large_batch():
     qweight = torch.from_numpy(encode_stq1_0(original.numpy())).cuda()
     tokens, top_k = 33_000, 2  # 66000 > 65535
     x = torch.rand((tokens, ncols), dtype=torch.bfloat16, device="cuda")
-    topk_ids = torch.randint(0, num_experts, (tokens, top_k), dtype=torch.int32,
-                             device="cuda")
+    topk_ids = torch.randint(
+        0, num_experts, (tokens, top_k), dtype=torch.int32, device="cuda"
+    )
     out = ops.ggml_moe_a8_vec(
         x, qweight, topk_ids, top_k, STQ1_0_TYPE_ID, nrows, tokens
     )

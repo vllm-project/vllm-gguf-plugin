@@ -54,7 +54,7 @@ def make_ternary(shape, d=0.25, seed=1) -> np.ndarray:
     idx = np.random.default_rng(seed).integers(0, 32, size=(*lead, n // 256, 64))
     qpack = cb[idx]
     lanes = (qpack[..., None] >> (2 * np.arange(4))) & 3
-    vals = (lanes.astype(np.float32) - 1)  # [..., n/256, group(64), p(4)]
+    vals = lanes.astype(np.float32) - 1  # [..., n/256, group(64), p(4)]
     # [..., nb, chunk, gloc, p] -> [..., nb, chunk, p, gloc] -> [..., nb, 256]
     vals = vals.reshape(*lead, n // 256, 4, 16, 4).swapaxes(-1, -2)
     return (vals.reshape(*lead, n) * d).astype(np.float32)
