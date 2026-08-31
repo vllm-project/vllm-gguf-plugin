@@ -109,6 +109,26 @@ class _FakeModel(nn.Module):
         return loaded
 
 
+class _MappedTextEncoderModel(_FakeModel):
+    """Model whose encoder loader maps checkpoint names to fused parameters."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.text_encoder = nn.Linear(2, 2, bias=False)
+
+    def load_weights(self, weights) -> set[str]:
+        mapped = (
+            (
+                "text_encoder.weight"
+                if name == "text_encoder.checkpoint_projection.weight"
+                else name,
+                tensor,
+            )
+            for name, tensor in weights
+        )
+        return super().load_weights(mapped)
+
+
 def _make_sources():
     return [
         DiffusionWeightSource(prefix="transformer.", subfolder="transformer"),
@@ -350,6 +370,84 @@ def test_load_gguf_source_is_selected_by_adapter(monkeypatch: pytest.MonkeyPatch
     assert "transformer.weight" in loaded
     assert hf_calls == ["transformer"]
     assert torch.allclose(model.vae.weight, torch.full((2, 2), 4.0))
+
+
+def test_load_gguf_rejects_multiple_matching_component_sources(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A single GGUF must not initialize two partition-specific DiTs."""
+    model = _FakeModel()
+
+    class _Adapter:
+        def weights_iterator(self):
+            raise AssertionError(
+                "weights must not be read after source validation fails"
+            )
+
+    import vllm_gguf_plugin.weights_adapter.diffusion.loader as _loader_mod
+
+    monkeypatch.setattr(
+        _loader_mod, "resolve_gguf_model_path", lambda **kw: "dummy.gguf"
+    )
+    monkeypatch.setattr(
+        _loader_mod, "get_diffusion_gguf_adapter", lambda *a, **kw: _Adapter()
+    )
+
+    sources = [
+        DiffusionWeightSource(prefix="transformer.", subfolder="transformer"),
+        DiffusionWeightSource(prefix="transformers_ref.", subfolder="transformer"),
+    ]
+    with pytest.raises(ValueError, match="must match exactly one weight source"):
+        load_diffusion_gguf_weights(
+            gguf_model="dummy.gguf",
+            model=model,
+            model_class_name="MiniMaxH3Pipeline",
+            model_type=None,
+            sources=sources,
+            hf_weights_fn=lambda _source: iter(()),
+        )
+
+
+def test_hf_component_weights_reach_model_checkpoint_mapper(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """HF component keys may need model-specific mapping before they are loadable."""
+    model = _MappedTextEncoderModel()
+
+    class _Adapter:
+        def weights_iterator(self):
+            yield "weight", torch.ones((2, 2))
+            yield "bias", torch.zeros(2)
+
+    import vllm_gguf_plugin.weights_adapter.diffusion.loader as _loader_mod
+
+    monkeypatch.setattr(
+        _loader_mod, "resolve_gguf_model_path", lambda **kw: "dummy.gguf"
+    )
+    monkeypatch.setattr(
+        _loader_mod, "get_diffusion_gguf_adapter", lambda *a, **kw: _Adapter()
+    )
+
+    sources = [
+        DiffusionWeightSource(prefix="transformer.", subfolder="transformer"),
+        DiffusionWeightSource(prefix="text_encoder.", subfolder="text_encoder"),
+    ]
+
+    def hf_fn(source: DiffusionWeightSource):
+        if source.prefix == "text_encoder.":
+            yield "text_encoder.checkpoint_projection.weight", torch.full((2, 2), 5.0)
+
+    loaded = load_diffusion_gguf_weights(
+        gguf_model="dummy.gguf",
+        model=model,
+        model_class_name=None,
+        model_type=None,
+        sources=sources,
+        hf_weights_fn=hf_fn,
+    )
+
+    assert "text_encoder.weight" in loaded
+    assert torch.allclose(model.text_encoder.weight, torch.full((2, 2), 5.0))
 
 
 def test_load_gguf_skips_hf_when_complete(monkeypatch: pytest.MonkeyPatch):
