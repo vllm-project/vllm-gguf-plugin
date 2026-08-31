@@ -42,13 +42,13 @@ def test_flux2_klein_adapter_renames_core_projection_paths(
         "gguf_quant_weights_iterator",
         lambda _path: iter(
             [
-                ("img_in.qweight", torch.ones((1, 1))),
-                ("time_in.in_layer.qweight_type", torch.tensor(1)),
+                ("img_in.weight", torch.ones((1, 1))),
+                ("time_in.in_layer.weight_type", torch.tensor(1)),
                 (
                     "double_blocks.0.img_attn.norm.query_norm.weight",
                     torch.full((1, 1), 2.0),
                 ),
-                ("final_layer.linear.qweight", torch.full((1, 1), 3.0)),
+                ("final_layer.linear.weight", torch.full((1, 1), 3.0)),
             ]
         ),
     )
@@ -58,10 +58,10 @@ def test_flux2_klein_adapter_renames_core_projection_paths(
     weights = list(adapter.weights_iterator())
     names = [name for name, _ in weights]
 
-    assert "x_embedder.qweight" in names
-    assert "time_guidance_embed.timestep_embedder.linear_1.qweight_type" in names
+    assert "x_embedder.weight" in names
+    assert "time_guidance_embed.timestep_embedder.linear_1.weight_type" in names
     assert "transformer_blocks.0.attn.norm_q.weight" in names
-    assert "proj_out.qweight" in names
+    assert "proj_out.weight" in names
 
 
 def test_flux2_klein_adapter_swaps_final_adaln_shift_and_scale(

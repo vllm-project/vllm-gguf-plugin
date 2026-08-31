@@ -81,13 +81,13 @@ def tiny_hy_v4_stq(tmp_path_factory):
 def test_stq1_0_experts_passed_through(tiny_hy_v4_stq):
     """STQ1_0 expert tensors must reach the model in their native format."""
     originals, loaded = tiny_hy_v4_stq
-    # qweight_type is not split per expert (0-dim), it stays at experts.0.
-    type_name = "model.layers.1.mlp.experts.0.gate_proj.qweight_type"
+    # weight_type is not split per expert (0-dim), it stays at experts.0.
+    type_name = "model.layers.1.mlp.experts.0.gate_proj.weight_type"
     assert int(loaded[type_name].item()) == STQ1_0_TYPE_ID
 
     gate = originals["blk.1.ffn_gate_exps.weight"]
     for expert_id in (0, 3):
-        name = f"model.layers.1.mlp.experts.{expert_id}.gate_proj.qweight"
+        name = f"model.layers.1.mlp.experts.{expert_id}.gate_proj.weight"
         assert name in loaded
         # Native STQ1_0 bytes: 256 bytes of weights -> 42 bytes per block.
         assert loaded[name].dtype == torch.uint8

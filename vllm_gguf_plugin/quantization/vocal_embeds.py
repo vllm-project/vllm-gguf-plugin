@@ -78,34 +78,34 @@ def recursive_replace_vocab_modules(
 
 def _apply_gguf_embedding(
     x: torch.Tensor,
-    qweight: torch.Tensor,
-    qweight_type: int,
+    weight: torch.Tensor,
+    weight_type: int,
     hidden_size: int,
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    if qweight_type in UNQUANTIZED_TYPES:
-        return torch.embedding(qweight, x)
-    if qweight_type in DEQUANT_TYPES:
-        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+    if weight_type in UNQUANTIZED_TYPES:
+        return torch.embedding(weight, x)
+    if weight_type in DEQUANT_TYPES:
+        block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
         x_flat = x.flatten()
-        assert hidden_size == qweight.shape[1] // type_size * block_size
-        quant = torch.index_select(qweight, dim=0, index=x_flat)
+        assert hidden_size == weight.shape[1] // type_size * block_size
+        quant = torch.index_select(weight, dim=0, index=x_flat)
         dequant = ops.ggml_dequantize(
-            quant, qweight_type, hidden_size, x_flat.shape[0], dtype
+            quant, weight_type, hidden_size, x_flat.shape[0], dtype
         )
         return dequant.view(*x.shape, hidden_size)
-    qweight_type = WeightType(qweight_type)
-    raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
+    weight_type = WeightType(weight_type)
+    raise NotImplementedError(f"Unsupported GGUF quantization type: {weight_type}")
 
 
 def _apply_gguf_embedding_fake(
     x: torch.Tensor,
-    qweight: torch.Tensor,
-    qweight_type: int,
+    weight: torch.Tensor,
+    weight_type: int,
     hidden_size: int,
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    del qweight, qweight_type
+    del weight, weight_type
     return torch.empty(*x.shape, hidden_size, dtype=dtype, device=x.device)
 
 
@@ -139,9 +139,9 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
         extra_weight_attrs.pop("weight_loader", None)
 
         tensor_shape = (output_size_per_partition, input_size_per_partition)
-        qweight = GGUFUninitializedWeightParameter(requires_grad=False)
+        weight = GGUFUninitializedWeightParameter(requires_grad=False)
         set_weight_attrs(
-            qweight,
+            weight,
             {
                 "weight_loader": partial(_gguf_embedding_weight_loader, layer),
                 "input_dim": 1,
@@ -152,12 +152,12 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
                 "shard_id_map": {},
             },
         )
-        set_weight_attrs(qweight, extra_weight_attrs)
-        layer.register_parameter("qweight", qweight)
+        set_weight_attrs(weight, extra_weight_attrs)
+        layer.register_parameter("weight", weight)
 
-        qweight_type = GGUFUninitializedWeightTypeParameter(requires_grad=False)
+        weight_type = GGUFUninitializedWeightTypeParameter(requires_grad=False)
         set_weight_attrs(
-            qweight_type,
+            weight_type,
             {
                 "weight_loader": _gguf_embedding_weight_type_loader,
                 "weight_type": 0,
@@ -166,31 +166,31 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
                 "ignore_warning": True,
             },
         )
-        set_weight_attrs(qweight_type, extra_weight_attrs)
-        layer.register_parameter("qweight_type", qweight_type)
+        set_weight_attrs(weight_type, extra_weight_attrs)
+        layer.register_parameter("weight_type", weight_type)
 
-    def _materialize_qweight(self, layer: torch.nn.Module) -> None:
+    def _materialize_weight(self, layer: torch.nn.Module) -> None:
         _materialize_gguf_weight_parameter(
             layer,
-            "qweight",
+            "weight",
             fallback_weight_loader=partial(_gguf_embedding_weight_loader, layer),
         )
 
-    def _materialize_qweight_type(self, layer: torch.nn.Module) -> None:
+    def _materialize_weight_type(self, layer: torch.nn.Module) -> None:
         _materialize_gguf_weight_type_parameter(
             layer,
-            "qweight_type",
+            "weight_type",
             fallback_weight_loader=_gguf_embedding_weight_type_loader,
         )
 
     def embedding(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         from . import apply_gguf_embedding as apply_gguf_embedding_op
 
-        qweight = layer.qweight
-        qweight_type = layer.qweight_type.weight_type
-        hidden_size = qweight.tensor_shape[1]
+        weight = layer.weight
+        weight_type = layer.weight_type.weight_type
+        hidden_size = weight.tensor_shape[1]
         return apply_gguf_embedding_op(
-            x, qweight, qweight_type, hidden_size, dtype=self.params_dtype
+            x, weight, weight_type, hidden_size, dtype=self.params_dtype
         )
 
     def tie_weights(self, layer: torch.nn.Module, embed_tokens: VocabParallelEmbedding):

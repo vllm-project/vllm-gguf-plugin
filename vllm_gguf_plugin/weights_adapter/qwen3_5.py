@@ -284,13 +284,23 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
         weight: torch.Tensor,
         text_config: PretrainedConfig,
         layout: GGUFHeadTilingLayout,
+        quantized_bases: set[str],
     ) -> torch.Tensor | None:
-        if name.endswith("qweight_type"):
+        if name.endswith("weight_type"):
             return None
-        base = name.removesuffix(".qweight").removesuffix(".weight")
+        base = name.removesuffix(".weight")
         num_key_heads = text_config.linear_num_key_heads
         key_dim = text_config.linear_key_head_dim
-        if base.endswith("linear_attn.out_proj") and name.endswith(".weight"):
+        # Packed quantized tensors are only excluded from the dense out_proj
+        # restore: reordering dim=1 would corrupt packed columns. Their layout
+        # is instead handled by ``input_to_gguf``/``shard_weight`` at runtime.
+        # The dim=0 reorders below permute whole rows, so they are safe (and
+        # required) for packed quantized weights as well.
+        if (
+            base.endswith("linear_attn.out_proj")
+            and name.endswith(".weight")
+            and base not in quantized_bases
+        ):
             return layout.weight_to_vllm(weight, dim=1)
         if base.endswith(".A_log"):
             return layout.weight_to_vllm(torch.log(-weight), dim=0, head_dim=1)
@@ -322,10 +332,14 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
 
         def transformed() -> Iterable[GGUFWeight]:
             patch_embed_parts: dict[str, torch.Tensor] = {}
+            quantized_bases: set[str] = set()
             for name, weight in weights:
+                # weight_type entries arrive before their packed weight data.
+                if name.endswith(".weight_type"):
+                    quantized_bases.add(name.removesuffix(".weight_type"))
                 if layout is not None:
                     reordered = self._restore_gdn_weight(
-                        name, weight, text_config, layout
+                        name, weight, text_config, layout, quantized_bases
                     )
                     if reordered is not None:
                         yield name, reordered
@@ -358,6 +372,7 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
                     name.endswith(".weight")
                     and weight.dim() == 1
                     and "norm" not in name
+                    and name.removesuffix(".weight") not in quantized_bases
                 ):
                     weight = weight.unsqueeze(0)
                 yield name, weight
@@ -420,10 +435,18 @@ class Qwen35MtpGGUFAdapter(BaseGGUFWeightsAdapter):
         del model_config
 
         def transformed() -> Iterable[GGUFWeight]:
+            quantized_bases: set[str] = set()
             for name, weight in weights:
+                # weight_type entries arrive before their packed weight data.
+                if name.endswith(".weight_type"):
+                    quantized_bases.add(name.removesuffix(".weight_type"))
                 if name.endswith(_MTP_NORM_SUFFIXES):
                     weight = weight - 1
-                elif name.endswith(".weight") and weight.dim() == 1:
+                elif (
+                    name.endswith(".weight")
+                    and weight.dim() == 1
+                    and name.removesuffix(".weight") not in quantized_bases
+                ):
                     weight = weight.unsqueeze(0)
                 yield name, weight
 

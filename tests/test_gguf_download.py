@@ -96,6 +96,69 @@ class TestGGUFDownload:
         with pytest.raises(ValueError, match="Downloaded GGUF files not found"):
             download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
 
+    # The tests above mock glob.glob, so they assert the mock rather than the
+    # resolution. These use a real directory tree instead.
+
+    @staticmethod
+    def _make_repo(root, names):
+        for name in names:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        return str(root)
+
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_finds_quant_published_in_a_subdirectory(
+        self, mock_download, tmp_path
+    ):
+        """snapshot_download's fnmatch spans '/', so the local scan must too."""
+        folder = self._make_repo(
+            tmp_path,
+            [
+                "UD-Q2_K_XL/model-UD-Q2_K_XL-00001-of-00002.gguf",
+                "UD-Q2_K_XL/model-UD-Q2_K_XL-00002-of-00002.gguf",
+                "UD-Q4_K_XL/model-UD-Q4_K_XL-00001-of-00001.gguf",
+            ],
+        )
+        mock_download.return_value = folder
+
+        result = download_gguf("unsloth/Some-MoE-GGUF", "UD-Q2_K_XL")
+
+        assert result == f"{folder}/UD-Q2_K_XL/model-UD-Q2_K_XL-00001-of-00002.gguf"
+
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_still_finds_top_level_files(self, mock_download, tmp_path):
+        folder = self._make_repo(tmp_path, ["model-Q6_K.gguf", "model-Q8_0.gguf"])
+        mock_download.return_value = folder
+
+        result = download_gguf("unsloth/Some-GGUF", "Q6_K")
+
+        assert result == f"{folder}/model-Q6_K.gguf"
+
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_skips_the_multimodal_projector(
+        self, mock_download, tmp_path
+    ):
+        """A bare precision quant type also matches ``mmproj-BF16.gguf``."""
+        folder = self._make_repo(
+            tmp_path, ["mmproj-BF16.gguf", "gemma-3-4b-it-BF16.gguf"]
+        )
+        mock_download.return_value = folder
+
+        result = download_gguf("unsloth/gemma-3-4b-it-GGUF", "BF16")
+
+        assert result == f"{folder}/gemma-3-4b-it-BF16.gguf"
+
+    @patch("vllm_gguf_plugin.weight_utils.snapshot_download")
+    def test_download_gguf_raises_when_only_a_projector_matches(
+        self, mock_download, tmp_path
+    ):
+        folder = self._make_repo(tmp_path, ["mmproj-F16.gguf"])
+        mock_download.return_value = folder
+
+        with pytest.raises(ValueError, match="Downloaded GGUF files not found"):
+            download_gguf("unsloth/gemma-3-4b-it-GGUF", "F16")
+
     @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
     @patch("vllm_gguf_plugin.weight_utils.list_filtered_repo_files")
     def test_download_mmproj_prefers_bfloat16(self, mock_list, mock_download):

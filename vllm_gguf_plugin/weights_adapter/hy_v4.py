@@ -161,19 +161,19 @@ class HYV4GGUFAdapter(BaseGGUFWeightsAdapter):
 
         def transformed() -> Iterable[GGUFWeight]:
             kv_b_types: dict[str, int] = {}
-            # layer prefix -> {"k_b"/"v_b": (qweight, qweight_type)}
+            # layer prefix -> {"k_b"/"v_b": (weight, weight_type)}
             pending_kv_b: dict[str, dict[str, tuple[torch.Tensor, int]]] = {}
-            # base name (without .qweight) -> qweight_type, for indexer wk
+            # base name (without .weight) -> weight_type, for indexer wk
             pending_wk_types: dict[str, int] = {}
 
             for name, weight in weights:
                 if ".kv_b_proj.k_b." in name or ".kv_b_proj.v_b." in name:
-                    if name.endswith(".qweight_type"):
-                        kv_b_types[name.removesuffix(".qweight_type")] = int(
+                    if name.endswith(".weight_type"):
+                        kv_b_types[name.removesuffix(".weight_type")] = int(
                             weight.item()
                         )
                         continue
-                    base = name.removesuffix(".qweight").removesuffix(".weight")
+                    base = name.removesuffix(".weight")
                     prefix, _, part = base.rpartition(".kv_b_proj.")
                     parts = pending_kv_b.setdefault(prefix, {})
                     parts[part] = (weight, kv_b_types.pop(base, None))
@@ -184,18 +184,18 @@ class HYV4GGUFAdapter(BaseGGUFWeightsAdapter):
                         merged = merge_kv_b_proj(k_b, v_b).to(dtype)
                         yield f"{prefix}.kv_b_proj.weight", merged
                     continue
-                if name.endswith(".indexer.wk.qweight_type"):
-                    base = name.removesuffix(".qweight_type")
+                if name.endswith(".indexer.wk.weight_type"):
+                    base = name.removesuffix(".weight_type")
                     pending_wk_types[base] = int(weight.item())
                     continue
-                if name.endswith((".indexer.wk.qweight", ".indexer.wk.weight")):
+                if name.endswith(".indexer.wk.weight"):
                     # indexer.wk_weights_proj is built without a quant config,
                     # so a GGUF-quantized wk is dequantized to a dense weight.
-                    base = name.removesuffix(".qweight").removesuffix(".weight")
-                    qweight_type = pending_wk_types.pop(base, None)
+                    base = name.removesuffix(".weight")
+                    weight_type = pending_wk_types.pop(base, None)
                     yield (
                         f"{base}.weight",
-                        _dequantize_gguf(weight, qweight_type).to(dtype),
+                        _dequantize_gguf(weight, weight_type).to(dtype),
                     )
                     continue
                 yield name, weight

@@ -40,16 +40,31 @@ def download_gguf(
         ignore_patterns=ignore_patterns,
     )
 
-    local_files: list[str] = []
+    matched: set[str] = set()
     for pattern in allow_patterns:
-        local_files.extend(glob.glob(os.path.join(folder, pattern)))
+        # ``snapshot_download`` matched these same patterns with fnmatch against
+        # repo-relative paths, where ``*`` spans ``/``. Plain ``glob`` does not
+        # cross a directory separator, so a quant published in a per-quant
+        # subdirectory was downloaded and then reported as missing. ``**`` with
+        # recursive=True matches zero or more directories, which covers both
+        # layouts.
+        matched.update(glob.glob(os.path.join(folder, "**", pattern), recursive=True))
+
+    # A bare precision quant type such as BF16 also matches ``mmproj-BF16.gguf``.
+    # The projector is resolved separately by ``download_mmproj``; returning it
+    # here would load the vision tower as the backbone.
+    local_files = [
+        path for path in matched if "mmproj" not in os.path.basename(path).lower()
+    ]
 
     if not local_files:
         raise ValueError(
             f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
         )
 
-    local_files.sort(key=lambda x: (x.count("-"), x))
+    # Rank on the file name alone: a subdirectory component would otherwise
+    # count towards the shard heuristic and reorder the candidates.
+    local_files.sort(key=lambda path: (os.path.basename(path).count("-"), path))
     return local_files[0]
 
 
@@ -173,8 +188,7 @@ def gguf_quant_weights_iterator_multi(
 
             weight_type = tensor.tensor_type
             if weight_type.name not in _QUANT_TYPES:
-                yield name.replace("weight", "qweight_type"), torch.tensor(weight_type)
-                name = name.replace("weight", "qweight")
+                yield name.replace("weight", "weight_type"), torch.tensor(weight_type)
 
             weight = tensor.data
             if weight_type.name == "BF16" and weight.dtype == np.uint8:

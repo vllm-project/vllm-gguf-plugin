@@ -47,10 +47,10 @@ def test_z_image_adapter_renames_known_gguf_tensor_paths(
         "gguf_quant_weights_iterator",
         lambda _path: iter(
             [
-                ("model.diffusion_model.final_layer.qweight", torch.ones((1, 1))),
-                ("model.diffusion_model.x_embedder.qweight_type", torch.tensor(1)),
+                ("model.diffusion_model.final_layer.weight", torch.ones((1, 1))),
+                ("model.diffusion_model.x_embedder.weight_type", torch.tensor(1)),
                 ("transformer_blocks.0.attention.out.weight", torch.full((1, 1), 2.0)),
-                ("transformer_blocks.0.attention.qkv.qweight", torch.full((1, 1), 3.0)),
+                ("transformer_blocks.0.attention.qkv.weight", torch.full((1, 1), 3.0)),
                 ("context_refiner.0.feed_forward.w1.weight", torch.full((1, 2), 4.0)),
                 ("context_refiner.0.feed_forward.w3.weight", torch.full((1, 2), 5.0)),
             ]
@@ -62,9 +62,9 @@ def test_z_image_adapter_renames_known_gguf_tensor_paths(
     weights = list(adapter.weights_iterator())
     names = [name for name, _ in weights]
 
-    assert "all_final_layer.2-1.qweight" in names
-    assert "all_x_embedder.2-1.qweight_type" in names
+    assert "all_final_layer.2-1.weight" in names
+    assert "all_x_embedder.2-1.weight_type" in names
     assert "transformer_blocks.0.attention.to_out.0.weight" in names
-    assert "transformer_blocks.0.attention.to_qkv.qweight" in names
+    assert "transformer_blocks.0.attention.to_qkv.weight" in names
     assert "context_refiner.0.feed_forward.w1.weight" in names
     assert "context_refiner.0.feed_forward.w3.weight" in names
