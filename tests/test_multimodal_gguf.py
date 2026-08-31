@@ -19,9 +19,12 @@ from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import rescale_image_size
 
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_TOKENS = 32
+# Transformers produces NaN logits after Gemma 4's first cached decode step on ROCm.
+GEMMA4_MAX_TOKENS = 1
 NUM_LOGPROBS = 10
 MAX_MODEL_LEN = 4096
 GPU_MEMORY_UTILIZATION = 0.8
@@ -33,6 +36,7 @@ class GGUFMMTestConfig(NamedTuple):
     prompts: list[str]
     image_names: list[str]
     mm_processor_kwargs: dict[str, Any] | None = None
+    image_size_factors: tuple[float, ...] = (0.25, 0.5, 1.0)
 
 
 _GEMMA3_PROMPTS = [
@@ -62,6 +66,22 @@ GEMMA3_CONFIG_PAN_AND_SCAN = GGUFMMTestConfig(
     prompts=_GEMMA3_PROMPTS,
     image_names=_GEMMA3_IMAGE_NAMES,
     mm_processor_kwargs={"do_pan_and_scan": True},
+)
+
+_GEMMA4_PROMPTS = [
+    (
+        "<bos><|turn>user\n"
+        "<|image|>What's the content in the center of the image?<turn|>\n"
+        "<|turn>model\n<|channel>thought\n<channel|>"
+    ),
+]
+
+GEMMA4_CONFIG = GGUFMMTestConfig(
+    original_model="google/gemma-4-26B-A4B-it",
+    gguf_model_path="unsloth/gemma-4-26B-A4B-it-GGUF:Q4_K_M",
+    prompts=_GEMMA4_PROMPTS,
+    image_names=[_GEMMA3_IMAGE_NAMES[0]],
+    image_size_factors=(0.25,),
 )
 
 _QWEN35_PROMPTS = [
@@ -267,11 +287,10 @@ def run_multimodal_gguf_test(
     num_logprobs: int,
 ) -> None:
     images = [ImageAsset(name).pil_image for name in model.image_names]
-    size_factors = [0.25, 0.5, 1.0]
     inputs_per_image = [
         (
-            [prompt for _ in size_factors],
-            [rescale_image_size(image, factor) for factor in size_factors],
+            [prompt for _ in model.image_size_factors],
+            [rescale_image_size(image, factor) for factor in model.image_size_factors],
         )
         for image, prompt in zip(images, model.prompts)
     ]
@@ -350,3 +369,17 @@ def test_qwen35_mm_gguf(
     num_logprobs: int,
 ) -> None:
     run_multimodal_gguf_test(model, dtype, max_tokens, num_logprobs)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for multimodal GGUF tests.",
+)
+@pytest.mark.slow
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("num_logprobs", [NUM_LOGPROBS])
+def test_gemma4_mm_gguf(
+    dtype: str,
+    num_logprobs: int,
+) -> None:
+    run_multimodal_gguf_test(GEMMA4_CONFIG, dtype, GEMMA4_MAX_TOKENS, num_logprobs)
