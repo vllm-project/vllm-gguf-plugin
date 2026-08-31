@@ -61,6 +61,21 @@ The same hooks also run in GitHub Actions on every push and pull request.
 vllm serve Qwen/Qwen3-0.6B-GGUF:Q8_0 --tokenizer Qwen/Qwen3-0.6B
 ```
 
+HY V4 GGUF repositories (e.g. `AngelSlim/Hy4-preview-GGUF`) ship no
+`config.json`, so pass the original HF repository as the config and tokenizer
+source:
+
+```bash
+vllm serve AngelSlim/Hy4-preview-GGUF:Q4_K_M \
+  --tokenizer tencent/Hy4-preview \
+  --tensor-parallel-size 4
+```
+
+The Hy4 GGUF files contain no MTP (nextn) weights, so speculative decoding is
+not available from them. The `STQ1_0` variant is supported too: its custom
+ternary tensors run on a native CUDA kernel (dequantize/MMVQ/MoE-vec paths),
+registered as GGML type 43 via a gguf-py shim at plugin import time.
+
 Qwen 3.5 MTP speculative decoding loads the `nextn` block embedded in the same
 GGUF; it does not download separate Hugging Face MTP weights:
 
@@ -89,6 +104,7 @@ starting points:
 | Text | StableLM | Q4_K_M |
 | Text | Gemma 3 | Q4_0 |
 | Text | OLMoE | Q4_0 |
+| Text | HY V4 (Hy4-preview) | STQ1_0 (mixed 1-2 bit) |
 | Vision-language | Gemma 3 | Q4_0 backbone with F16 projector |
 | Vision-language | Qwen 3.5 | Q4_K_M backbone with BF16 projector |
 | Vision-language | Qwen 3.6 | UD-IQ2_XXS backbone with BF16 projector |
