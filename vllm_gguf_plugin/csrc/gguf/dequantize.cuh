@@ -434,6 +434,51 @@ static __global__ void dequantize_block_iq4_xs(const void * __restrict__ vx, dst
     }
 }
 
+// Ported from llama.cpp PR #22836 (dequantize.cuh dequantize_stq1_0).
+//
+// STQ1_0 groups are STRIDE-16, not contiguous: group g (with chunk = g/16,
+// gloc = g%16) holds the four weights {chunk*64 + gloc + p*16 : p in 0..3}.
+//
+// Launched with 32 threads: tid takes qs[tid], i.e. the two groups g = 2*tid
+// and 2*tid+1. Pairs start on even g and a chunk spans 16 groups, so both
+// always share chunk = tid>>3; that also makes one sign byte (which covers 8
+// groups) cover the whole pair.
+template<typename dst_t>
+static __device__ __forceinline__ void dequantize_stq1_0(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+
+    const block_stq1_0 * x = (const block_stq1_0 *) vx;
+
+    const float   d  = __half2float(x[ibs].d);
+    const uint8_t qs = x[ibs].qs[tid];
+    const uint8_t sb = x[ibs].sign[tid >> 2];
+
+    dst_t * y = yy + (tid >> 3)*64;
+
+    for (int h = 0; h < 2; ++h) {
+        const int     g     = 2*tid + h;
+        const uint8_t code  = (qs >> (4*h)) & 0x0F;
+        const uint8_t sign  = (sb >> (g % 8)) & 0x01;
+        const uint8_t qpack = stq1_0_codebook[((uint32_t) sign << 4) | code];
+
+        for (int p = 0; p < 4; ++p) {
+            const int q = (qpack >> (2*p)) & 0x3;
+            y[(g & 15) + p*16] = (float) (q - 1) * d;
+        }
+    }
+}
+
+template<typename dst_t>
+static __global__ void dequantize_block_stq1_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int64_t i = blockIdx.x;
+    dequantize_stq1_0(vx, i, yy + i*QK_K, threadIdx.x);
+}
+
+template<typename dst_t>
+static void dequantize_row_stq1_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_K;
+    dequantize_block_stq1_0<<<nb, 32, 0, stream>>>(vx, y);
+}
+
 template <int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
 static void dequantize_block_cuda(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k, cudaStream_t stream) {
     const int64_t num_blocks = (k + 2*CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / (2*CUDA_DEQUANTIZE_BLOCK_SIZE);
@@ -565,6 +610,8 @@ static to_cuda_ggml_t<dst_t> ggml_get_to_cuda(int64_t type) {
             return dequantize_row_iq4_xs_cuda;
         case 29:
             return dequantize_row_iq1_m_cuda;
+        case 43:
+            return dequantize_row_stq1_0_cuda;
         default:
             return nullptr;
     }

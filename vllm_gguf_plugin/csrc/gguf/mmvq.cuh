@@ -210,3 +210,12 @@ static void mul_mat_vec_iq3_s_q8_1_cuda(const void * vx, const void * vy, scalar
     mul_mat_vec_q<scalar_t, QK_K, QI3_XS, block_iq3_s, 1, vec_dot_iq3_s_q8_1>
         <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols, nrows, nvecs);
 }
+
+template<typename scalar_t>
+static void mul_mat_vec_stq1_0_q8_1_cuda(const void * vx, const void * vy, scalar_t * dst, const int ncols, const int nrows, const int nvecs, cudaStream_t stream) {
+    const int block_num_y = (nrows + GGML_CUDA_MMV_Y - 1) / GGML_CUDA_MMV_Y;
+    const dim3 block_nums(block_num_y, nvecs, 1);
+    const dim3 block_dims(WARP_SIZE, GGML_CUDA_MMV_Y, 1);
+    mul_mat_vec_q<scalar_t, QK_K, QI1_STQ, block_stq1_0, VDR_STQ1_0_Q8_1_MMVQ, vec_dot_stq1_0_q8_1>
+        <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols, nrows, nvecs);
+}

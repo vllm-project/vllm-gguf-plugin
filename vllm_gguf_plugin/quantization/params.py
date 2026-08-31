@@ -19,15 +19,26 @@ def _clone_loaded_weight(loaded_weight: torch.Tensor) -> torch.Tensor:
     return loaded_weight.detach().clone()
 
 
+def _gguf_direct_weight_loader(param, loaded_weight, loaded_shard_id=None):
+    """GGUF-native weight loader for layers without ``weight_loader_v2``.
+
+    ReplicatedLinear only ships a v1 loader that requires the parameter to be
+    pre-sized, which GGUF's lazily-materialized parameters never are. Its v1
+    loader performs no sharding, so storing the full weight is equivalent.
+    """
+    if hasattr(param, "_store"):
+        param._store(loaded_weight, loaded_shard_id)
+    else:
+        param.data.copy_(_clone_loaded_weight(loaded_weight))
+
+
 def _resolve_gguf_weight_loader(
     layer: torch.nn.Module,
     fallback_weight_loader=None,
 ):
-    return (
-        layer.weight_loader_v2
-        if hasattr(layer, "weight_loader_v2")
-        else fallback_weight_loader
-    )
+    if hasattr(layer, "weight_loader_v2"):
+        return layer.weight_loader_v2
+    return _gguf_direct_weight_loader
 
 
 def _resolve_gguf_weight_type_loader(

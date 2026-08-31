@@ -173,6 +173,31 @@ typedef union {
     uint16_t  u16;
 } iq1m_scale_t;
 
+// 1.3125 bpw — ternary {-d, 0, +d} with 3:4 sparsity (llama.cpp PR #22836).
+// A 256-weight block has 64 4-lane groups; group g (chunk = g/16, gloc = g%16)
+// holds the weights {chunk*64 + gloc + p*16 : p in 0..3} (stride-16 layout).
+// qs packs two 4-bit slot codes per byte (low nibble first); sign packs one
+// table-select bit per group (bit k of byte b -> group 8b+k).
+#define QI1_STQ 32
+typedef struct {
+    uint8_t qs[QK_K/8];    // 4-bit code per group of 4
+    uint8_t sign[QK_K/32]; // 1-bit table select per group of 4
+    half    d;             // scale
+} block_stq1_0;
+static_assert(sizeof(block_stq1_0) == sizeof(half) + QK_K/8 + QK_K/32, "wrong stq1_0 block size/padding");
+
+// STQ1_0 codebook: index = (sign << 4) | slot -> packed 4-lane ternary
+// pattern; lane p occupies bits [2p, 2p+2) with 0b00 -> -1, 0b01 -> 0,
+// 0b10 -> +1.
+static const __device__ uint8_t stq1_0_codebook[32] = {
+    // sign = 0 (first non-zero lane is +1)
+    0xA9, 0x89, 0x29, 0x09, 0xA6, 0x86, 0x26, 0x06,
+    0x9A, 0x92, 0x1A, 0x12, 0x6A, 0x62, 0x4A, 0x42,
+    // sign = 1 (every non-zero lane negated)
+    0x01, 0x21, 0x81, 0xA1, 0x04, 0x24, 0x84, 0xA4,
+    0x10, 0x18, 0x90, 0x98, 0x40, 0x48, 0x60, 0x68,
+};
+
 #define QK4_NL 32
 #define QR4_NL 2
 #define QI4_NL (QK4_NL / (4*QR4_NL))

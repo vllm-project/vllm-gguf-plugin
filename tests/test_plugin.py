@@ -115,6 +115,36 @@ def test_gguf_linear_uses_weight_loader_v2(monkeypatch):
     assert layer.qweight_type.shard_weight_type == {0: 3, 1: 4}
 
 
+def test_gguf_linear_replicated_direct_store(monkeypatch):
+    """ReplicatedLinear has no weight_loader_v2; GGUF must store directly.
+
+    HY V4's indexer.wq_b is a quantized ReplicatedLinear, so the GGUF weight
+    loader must materialize the lazily-initialized parameter itself instead of
+    falling back to the v1 loader (which requires a pre-sized parameter).
+    """
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(linear_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        linear_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    quant_config = OOTGGUFConfig.from_config({})
+    layer = ReplicatedLinear(4, 4, bias=False, quant_config=quant_config)
+
+    loader = layer.qweight.weight_loader
+    assert loader.__name__ == "_gguf_direct_weight_loader"
+    loader(layer.qweight, torch.ones((4, 4), dtype=torch.uint8))
+    assert layer.qweight.data.shape == (4, 4)
+
+    type_loader = layer.qweight_type.weight_loader
+    type_loader(layer.qweight_type, torch.tensor(3, dtype=torch.uint8))
+    assert layer.qweight_type.weight_type == 3
+
+
 def test_gguf_embedding_uses_plugin_weight_loader(monkeypatch):
     monkeypatch.setattr(
         vocab_embedding_module, "get_tensor_model_parallel_rank", lambda: 0

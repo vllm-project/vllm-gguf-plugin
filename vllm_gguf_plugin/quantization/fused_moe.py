@@ -11,6 +11,15 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
 )
+
+try:
+    # vLLM >= 0.28 wraps the activation knobs in a config object; earlier
+    # releases take clamp_limit as a plain keyword argument.
+    from vllm.model_executor.layers.fused_moe.activation import (
+        ApplyMoEActivationConfig,
+    )
+except ImportError:
+    ApplyMoEActivationConfig = None
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -40,6 +49,7 @@ def _fused_moe_gguf(
     qweight_type: int,
     qweight_type2: int,
     activation: str,
+    clamp_limit: float = 0.0,
 ) -> torch.Tensor:
     activation_enum = MoEActivation.from_str(activation)
 
@@ -47,7 +57,18 @@ def _fused_moe_gguf(
         d = inp.shape[-1] // 2
         output_shape = inp.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=inp.dtype, device=inp.device)
-        apply_moe_activation(activation_enum, out, inp)
+        if clamp_limit > 0:
+            if ApplyMoEActivationConfig is not None:
+                apply_moe_activation(
+                    activation_enum,
+                    out,
+                    inp,
+                    activation_config=ApplyMoEActivationConfig(clamp_limit=clamp_limit),
+                )
+            else:
+                apply_moe_activation(activation_enum, out, inp, clamp_limit=clamp_limit)
+        else:
+            apply_moe_activation(activation_enum, out, inp)
         return out
 
     from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
@@ -142,8 +163,10 @@ def _fused_moe_gguf_fake(
     qweight_type: int,
     qweight_type2: int,
     activation: str,
+    clamp_limit: float = 0.0,
 ) -> torch.Tensor:
     del w1, w2, topk_weights, topk_ids, qweight_type, qweight_type2, activation
+    del clamp_limit
     return torch.empty_like(x)
 
 
@@ -275,4 +298,5 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             layer.w13_qweight_type.weight_type,
             layer.w2_qweight_type.weight_type,
             layer.activation.value,
+            float(self.moe.swiglu_limit or 0.0),
         )

@@ -21,6 +21,7 @@ from ..gemm.utils import (
     GGML_TYPE_Q6_K,
     GGML_TYPE_Q8_0,
     GGML_TYPE_Q8_1,
+    GGML_TYPE_STQ1_0,
 )
 from .iq_quant import (
     ggml_dequantize_iq1_m_triton,
@@ -48,6 +49,16 @@ from .standard_quant import (
     ggml_dequantize_q8_0_triton,
     ggml_dequantize_q8_1_triton,
 )
+
+
+def _ggml_dequantize_stq1_0(
+    W: torch.Tensor, m: int, n: int, dtype: torch.dtype | None = None
+) -> torch.Tensor:
+    # Pure-torch reference (GPU-vectorized); used only when the CUDA
+    # extension is unavailable.
+    from ...gguf_stq import dequantize_stq1_0
+
+    return dequantize_stq1_0(W).reshape(m, n).to(dtype or torch.float16)
 
 
 def ggml_dequantize_triton(
@@ -78,6 +89,7 @@ def ggml_dequantize_triton(
         GGML_TYPE_Q6_K: ggml_dequantize_q6_k_triton,
         GGML_TYPE_Q8_0: ggml_dequantize_q8_0_triton,
         GGML_TYPE_Q8_1: ggml_dequantize_q8_1_triton,
+        GGML_TYPE_STQ1_0: _ggml_dequantize_stq1_0,
     }.get(int(quant_type))
     if kernel is None:
         raise ValueError(f"Unsupported Triton dequant quant type: {quant_type}")

@@ -1810,3 +1810,60 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
     return d * (sumi1 + sumi2);
 #endif
 }
+// Ported from llama.cpp PR #22836 (vecdotq.cuh vec_dot_stq1_0_q8_1), adapted to
+// this tree's calling convention: vbq points at the block_stq1_0 itself and
+// bq8_1 at the first of the block's 8 q8_1 sub-blocks.
+#define VDR_STQ1_0_Q8_1_MMVQ 1
+
+// iqs in 0..31 selects one qs byte, i.e. the two stride-16 groups g = 2*iqs and
+// 2*iqs+1. Group g holds the weights {chunk*64 + gloc + p*16 : p in 0..3} with
+// chunk = g/16 and gloc = g%16, so:
+//
+//   - both groups of an iqs share chunk = iqs>>3 (8 qs bytes per 64-weight chunk);
+//   - p=0,1 land in the chunk's first 32 weights  -> q8_1 sub-block 2*chunk, at
+//     gloc and gloc+16;
+//   - p=2,3 land in its second 32 weights         -> q8_1 sub-block 2*chunk+1,
+//     same two offsets.
+//
+// A group therefore straddles two q8_1 sub-blocks with DIFFERENT scales, so the
+// usual single `d * d8 * sumi` tail is wrong here: the two halves must be scaled
+// separately. STQ1_0 is symmetric ternary (x = d*{-1,0,+1}), so no ds.y offset
+// term is needed.
+static __device__ __forceinline__ float vec_dot_stq1_0_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+
+    const block_stq1_0 * bq = (const block_stq1_0 *) vbq;
+
+    const int chunk = iqs >> 3;
+    const int8_t * q8_lo = bq8_1[2*chunk    ].qs;
+    const int8_t * q8_hi = bq8_1[2*chunk + 1].qs;
+
+    const uint8_t qs = bq->qs[iqs];
+    const uint8_t sb = bq->sign[iqs >> 2];
+
+    int sumi_lo = 0;
+    int sumi_hi = 0;
+
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+        const int     g     = 2*iqs + h;
+        const int     gloc  = g % 16;
+        const uint8_t code  = (qs >> (4*h)) & 0x0F;
+        const uint8_t sign  = (sb >> (g % 8)) & 0x01;
+        const uint8_t qpack = stq1_0_codebook[((uint32_t) sign << 4) | code];
+
+        const int l0 = ((qpack >> 0) & 0x3) - 1;
+        const int l1 = ((qpack >> 2) & 0x3) - 1;
+        const int l2 = ((qpack >> 4) & 0x3) - 1;
+        const int l3 = ((qpack >> 6) & 0x3) - 1;
+
+        sumi_lo += l0 * q8_lo[gloc] + l1 * q8_lo[gloc + 16];
+        sumi_hi += l2 * q8_hi[gloc] + l3 * q8_hi[gloc + 16];
+    }
+
+    const float d    = __half2float(bq->d);
+    const float d8lo = __low2float(bq8_1[2*chunk    ].ds);
+    const float d8hi = __low2float(bq8_1[2*chunk + 1].ds);
+
+    return d * (d8lo * (float) sumi_lo + d8hi * (float) sumi_hi);
+}
