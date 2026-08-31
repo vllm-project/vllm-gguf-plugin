@@ -34,9 +34,15 @@ class BaseGGUFWeightsAdapter(ABC):
         """Return whether this adapter supports *config*."""
 
     @classmethod
-    def architecture(cls, config: PretrainedConfig) -> str | None:
-        """Return an architecture override required before model loading."""
-        del config
+    def architecture(
+        cls, config: PretrainedConfig, text_only: bool = False
+    ) -> str | None:
+        """Return an architecture override required before model loading.
+
+        *text_only* is set when the GGUF files can only produce a text model,
+        so a multimodal HF config must be built as its text architecture.
+        """
+        del config, text_only
         return None
 
     @abstractmethod

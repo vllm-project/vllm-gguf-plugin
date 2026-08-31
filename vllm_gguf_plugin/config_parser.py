@@ -11,9 +11,11 @@ from .gguf_utils import (
     check_gguf_file,
     is_gguf,
     is_remote_gguf,
+    is_text_only_gguf,
     maybe_patch_hf_config_from_gguf,
     split_remote_gguf,
 )
+from .gguf_context import get_explicit_mm_proj, get_gguf_weights
 from .weights_adapter import get_adapter_architecture
 
 
@@ -40,7 +42,9 @@ class GGUFConfigParser(ConfigParserBase):
             config_dict["norm_topk_prob"] = True
             config.update({"norm_topk_prob": True})
 
-        architecture = get_adapter_architecture(config)
+        weights_reference = get_gguf_weights() or original_model
+        text_only = is_text_only_gguf(weights_reference, get_explicit_mm_proj())
+        architecture = get_adapter_architecture(config, text_only)
         if (
             architecture is None
             and config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
@@ -48,6 +52,14 @@ class GGUFConfigParser(ConfigParserBase):
             architecture = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         if architecture is None:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
+
+        if text_only:
+            text_config = config.get_text_config()
+            if text_config is not config:
+                # A multimodal HF config for a backbone with no vision tower:
+                # keep only the text half so the causal LM is built from it.
+                config = text_config
+                config_dict = config.to_dict()
 
         config_dict["architectures"] = [architecture]
         config.update({"architectures": [architecture]})

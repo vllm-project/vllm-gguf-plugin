@@ -33,11 +33,11 @@ def get_weights_adapter(config) -> BaseGGUFWeightsAdapter:
     return TransformersGGUFWeightsAdapter()
 
 
-def get_adapter_architecture(config) -> str | None:
+def get_adapter_architecture(config, text_only: bool = False) -> str | None:
     """Return an architecture override declared by a registered adapter."""
     for cls in _ADAPTER_REGISTRY:
         if cls.matches(config):
-            return cls.architecture(config)
+            return cls.architecture(config, text_only)
     return None
 
 

@@ -16,6 +16,7 @@ from vllm.model_executor.model_loader import (
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
 
 from .config_parser import GGUFConfigParser
+from .gguf_context import set_gguf_request
 from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 from .loader import GGUFModelLoader
 from .quantization import DiffusionGGUFConfig, GGUFConfig
@@ -58,6 +59,13 @@ def _patch_engine_args() -> None:
     def create_model_config(self, *args, **kwargs):
         if _is_gguf_reference(self.model):
             gguf_model = self.model
+            extra_config = self.model_loader_extra_config or {}
+            set_gguf_request(
+                gguf_model,
+                extra_config.get("mm_proj")
+                if isinstance(extra_config, dict)
+                else None,
+            )
             if self.quantization is None:
                 self.quantization = "gguf"
             if self.load_format == "auto":
