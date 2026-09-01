@@ -361,6 +361,61 @@ def test_moe(
     torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
 
 
+@pytest.mark.parametrize("num_tokens", [9000])
+@pytest.mark.parametrize("hidden_size", [512])
+@pytest.mark.parametrize("top_k", [8])
+@pytest.mark.parametrize("dtype", [torch.half])
+@pytest.mark.parametrize(
+    "quant_type", [GGMLQuantizationType.IQ1_M, GGMLQuantizationType.Q4_0]
+)
+@torch.inference_mode()
+def test_moe_large_batch(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    quant_type: GGMLQuantizationType,
+    top_k: int,
+):
+    # num_tokens * top_k exceeds the 65535 gridDim.z limit of the MMVQ MoE
+    # kernel, exercising the chunked launch path.
+    seed_everything(0)
+    H, E = 1024, 256
+
+    x = torch.rand((num_tokens, H), dtype=dtype, device="cuda")
+
+    topk_weights = torch.rand(num_tokens, top_k, device="cuda", dtype=dtype)
+    topk_ids = torch.randint(
+        0, E, (num_tokens, top_k), device="cuda", dtype=torch.int32
+    )
+
+    tensors = get_gguf_moe_tensors(hidden_size, quant_type)
+
+    w13 = tensors[0]
+    w2 = tensors[1]
+
+    w13_dequant = torch.tensor(dequantize(w13.data, quant_type), device="cuda").to(
+        dtype
+    )
+
+    w2_dequant = torch.tensor(dequantize(w2.data, quant_type), device="cuda").to(dtype)
+
+    output = _fused_moe_gguf(
+        x,
+        torch.tensor(w13.data, device="cuda"),
+        torch.tensor(w2.data, device="cuda"),
+        topk_weights,
+        topk_ids,
+        quant_type,
+        quant_type,
+        "silu",
+    )
+
+    ref_output = fused_experts(
+        x, w13_dequant, w2_dequant, topk_weights, topk_ids
+    ).reshape(output.shape)
+    torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
+
+
 @pytest.mark.parametrize("num_tokens", [83, 128])
 @pytest.mark.parametrize("hidden_size", [512])
 @pytest.mark.parametrize("top_k", [4, 8])
