@@ -163,6 +163,20 @@ def gguf_quant_weights_iterator(
     yield from gguf_quant_weights_iterator_multi([gguf_file], gguf_to_hf_name_map)
 
 
+def gguf_weight_type_name(name: str) -> str:
+    """Return the synthetic ``weight_type`` companion name for *name*.
+
+    Only the last ``weight`` (the parameter name) changes. A module named
+    ``input_mix_weight_down`` must keep its name: replacing every occurrence
+    would produce ``input_mix_weight_type_down.weight_type``, which no module
+    owns.
+    """
+    index = name.rfind("weight")
+    if index < 0:
+        raise ValueError(f"GGUF quantized tensor name has no 'weight': {name}")
+    return f"{name[:index]}weight_type{name[index + len('weight') :]}"
+
+
 def gguf_quant_weights_iterator_multi(
     gguf_files: list[str],
     gguf_to_hf_name_map: dict[str, str] | None = None,
@@ -188,7 +202,7 @@ def gguf_quant_weights_iterator_multi(
 
             weight_type = tensor.tensor_type
             if weight_type.name not in _QUANT_TYPES:
-                yield name.replace("weight", "weight_type"), torch.tensor(weight_type)
+                yield gguf_weight_type_name(name), torch.tensor(weight_type)
 
             weight = tensor.data
             if weight_type.name == "BF16" and weight.dtype == np.uint8:
