@@ -76,17 +76,15 @@ static void launch_moe_vec_q(const void* vx, const void* vy, scalar_t* dst,
   }
 }
 
-#define MOE_VEC_Q8_1_LAUNCHER(launcher_name, qk, qi, block_q_t, vdr,        \
-                              vec_dot)                                      \
-  template <typename scalar_t>                                              \
-  static void launcher_name(const void* vx, const void* vy, scalar_t* dst,  \
-                            const int* topk_ids, const int top_k,           \
-                            const int tokens, const int ncols,              \
-                            const int nrows, const int token_stride,        \
-                            cudaStream_t stream) {                          \
-    launch_moe_vec_q<scalar_t, qk, qi, block_q_t, vdr, vec_dot>(            \
-        vx, vy, dst, topk_ids, top_k, tokens, ncols, nrows, token_stride,   \
-        stream);                                                            \
+#define MOE_VEC_Q8_1_LAUNCHER(launcher_name, qk, qi, block_q_t, vdr, vec_dot) \
+  template <typename scalar_t>                                                \
+  static void launcher_name(                                                  \
+      const void* vx, const void* vy, scalar_t* dst, const int* topk_ids,     \
+      const int top_k, const int tokens, const int ncols, const int nrows,    \
+      const int token_stride, cudaStream_t stream) {                          \
+    launch_moe_vec_q<scalar_t, qk, qi, block_q_t, vdr, vec_dot>(              \
+        vx, vy, dst, topk_ids, top_k, tokens, ncols, nrows, token_stride,     \
+        stream);                                                              \
   }
 
 MOE_VEC_Q8_1_LAUNCHER(moe_vec_q4_0_q8_1_cuda, QK4_0, QI4_0, block_q4_0,
