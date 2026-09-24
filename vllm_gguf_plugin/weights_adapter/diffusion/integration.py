@@ -73,10 +73,10 @@ def _patch_diffusers_loader() -> None:
     _original_load_model = DiffusersPipelineLoader.load_model
 
     @wraps(_original_load_weights)
-    def _gguf_load_weights(self: object, model: nn.Module) -> None:
+    def _gguf_load_weights(self: object, model: nn.Module, **kwargs: object) -> None:
         """Load weights using GGUF when the quant config is GGUF."""
         if not is_gguf_quant_config(self.quant_config):
-            return _original_load_weights(self, model)
+            return _original_load_weights(self, model, **kwargs)
 
         gguf_model = get_gguf_model_from_config(self.quant_config)
         if not gguf_model:
