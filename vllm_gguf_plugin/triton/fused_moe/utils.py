@@ -64,6 +64,11 @@ TRITON_FUSED_MOE_BLOCK_N = 128
 TRITON_FUSED_MOE_BLOCK_K_BLOCKS = 4
 
 # Per-type BLOCK_M overrides for Triton MoE kernels.
+#
+# This table is authoritative for both sides of the launch: ops.
+# ggml_moe_get_block_size reads it to pad sorted_token_ids, and
+# run_triton_fused_moe_kernel reads it for the launch grid. Changing a value
+# here therefore changes the padding too -- it is not a launch-time-only knob.
 TRITON_MOE_BLOCK_M_BY_TYPE: dict[int, int] = {
     GGML_TYPE_Q4_0: 8,
 }
@@ -242,12 +247,25 @@ def run_triton_fused_moe_kernel(
     tokens: int,
     quant_type: int,
     extra_args: tuple = (),
-    block_m: int = TRITON_FUSED_MOE_BLOCK_M,
+    block_m: int | None = None,
     block_n: int = TRITON_FUSED_MOE_BLOCK_N,
     block_k_blocks: int = TRITON_FUSED_MOE_BLOCK_K_BLOCKS,
     num_warps: int = TRITON_NUM_WARPS,
     num_stages: int = TRITON_NUM_STAGES,
 ) -> torch.Tensor:
+    # Resolve BLOCK_M from the quant type rather than the module default. The
+    # caller has already padded sorted_token_ids/expert_ids to whatever
+    # ops.ggml_moe_get_block_size returned, which is get_triton_moe_block_m for
+    # any type without a CUDA MMQ kernel -- so reading the same function here is
+    # what keeps the padding and the launch grid in agreement.
+    #
+    # Today the two agree only by coincidence: TRITON_MOE_BLOCK_M_BY_TYPE has a
+    # single entry, and that type's wrapper (standard_quant/q4_0.py) passes
+    # block_m by hand. Adding a second entry without editing its wrapper makes
+    # _validate_args reject the launch, which is not what a table documented as
+    # a per-type override should do.
+    if block_m is None:
+        block_m = get_triton_moe_block_m(quant_type)
     (
         W,
         X,
