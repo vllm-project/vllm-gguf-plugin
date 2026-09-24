@@ -52,6 +52,14 @@ def _fused_moe_gguf(
 
     from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
+    # vLLM's router writes id -1 for padding tokens (VLLM_MOE_SKIP_PADDING) and
+    # its own kernels skip those slots. The GGUF kernels index expert weights by
+    # id, so send empty slots to expert 0 with zero weight instead: they then add
+    # nothing. Out of place and without a host sync; the caller keeps its ids.
+    empty_slots = topk_ids < 0
+    topk_ids = topk_ids.clamp(min=0)
+    topk_weights = topk_weights.masked_fill(empty_slots, 0)
+
     out_hidden_states = torch.empty_like(x)
     if (
         weight_type2 in MMQ_QUANT_TYPES
