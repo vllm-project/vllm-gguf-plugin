@@ -221,6 +221,33 @@ def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch
     assert config.architectures == ["Qwen3MoeForCausalLM"]
 
 
+def test_gguf_config_parser_fallback_to_config_architectures(tmp_path, monkeypatch):
+    gguf_path = tmp_path / "model.gguf"
+    gguf_path.write_bytes(b"GGUF")
+
+    def fake_parse(
+        self, model, trust_remote_code, revision=None, code_revision=None, **kwargs
+    ):
+        cfg = PretrainedConfig(model_type="custom_or_new_model")
+        cfg.architectures = ["DeepseekV4ForCausalLM"]
+        return {}, cfg
+
+    monkeypatch.setattr(
+        gguf_config_parser_module.HFConfigParser,
+        "parse",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        gguf_config_parser_module,
+        "maybe_patch_hf_config_from_gguf",
+        lambda model, config: config,
+    )
+
+    config_dict, config = GGUFConfigParser().parse(gguf_path, trust_remote_code=False)
+    assert config_dict["architectures"] == ["DeepseekV4ForCausalLM"]
+    assert config.architectures == ["DeepseekV4ForCausalLM"]
+
+
 def test_register_sets_engine_args_for_gguf_model(monkeypatch):
     register()
     captured = {}
