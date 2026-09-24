@@ -101,3 +101,41 @@ to the corresponding Hugging Face model. A model appearing in vLLM's general
 supported-model list does not by itself guarantee GGUF compatibility. When
 reporting an unsupported model, include the model repository, quantization,
 plugin and vLLM versions, and the complete weight-mapping error.
+
+## Wan2.2 video generation with vLLM-Omni
+
+The diffusion adapter supports the single-transformer
+`Wan-AI/Wan2.2-TI2V-5B-Diffusers` checkpoint with
+`QuantStack/Wan2.2-TI2V-5B-GGUF` Q4_K_M weights. Install both vLLM-Omni and
+this plugin, then pass the base model for the scheduler, text encoder and VAE:
+
+```python
+from vllm_omni import Omni
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+
+omni = Omni(
+    model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    quantization_config={
+        "method": "gguf",
+        "gguf_model": "QuantStack/Wan2.2-TI2V-5B-GGUF/Wan2.2-TI2V-5B-Q4_K_M.gguf",
+    },
+    enable_cpu_offload=True,
+    vae_use_tiling=True,
+)
+outputs = omni.generate(
+    {"prompt": "A red sailboat on a calm sea at sunset.", "negative_prompt": ""},
+    sampling_params_list=[OmniDiffusionSamplingParams(
+        height=480, width=832, num_frames=17,
+        num_inference_steps=40, guidance_scale=5.0, seed=42,
+    )],
+)
+```
+
+The transformer attention and feed-forward projections use packed GGUF
+weights. The text encoder, VAE, embedders and output projection retain dense
+weights. Q4_K_M mixes Q4_K and Q6_K projections; Q/K/V remain separate shards
+while loading into the fused self-attention projection.
+
+This example covers text-to-video with TI2V-5B. Dual-transformer A14B
+checkpoints require separate high-noise and low-noise weight sources and are
+not supported by this single-file adapter path.

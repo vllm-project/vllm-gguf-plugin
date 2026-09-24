@@ -10,9 +10,11 @@ from .loader import (
     resolve_gguf_model_path,
 )
 from .qwen_image import QwenImageDiffusionGGUFAdapter
+from .wan import WanDiffusionGGUFAdapter
 from .z_image import ZImageDiffusionGGUFAdapter
 
 _ADAPTER_CLASSES: list[type[DiffusionGGUFAdapter]] = [
+    WanDiffusionGGUFAdapter,
     QwenImageDiffusionGGUFAdapter,
     ZImageDiffusionGGUFAdapter,
     Flux2KleinDiffusionGGUFAdapter,
@@ -42,6 +44,7 @@ __all__ = [
     "MappedTensor",
     "QwenImageDiffusionGGUFAdapter",
     "ZImageDiffusionGGUFAdapter",
+    "WanDiffusionGGUFAdapter",
     "get_diffusion_gguf_adapter",
     "get_gguf_model_from_config",
     "gguf_quant_weights_iterator",
