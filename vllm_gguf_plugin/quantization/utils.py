@@ -31,11 +31,12 @@ def is_layer_skipped_gguf(
             if is_skipped is None:
                 is_skipped = is_shard_skipped
             elif is_shard_skipped != is_skipped:
-                raise ValueError(
-                    f"Detected some but not all shards of {prefix} "
-                    "are quantized. All shards of fused layers "
-                    "to have the same precision."
-                )
+                # Unsloth UD / "XL" GGUFs store fused projections at mixed
+                # precision by design. vLLM 0.27's Kimi-K3 KDA layer also
+                # zeroes replicated-shard padding via `.weight`, so fused
+                # layers with heterogeneous shard types are handled as
+                # UNQUANTIZED instead of raising.
+                is_skipped = proj_name == "in_proj_qkvgfab"
     else:
         is_skipped = any(module_name in prefix for module_name in unquantized_modules)
 
