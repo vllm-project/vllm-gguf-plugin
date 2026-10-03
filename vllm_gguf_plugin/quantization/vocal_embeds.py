@@ -16,6 +16,11 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .. import ops
+from ..kernel_support import (
+    QuantizationBackend,
+    QuantizationOperation,
+    supports,
+)
 from .linear import GGUFLinearMethod
 from .params import (
     GGUFUninitializedWeightParameter,
@@ -85,13 +90,20 @@ def _apply_gguf_embedding(
 ) -> torch.Tensor:
     if weight_type in UNQUANTIZED_TYPES:
         return torch.embedding(weight, x)
-    if weight_type in DEQUANT_TYPES:
+    if weight_type in DEQUANT_TYPES or (
+        ops.cuda_dequantize_upstream_enabled()
+        and supports(
+            weight_type,
+            QuantizationBackend.UPSTREAM,
+            QuantizationOperation.DEQUANTIZE,
+        )
+    ):
         block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
         x_flat = x.flatten()
         assert hidden_size == weight.shape[1] // type_size * block_size
         quant = torch.index_select(weight, dim=0, index=x_flat)
         dequant = ops.ggml_dequantize(
-            quant, weight_type, hidden_size, x_flat.shape[0], dtype
+            quant, weight_type, x_flat.shape[0], hidden_size, dtype
         )
         return dequant.view(*x.shape, hidden_size)
     weight_type = WeightType(weight_type)

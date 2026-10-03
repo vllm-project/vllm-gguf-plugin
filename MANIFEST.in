@@ -1,5 +1,10 @@
 include LICENSE
+include LICENSES/llama.cpp-MIT.txt
 include README.md
+include THIRD_PARTY_NOTICES.md
+include .gitmodules
+include doc/upstream.md
+include vllm_gguf_plugin/llama_cpp_upstream.toml
 
 recursive-include vllm_gguf_plugin/csrc *.h *.cpp *.cu *.cuh
 

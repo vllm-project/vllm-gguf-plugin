@@ -13,9 +13,14 @@ from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMetho
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
 from .. import ops
+from ..kernel_support import (
+    QuantizationBackend,
+    QuantizationOperation,
+    supports,
+)
 from .config import GGUFConfig
 from .linear import GGUFLinearMethod
-from .utils import UNQUANTIZED_TYPES, is_layer_skipped_gguf
+from .utils import DEQUANT_TYPES, UNQUANTIZED_TYPES, is_layer_skipped_gguf
 
 
 def dequant_gemm_gguf(
@@ -23,6 +28,18 @@ def dequant_gemm_gguf(
 ) -> torch.Tensor:
     if weight_type in UNQUANTIZED_TYPES:
         return x @ weight.T
+    if weight_type not in DEQUANT_TYPES and not (
+        ops.cuda_dequantize_upstream_enabled()
+        and supports(
+            weight_type,
+            QuantizationBackend.UPSTREAM,
+            QuantizationOperation.DEQUANTIZE,
+        )
+    ):
+        raise NotImplementedError(
+            "Diffusion dequant+GEMM requires an implemented dequantize kernel "
+            f"for quantization type {weight_type}"
+        )
 
     block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
     shape = (weight.shape[0], weight.shape[1] // type_size * block_size)

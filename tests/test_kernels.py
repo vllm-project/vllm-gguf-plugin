@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
 from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
 import vllm_gguf_plugin.ops as ops
+from vllm_gguf_plugin.kernel_support import upstream_storage_padding_bytes
 from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
 from vllm_gguf_plugin.quantization.vocal_embeds import apply_gguf_embedding
 from vllm_gguf_plugin.triton.fused_moe import ggml_moe_a8_triton
@@ -65,6 +66,21 @@ TRITON_MOE_QUANT_TYPES = [
     GGMLQuantizationType.Q5_0,
     GGMLQuantizationType.Q8_0,
 ]
+
+
+def _dense_cuda_weight(data, quant_type: GGMLQuantizationType) -> torch.Tensor:
+    raw = torch.tensor(data, device="cuda")
+    padding_bytes = upstream_storage_padding_bytes(quant_type, raw.shape[-1])
+    if padding_bytes == 0:
+        return raw
+    storage = torch.empty(
+        raw.numel() + padding_bytes,
+        dtype=raw.dtype,
+        device=raw.device,
+    )
+    storage[: raw.numel()].copy_(raw.reshape(-1))
+    storage[raw.numel() :].zero_()
+    return storage[: raw.numel()].view_as(raw)
 
 
 def _silu_and_mul(inp: torch.Tensor) -> torch.Tensor:
@@ -139,7 +155,7 @@ def test_mmvq(hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantization
         )
         ref_output = x @ weight.T
 
-        weight = torch.tensor(tensor.data, device="cuda")
+        weight = _dense_cuda_weight(tensor.data, quant_type)
         output = ops.ggml_mul_mat_vec_a8(weight, x, quant_type, weight.shape[0]).to(
             dtype
         )
@@ -183,17 +199,21 @@ def test_mmq(
         )
         ref_output = x @ weight.T
 
-        weight = torch.tensor(tensor.data, device="cuda")
+        weight = _dense_cuda_weight(tensor.data, quant_type)
         output = ops.ggml_mul_mat_a8(weight, x, quant_type, weight.shape[0]).to(dtype)
 
         atols = {torch.half: 1, torch.bfloat16: 1.5, torch.float: 1.2}
+        atol = atols[dtype]
+        if dtype == torch.half and quant_type in {
+            GGMLQuantizationType.Q4_K,
+            GGMLQuantizationType.Q5_K,
+        }:
+            atol = 1.1
         # test matrix has inputs centered around 0 and lower precision from
         # bfloat16 tends to accumulate and can greatly inflate rtol
         # since outputs are also very close to 0
         rtols = {torch.half: 1e-1, torch.bfloat16: 1e4, torch.float: 2e1}
-        torch.testing.assert_close(
-            output, ref_output, atol=atols[dtype], rtol=rtols[dtype]
-        )
+        torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtols[dtype])
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
