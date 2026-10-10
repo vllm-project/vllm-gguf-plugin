@@ -124,6 +124,33 @@ def test_gguf_embedding(
         torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=4e-2)
 
 
+def test_gguf_embedding_q4_k_empty_input():
+    tensor = get_gguf_sample_tensors(256, GGMLQuantizationType.Q4_K)[0]
+    weight = torch.tensor(tensor.data, device="cuda")
+    ids = torch.empty((2, 0), device="cuda", dtype=torch.long)
+
+    output = apply_gguf_embedding(ids, weight, GGMLQuantizationType.Q4_K, 256)
+
+    assert output.shape == (2, 0, 256)
+    assert output.dtype == torch.float16
+
+
+def test_gguf_embedding_q4_k_noncontiguous_ids():
+    tensor = get_gguf_sample_tensors(256, GGMLQuantizationType.Q4_K)[0]
+    weight = torch.tensor(tensor.data, device="cuda")
+    dense_weight = torch.tensor(
+        dequantize(tensor.data, GGMLQuantizationType.Q4_K), device="cuda"
+    ).to(torch.float16)
+    ids = torch.arange(12, device="cuda").view(3, 4).t()
+    assert not ids.is_contiguous()
+
+    output = apply_gguf_embedding(ids, weight, GGMLQuantizationType.Q4_K, 256)
+
+    torch.testing.assert_close(
+        output, torch.embedding(dense_weight, ids), atol=1e-2, rtol=4e-2
+    )
+
+
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_type", QUANT_TYPES)
