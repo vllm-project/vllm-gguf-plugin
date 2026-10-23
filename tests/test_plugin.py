@@ -190,6 +190,46 @@ def test_gguf_linear_same_type_shards_skip_concat(monkeypatch):
     assert out.shape == (2, 8)
 
 
+def test_gguf_linear_flattens_leading_dims(monkeypatch):
+    """Batched inputs (e.g. from the Transformers modeling backend) reach the
+    2D-only kernels flattened and come back with their leading dims."""
+    register()
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    quant_config = OOTGGUFConfig.from_config({})
+    layer = MergedColumnParallelLinear(
+        input_size=4,
+        output_sizes=[4, 4],
+        bias=False,
+        quant_config=quant_config,
+        disable_tp=True,
+    )
+    layer.weight_loader_v2(layer.weight, torch.ones((4, 4), dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight, 2 * torch.ones((4, 4), dtype=torch.uint8), 1)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), 0)
+    layer.weight_loader_v2(layer.weight_type, torch.tensor(3, dtype=torch.uint8), 1)
+    layer.quant_method.process_weights_after_loading(layer)
+
+    input_shapes: list[tuple[int, ...]] = []
+
+    def fake_fused_mul_mat_gguf(x, weight, weight_type):
+        input_shapes.append(tuple(x.shape))
+        return torch.zeros(
+            (x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device
+        )
+
+    monkeypatch.setattr(
+        gguf_quantization, "fused_mul_mat_gguf", fake_fused_mul_mat_gguf
+    )
+    out = layer.quant_method.apply(layer, torch.ones((1, 3, 4), dtype=torch.float32))
+
+    assert input_shapes == [(3, 4)]
+    assert out.shape == (1, 3, 8)
+
+
 def test_gguf_config_parser_uses_parent_dir_for_local_file(tmp_path, monkeypatch):
     gguf_path = tmp_path / "model.gguf"
     gguf_path.write_bytes(b"GGUF")

@@ -228,6 +228,9 @@ class GGUFLinearMethod(LinearMethodBase):
 
         if self.layout is not None:
             x = self.layout.input_to_gguf(x)
+        # The GGUF kernels take 2D inputs, so flatten any leading batch dims
+        lead_shape = x.shape[:-1]
+        x = x.reshape(-1, x.shape[-1])
 
         shard_id = layer.weight.shard_id
         if shard_id:
@@ -242,7 +245,7 @@ class GGUFLinearMethod(LinearMethodBase):
                 out = fused_mul_mat_gguf_op(x, weight, shard_weight_types[0])
                 if bias is not None:
                     out.add_(bias)
-                return out
+                return out.view(*lead_shape, -1)
             result = []
             for idx in shard_id:
                 start, end, offset = layer.weight.shard_offset_map[idx]
@@ -261,4 +264,4 @@ class GGUFLinearMethod(LinearMethodBase):
             out = fused_mul_mat_gguf_op(x, weight, weight_type)
         if bias is not None:
             out.add_(bias)
-        return out
+        return out.view(*lead_shape, -1)
