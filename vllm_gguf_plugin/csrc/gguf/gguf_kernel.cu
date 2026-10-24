@@ -95,15 +95,17 @@ Tensor ggml_dequantize(Tensor W,  // quant weight
 
   VLLM_DISPATCH_FLOATING_TYPES(DW.scalar_type(), "ggml_dequantize", [&] {
     auto to_cuda = ggml_get_to_cuda<scalar_t>(type);
+    STD_TORCH_CHECK(to_cuda != nullptr,
+                    "ggml_dequantize: unsupported quantization type ", type);
     to_cuda((void*)W.data_ptr(), (scalar_t*)DW.data_ptr(), m * n, stream);
   });
 
   return DW;
 }
 
-Tensor ggml_mul_mat_vec_a8(Tensor W,  // quant weight
-                           Tensor X,  // input
-                           int64_t type, int64_t row) {
+Tensor ggml_mul_mat_vec_a8_legacy(Tensor W,  // quant weight
+                                  Tensor X,  // input
+                                  int64_t type, int64_t row) {
   int64_t col = X.sizes()[1];
   int64_t vecs = X.sizes()[0];
   const int64_t padded = (col + 512 - 1) / 512 * 512;
@@ -217,9 +219,9 @@ Tensor ggml_mul_mat_vec_a8(Tensor W,  // quant weight
   return Y;
 }
 
-Tensor ggml_mul_mat_a8(Tensor W,  // quant weight
-                       Tensor X,  // input
-                       int64_t type, int64_t row) {
+Tensor ggml_mul_mat_a8_legacy(Tensor W,  // quant weight
+                              Tensor X,  // input
+                              int64_t type, int64_t row) {
   int64_t col = X.sizes()[1];
   int64_t padded = (col + 512 - 1) / 512 * 512;
   int64_t batch = X.sizes()[0];
@@ -564,3 +566,13 @@ int64_t ggml_moe_get_block_size(int64_t type) {
   }
   return 0;
 }
+
+#ifdef VLLM_GGUF_LEGACY_ONLY
+Tensor ggml_mul_mat_vec_a8(Tensor W, Tensor X, int64_t type, int64_t row) {
+  return ggml_mul_mat_vec_a8_legacy(W, X, type, row);
+}
+
+Tensor ggml_mul_mat_a8(Tensor W, Tensor X, int64_t type, int64_t row) {
+  return ggml_mul_mat_a8_legacy(W, X, type, row);
+}
+#endif

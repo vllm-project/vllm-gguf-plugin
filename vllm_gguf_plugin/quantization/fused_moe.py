@@ -4,6 +4,7 @@
 from functools import partial
 
 import torch
+from gguf import GGMLQuantizationType as WeightType
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
 )
@@ -22,13 +23,19 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .. import ops
+from ..kernel_support import (
+    QuantizationBackend,
+    QuantizationOperation,
+    supports,
+)
 from .params import (
     GGUFUninitializedWeightParameter,
     GGUFUninitializedWeightTypeParameter,
     _gguf_moe_weight_loader,
     _gguf_moe_weight_type_loader,
+    _materialize_upstream_moe_storage_padding,
+    _store_gguf_weight_type,
 )
-from .utils import MMQ_QUANT_TYPES, MMVQ_QUANT_TYPES, logger
 
 
 def _fused_moe_gguf(
@@ -53,9 +60,48 @@ def _fused_moe_gguf(
     from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
     out_hidden_states = torch.empty_like(x)
+    moe_mode = ops.cuda_moe_kernel_mode()
+    if moe_mode in {"upstream", "auto"}:
+        num_tokens = x.size(0)
+        top_k = topk_ids.size(1)
+        # Routing can be shared only for identical formats. Method decisions
+        # remain per projection, so W2 can still select grouped/another method.
+        alignment_cache = {} if weight_type == weight_type2 else None
+        out = ops.ggml_moe(
+            x,
+            w1,
+            topk_ids,
+            weight_type,
+            w1.size(1),
+            top_k,
+            num_tokens,
+            alignment_cache=alignment_cache,
+        )
+        out = act(out)
+        out = ops.ggml_moe(
+            out,
+            w2,
+            topk_ids.reshape(-1, 1),
+            weight_type2,
+            w2.size(1),
+            1,
+            num_tokens * top_k,
+            alignment_cache=alignment_cache,
+        )
+        out = out.reshape(num_tokens, top_k, w2.size(1)).mul_(
+            topk_weights.view(num_tokens, top_k, 1)
+        )
+        ops.moe_sum(out, out_hidden_states)
+        return out_hidden_states
+
+    backend = QuantizationBackend(moe_mode)
+
+    def backend_supports(quant_type: int, operation: QuantizationOperation) -> bool:
+        return supports(quant_type, backend, operation)
+
     if (
-        weight_type2 in MMQ_QUANT_TYPES
-        and weight_type in MMQ_QUANT_TYPES
+        backend_supports(weight_type2, QuantizationOperation.MMQ)
+        and backend_supports(weight_type, QuantizationOperation.MMQ)
         and x.shape[0] > 64
     ):
         num_tokens, _ = x.shape
@@ -78,6 +124,11 @@ def _fused_moe_gguf(
             num_tokens,
         )
         out = act(out)
+        if weight_type != weight_type2:
+            # A different format/backend can require a different route tile.
+            sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+                topk_ids, ops.ggml_moe_get_block_size(weight_type2), E
+            )
         out = ops.ggml_moe_a8(
             out,
             w2,
@@ -93,7 +144,9 @@ def _fused_moe_gguf(
             topk_weights.view(num_tokens, top_k, 1)
         )
         ops.moe_sum(out, out_hidden_states)
-    elif weight_type2 in MMVQ_QUANT_TYPES and weight_type in MMVQ_QUANT_TYPES:
+    elif backend_supports(
+        weight_type2, QuantizationOperation.MMVQ
+    ) and backend_supports(weight_type, QuantizationOperation.MMVQ):
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
@@ -109,27 +162,7 @@ def _fused_moe_gguf(
         )
         ops.moe_sum(out, out_hidden_states)
     else:
-        from . import fused_mul_mat_gguf as fused_mul_mat_gguf_op
-
-        logger.warning_once(
-            "There is no support for fast MoE kernel "
-            "for current quantization method. "
-            "Falling back to slow implementation. "
-        )
-        for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
-            inp = x[tok].reshape((1,) + x.shape[1:])
-            current_hidden_state = None
-            for ww, ii in zip(w, idx):
-                out = fused_mul_mat_gguf_op(inp, w1[ii], weight_type)
-                out = act(out)
-                current_state = fused_mul_mat_gguf_op(out, w2[ii], weight_type2).mul_(
-                    ww
-                )
-                if current_hidden_state is None:
-                    current_hidden_state = current_state
-                else:
-                    current_hidden_state.add_(current_state)
-            out_hidden_states[tok] = current_hidden_state
+        raise RuntimeError(f"{moe_mode} MoE has no kernel for the selected types")
     return out_hidden_states
 
 
@@ -178,7 +211,6 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        del params_dtype
         base_weight_loader = extra_weight_attrs.pop("weight_loader")
         tensor_shape = (num_experts, 2 * intermediate_size_per_partition, hidden_size)
         w13_weight = GGUFUninitializedWeightParameter(requires_grad=False)
@@ -186,7 +218,10 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             w13_weight,
             {
                 "weight_loader": partial(
-                    _gguf_moe_weight_loader, layer, base_weight_loader
+                    _gguf_moe_weight_loader,
+                    layer,
+                    base_weight_loader,
+                    params_dtype=params_dtype,
                 ),
                 "input_dim": 1,
                 "output_dim": 0,
@@ -217,7 +252,10 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             w2_weight,
             {
                 "weight_loader": partial(
-                    _gguf_moe_weight_loader, layer, base_weight_loader
+                    _gguf_moe_weight_loader,
+                    layer,
+                    base_weight_loader,
+                    params_dtype=params_dtype,
                 ),
                 "input_dim": 1,
                 "output_dim": 0,
@@ -241,6 +279,29 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         )
         set_weight_attrs(w2_weight_type, extra_weight_attrs)
         layer.register_parameter("w2_weight_type", w2_weight_type)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Finalize floating types and upstream storage on MoE weights.
+
+        Align each floating type marker with the loaded tensor's dtype and
+        reserve the trailing storage required by upstream MoE kernels.
+        """
+        float_types = {
+            torch.float32: int(WeightType.F32),
+            torch.float16: int(WeightType.F16),
+            torch.bfloat16: int(WeightType.BF16),
+        }
+        for weight_name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, weight_name)
+            type_param = getattr(layer, f"{weight_name}_type")
+            if weight.dtype in float_types:
+                # The GGUF iterator skips floating weight_type entries, so
+                # their default F32 marker can disagree with the tensor.
+                weight_type = float_types[weight.dtype]
+                _store_gguf_weight_type(
+                    type_param, torch.tensor(weight_type, dtype=torch.uint8)
+                )
+            _materialize_upstream_moe_storage_padding(weight, type_param.weight_type)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

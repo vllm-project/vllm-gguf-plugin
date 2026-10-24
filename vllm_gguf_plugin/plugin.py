@@ -86,15 +86,43 @@ def _patch_engine_args() -> None:
         if self.speculative_config is not None:
             configured_model = configured_model or self.speculative_config.get("model")
 
-        config = original_create_speculative_config(self, *args, **kwargs)
+        # A standalone MTP GGUF has draft weights but no Hugging Face config.
+        # Build the draft config from the target's config, then point its
+        # weights at the explicit GGUF file. The MTP adapter loads only nextn.
+        explicit_gguf_draft = (
+            configured_model is not None
+            and _is_gguf_reference(configured_model)
+            and _is_gguf_reference(self.model_weights)
+            and self.speculative_config is not None
+            and self.speculative_config.get("method") == "mtp"
+        )
+        if explicit_gguf_draft:
+            target_model_config = args[0] if args else kwargs["target_model_config"]
+            saved_spec_model = self.spec_model
+            saved_spec_config = self.speculative_config
+            self.spec_model = None
+            self.speculative_config = {
+                **saved_spec_config,
+                "model": target_model_config.model,
+                "quantization": "gguf",
+            }
+            try:
+                config = original_create_speculative_config(self, *args, **kwargs)
+            finally:
+                self.spec_model = saved_spec_model
+                self.speculative_config = saved_spec_config
+        else:
+            config = original_create_speculative_config(self, *args, **kwargs)
         gguf_model = self.model_weights
         if (
             config is not None
             and config.method == "mtp"
-            and configured_model is None
             and _is_gguf_reference(gguf_model)
         ):
-            config.draft_model_config.model_weights = gguf_model
+            if configured_model is None:
+                config.draft_model_config.model_weights = gguf_model
+            elif explicit_gguf_draft:
+                config.draft_model_config.model_weights = configured_model
         return config
 
     EngineArgs.create_speculative_config = create_speculative_config

@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -71,6 +73,9 @@ jobs:
       - name: Check package metadata
         run: python -m twine check dist/*
 
+      - name: Verify license materials
+        run: python scripts/verify_release_artifact.py dist/*.tar.gz
+
       - name: Upload source distribution artifact
         uses: actions/upload-artifact@v4
         with:
@@ -96,6 +101,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install uv
         run: |
@@ -126,6 +133,9 @@ jobs:
 
       - name: Check wheel metadata
         run: python -m twine check dist/*.whl
+
+      - name: Verify license materials
+        run: python scripts/verify_release_artifact.py dist/*.whl
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
@@ -152,6 +162,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install uv
         run: |
@@ -183,6 +195,9 @@ jobs:
       - name: Check wheel metadata
         run: python -m twine check dist/*.whl
 
+      - name: Verify license materials
+        run: python scripts/verify_release_artifact.py dist/*.whl
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
@@ -207,6 +222,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install uv
         run: |
@@ -238,6 +255,9 @@ jobs:
       - name: Check wheel metadata
         run: python -m twine check dist/*.whl
 
+      - name: Verify license materials
+        run: python scripts/verify_release_artifact.py dist/*.whl
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
@@ -261,6 +281,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install uv
         run: |
@@ -291,6 +313,9 @@ jobs:
 
       - name: Check wheel metadata
         run: python -m twine check dist/*.whl
+
+      - name: Verify license materials
+        run: python scripts/verify_release_artifact.py dist/*.whl
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4

@@ -8,6 +8,7 @@ dynamic = ["version"]
 description = "Out-of-tree GGUF quantization plugin for vLLM"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE", "LICENSES/*.txt", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.10"
 dependencies = [
     "gguf>=0.17.0",
@@ -79,6 +80,9 @@ ignore-hidden = false
 
 [tool.typos.default.extend-identifiers]
 iy = "iy"
+
+[tool.typos.default.extend-words]
+Optin = "Optin"
 
 [tool.pytest.ini_options]
 markers = [
