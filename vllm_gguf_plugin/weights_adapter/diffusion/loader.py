@@ -173,15 +173,6 @@ def _gguf_weights_for_loadable_names(
             yield name, tensor
 
 
-def _hf_weights_for_loadable_names(
-    weights: Iterable[tuple[str, torch.Tensor]],
-    loadable_names: set[str],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    for name, tensor in weights:
-        if name in loadable_names:
-            yield name, tensor
-
-
 def load_diffusion_gguf_weights(
     gguf_model: str,
     model: nn.Module,
@@ -228,9 +219,18 @@ def load_diffusion_gguf_weights(
     adapter = get_diffusion_gguf_adapter(gguf_file, model_class_name, model_type)
     loaded: set[str] = set()
     loadable_names: set[str] | None = None
+    gguf_sources = [source for source in sources if _is_gguf_source(source, adapter)]
+    if len(gguf_sources) != 1:
+        matched_prefixes = ", ".join(source.prefix for source in gguf_sources) or "none"
+        raise ValueError(
+            f"{type(adapter).__name__} must match exactly one weight source for a "
+            f"single gguf_model, but matched {len(gguf_sources)} "
+            f"({matched_prefixes})."
+        )
+    gguf_source = gguf_sources[0]
 
     for source in sources:
-        if _is_gguf_source(source, adapter):
+        if source is gguf_source:
             loadable_names = loadable_names or _get_loadable_names(model)
             gguf_iter = (
                 (source.prefix + name, tensor)
@@ -240,16 +240,13 @@ def load_diffusion_gguf_weights(
                 _gguf_weights_for_loadable_names(gguf_iter, loadable_names)
             )
         else:
-            # Non-transformer components always load from HF.
-            loadable_names = loadable_names or _get_loadable_names(model)
+            # Non-transformer components always load from HF. Preserve their
+            # checkpoint names because model loaders may map or fuse them.
             loaded |= model.load_weights(
-                _hf_weights_for_loadable_names(
-                    (
-                        (name, tensor)
-                        for name, tensor in hf_weights_fn(source)
-                        if not source.prefix or name.startswith(source.prefix)
-                    ),
-                    loadable_names,
+                (
+                    (name, tensor)
+                    for name, tensor in hf_weights_fn(source)
+                    if not source.prefix or name.startswith(source.prefix)
                 )
             )
 
