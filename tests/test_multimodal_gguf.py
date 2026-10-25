@@ -84,7 +84,7 @@ GEMMA4_CONFIG = GGUFMMTestConfig(
     image_size_factors=(0.25,),
 )
 
-_QWEN35_PROMPTS = [
+_QWEN_VL_PROMPTS = [
     (
         "<|im_start|>user\n"
         "<|vision_start|><|image_pad|><|vision_end|>"
@@ -98,20 +98,47 @@ _QWEN35_PROMPTS = [
         "<|im_end|>\n<|im_start|>assistant\n"
     ),
 ]
-_QWEN35_IMAGE_NAMES = ["stop_sign", "cherry_blossom"]
+_QWEN_VL_IMAGE_NAMES = ["stop_sign", "cherry_blossom"]
+
+QWEN2_VL_CONFIG = GGUFMMTestConfig(
+    original_model="Qwen/Qwen2-VL-2B-Instruct",
+    gguf_model_path="bartowski/Qwen2-VL-2B-Instruct-GGUF:Q4_K_M",
+    prompts=[_QWEN_VL_PROMPTS[0]],
+    image_names=[_QWEN_VL_IMAGE_NAMES[0]],
+    mm_processor_kwargs={"min_pixels": 4096, "max_pixels": 65536},
+    image_size_factors=(0.25,),
+)
+
+QWEN25_VL_CONFIG = GGUFMMTestConfig(
+    original_model="Qwen/Qwen2.5-VL-3B-Instruct",
+    gguf_model_path="Mungert/Qwen2.5-VL-3B-Instruct-GGUF:Q4_K_M",
+    prompts=[_QWEN_VL_PROMPTS[0]],
+    image_names=[_QWEN_VL_IMAGE_NAMES[0]],
+    mm_processor_kwargs={"min_pixels": 4096, "max_pixels": 65536},
+    image_size_factors=(0.25,),
+)
+
+QWEN3_VL_CONFIG = GGUFMMTestConfig(
+    original_model="Qwen/Qwen3-VL-2B-Instruct",
+    gguf_model_path="Qwen/Qwen3-VL-2B-Instruct-GGUF:Q4_K_M",
+    prompts=[_QWEN_VL_PROMPTS[0]],
+    image_names=[_QWEN_VL_IMAGE_NAMES[0]],
+    mm_processor_kwargs={"min_pixels": 4096, "max_pixels": 65536},
+    image_size_factors=(0.25,),
+)
 
 QWEN35_CONFIG = GGUFMMTestConfig(
     original_model="Qwen/Qwen3.5-0.8B",
     gguf_model_path="unsloth/Qwen3.5-0.8B-GGUF:Q4_K_M",
-    prompts=_QWEN35_PROMPTS,
-    image_names=_QWEN35_IMAGE_NAMES,
+    prompts=_QWEN_VL_PROMPTS,
+    image_names=_QWEN_VL_IMAGE_NAMES,
 )
 
 QWEN35_MOE_CONFIG = GGUFMMTestConfig(
     original_model="Qwen/Qwen3.5-35B-A3B",
     gguf_model_path="unsloth/Qwen3.5-35B-A3B-GGUF:Q4_K_M",
-    prompts=_QWEN35_PROMPTS,
-    image_names=_QWEN35_IMAGE_NAMES,
+    prompts=_QWEN_VL_PROMPTS,
+    image_names=_QWEN_VL_IMAGE_NAMES,
 )
 
 GEMMA3_MODELS_TO_TEST = [
@@ -121,6 +148,11 @@ GEMMA3_MODELS_TO_TEST = [
 QWEN35_MODELS_TO_TEST = [
     QWEN35_CONFIG,
     pytest.param(QWEN35_MOE_CONFIG, marks=pytest.mark.slow),
+]
+QWEN_VL_MODELS_TO_TEST = [
+    QWEN2_VL_CONFIG,
+    QWEN25_VL_CONFIG,
+    QWEN3_VL_CONFIG,
 ]
 
 
@@ -363,6 +395,23 @@ def test_gemma3_mm_gguf(
 @pytest.mark.parametrize("max_tokens", [MAX_TOKENS])
 @pytest.mark.parametrize("num_logprobs", [NUM_LOGPROBS])
 def test_qwen35_mm_gguf(
+    model: GGUFMMTestConfig,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+    run_multimodal_gguf_test(model, dtype, max_tokens, num_logprobs)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for multimodal GGUF tests.",
+)
+@pytest.mark.parametrize("model", QWEN_VL_MODELS_TO_TEST)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [MAX_TOKENS])
+@pytest.mark.parametrize("num_logprobs", [NUM_LOGPROBS])
+def test_qwen_vl_mm_gguf(
     model: GGUFMMTestConfig,
     dtype: str,
     max_tokens: int,
