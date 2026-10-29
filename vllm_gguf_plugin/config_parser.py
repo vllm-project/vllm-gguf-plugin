@@ -46,6 +46,8 @@ class GGUFConfigParser(ConfigParserBase):
             and config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
         ):
             architecture = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
+        if architecture is None and getattr(config, "architectures", None):
+            architecture = config.architectures[0]
         if architecture is None:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
 
