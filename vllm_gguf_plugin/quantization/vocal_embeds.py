@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from functools import partial
 
 import gguf
@@ -16,6 +17,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .. import ops
+from ..triton.dequantize.embedding_q4_k import ggml_embedding_q4_k_triton
+from ..triton.gemm.utils import GGML_TYPE_Q4_K
 from .linear import GGUFLinearMethod
 from .params import (
     GGUFUninitializedWeightParameter,
@@ -26,6 +29,10 @@ from .params import (
     _materialize_gguf_weight_type_parameter,
 )
 from .utils import DEQUANT_TYPES, UNQUANTIZED_TYPES
+
+_USE_FUSED_Q4_K_EMBEDDING = (
+    os.environ.get("GGUF_PLUGIN_USE_FUSED_Q4_K_EMBEDDING", "1") == "1"
+)
 
 
 def recursive_replace_vocab_modules(
@@ -86,6 +93,19 @@ def _apply_gguf_embedding(
     if weight_type in UNQUANTIZED_TYPES:
         return torch.embedding(weight, x)
     if weight_type in DEQUANT_TYPES:
+        if (
+            _USE_FUSED_Q4_K_EMBEDDING
+            and torch.version.hip is None
+            and weight_type == GGML_TYPE_Q4_K
+            and x.device == weight.device
+            and x.is_contiguous()
+            and weight.is_cuda
+            and weight.is_contiguous()
+        ):
+            round_to_half = ops._cuda_kernel_available("ggml_dequantize", weight_type)
+            return ggml_embedding_q4_k_triton(
+                weight, x, hidden_size, dtype, round_to_half=round_to_half
+            )
         block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
         x_flat = x.flatten()
         assert hidden_size == weight.shape[1] // type_size * block_size
