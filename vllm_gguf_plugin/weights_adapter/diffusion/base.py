@@ -11,6 +11,8 @@ import numpy as np
 import torch
 from vllm.model_executor.models.utils import WeightsMapper
 
+from ...weight_utils import gguf_weight_type_name
+
 UNQUANTIZED_GGUF_TYPE_NAMES = {"F32", "F16", "BF16"}
 
 
@@ -91,7 +93,7 @@ def gguf_quant_weights_iterator(
         name = tensor.name
 
         if weight_type.name not in UNQUANTIZED_GGUF_TYPE_NAMES:
-            weight_type_name = name.replace("weight", "weight_type")
+            weight_type_name = gguf_weight_type_name(name)
             weight_type = torch.tensor(weight_type)
             yield weight_type_name, weight_type
 
