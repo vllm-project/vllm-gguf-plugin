@@ -53,57 +53,80 @@ def _fused_moe_gguf(
     from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
     out_hidden_states = torch.empty_like(x)
-    if (
-        weight_type2 in MMQ_QUANT_TYPES
-        and weight_type in MMQ_QUANT_TYPES
-        and x.shape[0] > 64
-    ):
-        num_tokens, _ = x.shape
-        E, N, _ = w1.shape
-        top_k = topk_ids.shape[1]
-        block_size = ops.ggml_moe_get_block_size(weight_type)
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, block_size, E
-        )
-        out = ops.ggml_moe_a8(
-            x,
-            w1,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            weight_type,
-            N,
-            top_k,
-            num_tokens,
-        )
-        out = act(out)
-        out = ops.ggml_moe_a8(
-            out,
-            w2,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            weight_type2,
-            w2.shape[1],
-            1,
-            num_tokens * top_k,
-        )
-        out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
-            topk_weights.view(num_tokens, top_k, 1)
-        )
-        ops.moe_sum(out, out_hidden_states)
-    elif weight_type2 in MMVQ_QUANT_TYPES and weight_type in MMVQ_QUANT_TYPES:
+    # w1 and w2 are separate tensors carrying separate quant types, and both
+    # stages consume and produce the same token-major flattened layout, so each
+    # stage can pick its own kernel. Deciding once for the pair -- as this used
+    # to -- means the worse-served tensor drags the other one with it.
+    #
+    # Mixed-type MoE checkpoints make that the common case rather than a corner:
+    # a dynamic GGUF that stores ffn_gate/up_exps as an IQ type (MMVQ only) and
+    # ffn_down_exps as a K-quant sends the K-quant half to the per-row mat-vec
+    # kernel too, even though its MMQ tile GEMM is right there.
+    tile_eligible = x.shape[0] > 64
+    w1_tile = tile_eligible and weight_type in MMQ_QUANT_TYPES
+    w2_tile = tile_eligible and weight_type2 in MMQ_QUANT_TYPES
+    w1_ok = w1_tile or weight_type in MMVQ_QUANT_TYPES
+    w2_ok = w2_tile or weight_type2 in MMVQ_QUANT_TYPES
+
+    if w1_ok and w2_ok:
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
 
-        out = ops.ggml_moe_a8_vec(x, w1, topk_ids, top_k, weight_type, N, num_tokens)
+        # Both stages index the same flattened (token, top_k) space, so an
+        # alignment is reusable whenever the block size matches -- which is the
+        # common case, and keeps the all-tile path at one alignment as before.
+        alignments: dict[int, tuple] = {}
+
+        def aligned_for(quant_type: int) -> tuple:
+            block_size = ops.ggml_moe_get_block_size(quant_type)
+            if block_size not in alignments:
+                alignments[block_size] = moe_align_block_size(topk_ids, block_size, E)
+            return alignments[block_size]
+
+        if w1_tile:
+            sorted_token_ids, expert_ids, num_tokens_post_padded = aligned_for(
+                weight_type
+            )
+            out = ops.ggml_moe_a8(
+                x,
+                w1,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                weight_type,
+                N,
+                top_k,
+                num_tokens,
+            )
+        else:
+            out = ops.ggml_moe_a8_vec(
+                x, w1, topk_ids, top_k, weight_type, N, num_tokens
+            )
+
         out = act(out)
 
-        out = ops.ggml_moe_a8_vec(
-            out, w2, topk_ids, 1, weight_type2, w2.shape[1], num_tokens * top_k
-        )
+        if w2_tile:
+            sorted_token_ids, expert_ids, num_tokens_post_padded = aligned_for(
+                weight_type2
+            )
+            out = ops.ggml_moe_a8(
+                out,
+                w2,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                weight_type2,
+                w2.shape[1],
+                1,
+                num_tokens * top_k,
+            )
+        else:
+            out = ops.ggml_moe_a8_vec(
+                out, w2, topk_ids, 1, weight_type2, w2.shape[1], num_tokens * top_k
+            )
+
         out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
             topk_weights.view(num_tokens, top_k, 1)
         )
