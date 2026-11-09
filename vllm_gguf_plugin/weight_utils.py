@@ -117,6 +117,9 @@ def resolve_local_gguf(local_dir: str, quant_type: str) -> str:
     matches: list[str] = []
     for pat in patterns:
         matches.extend(glob_mod.glob(os.path.join(local_dir, pat)))
+    matches = [
+        path for path in matches if "mmproj" not in os.path.basename(path).lower()
+    ]
     if not matches:
         raise ValueError(
             f"No GGUF file matching quant_type '{quant_type}' found in {local_dir}"
