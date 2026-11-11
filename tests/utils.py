@@ -1,4 +1,5 @@
 import random
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -19,14 +20,15 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-GGUF_SAMPLE = snapshot_download("Isotr0py/test-gguf-sample")
-GGUF_SAMPLE_MOE = snapshot_download("SzymonOzog/test-gguf-moe-sample")
+@cache
+def _sample_dir(repo_id: str) -> Path:
+    return Path(snapshot_download(repo_id))
 
 
 def get_gguf_sample_tensors(
     hidden_size: int, quant_type: GGMLQuantizationType
 ) -> list[ReaderTensor]:
-    sample_dir = GGUF_SAMPLE
+    sample_dir = _sample_dir("Isotr0py/test-gguf-sample")
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename
     return GGUFReader(sample_file).tensors
@@ -35,7 +37,7 @@ def get_gguf_sample_tensors(
 def get_gguf_moe_tensors(
     hidden_size: int, quant_type: GGMLQuantizationType
 ) -> list[ReaderTensor]:
-    sample_dir = GGUF_SAMPLE_MOE
+    sample_dir = _sample_dir("SzymonOzog/test-gguf-moe-sample")
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename
     return GGUFReader(sample_file).tensors

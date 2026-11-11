@@ -12,11 +12,101 @@ from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parameter import BasevLLMParameter
 
+from ..kernel_support import upstream_storage_padding_bytes
+
 
 def _clone_loaded_weight(loaded_weight: torch.Tensor) -> torch.Tensor:
     if len(loaded_weight.shape) == 0:
         loaded_weight = loaded_weight.reshape(1)
     return loaded_weight.detach().clone()
+
+
+def _loaded_weight_type(
+    param: Parameter | UninitializedParameter,
+    shard_id: int | str | None,
+) -> int | None:
+    weight_type_param = getattr(param, "gguf_weight_type_parameter", None)
+    if weight_type_param is None:
+        return None
+    if shard_id is not None:
+        return weight_type_param.shard_weight_type.get(shard_id)
+    return getattr(weight_type_param, "weight_type", None)
+
+
+def _copy_loaded_weight(
+    param: Parameter | UninitializedParameter,
+    loaded_weight: torch.Tensor,
+    shard_id: int | str | None,
+) -> torch.Tensor:
+    if loaded_weight.ndim == 0:
+        loaded_weight = loaded_weight.reshape(1)
+    loaded_weight = loaded_weight.detach()
+    padding_bytes = 0
+    weight_type = _loaded_weight_type(param, shard_id)
+    if (
+        torch.version.hip is None
+        and weight_type is not None
+        and loaded_weight.dtype == torch.uint8
+        and loaded_weight.ndim == 2
+    ):
+        padding_bytes = upstream_storage_padding_bytes(
+            weight_type, loaded_weight.shape[1]
+        )
+    if padding_bytes == 0:
+        return loaded_weight.clone().to(device=param.device)
+
+    storage = torch.empty(
+        loaded_weight.numel() + padding_bytes,
+        dtype=loaded_weight.dtype,
+        device=param.device,
+    )
+    data = storage[: loaded_weight.numel()].view_as(loaded_weight)
+    data.copy_(loaded_weight)
+    storage[loaded_weight.numel() :].zero_()
+    return data
+
+
+def _materialize_upstream_moe_storage_padding(
+    param: Parameter | UninitializedParameter,
+    weight_type: int,
+) -> None:
+    """Give a 3D MoE weight the MATRIX_ROW_PADDING storage tail.
+
+    The upstream MoE kernels read up to MATRIX_ROW_PADDING bytes past the
+    logical row end, so the trailing storage must exist even though the
+    logical tensor shape stays unchanged. Called once per MoE layer after
+    all expert weights are loaded; if the loader already preallocated the
+    tail (or padding is not needed) this is a no-op.
+    """
+    if (
+        torch.version.hip is not None
+        or isinstance(param, UninitializedParameter)
+        or param.data.dtype != torch.uint8
+        or param.data.ndim != 3
+        or not param.data.is_contiguous()
+        or param.data.numel() == 0
+    ):
+        return
+
+    padding_bytes = upstream_storage_padding_bytes(weight_type, param.data.shape[-1])
+    if padding_bytes == 0:
+        return
+
+    data = param.data
+    offset_bytes = data.storage_offset() * data.element_size()
+    logical_bytes = data.numel() * data.element_size()
+    if data.untyped_storage().nbytes() >= offset_bytes + logical_bytes + padding_bytes:
+        return
+
+    padded_storage = torch.empty(
+        data.numel() + padding_bytes,
+        dtype=data.dtype,
+        device=data.device,
+    )
+    padded_data = padded_storage[: data.numel()].view_as(data)
+    padded_data.copy_(data)
+    padded_storage[data.numel() :].zero_()
+    param.data = padded_data
 
 
 def _resolve_gguf_weight_loader(
@@ -77,12 +167,11 @@ def _store_gguf_loaded_weight(
     loaded_weight: torch.Tensor,
     shard_id: int | str | None = None,
 ) -> None:
-    loaded_weight = _clone_loaded_weight(loaded_weight).to(device=param.device)
+    loaded_weight = _copy_loaded_weight(param, loaded_weight, shard_id)
     if shard_id is None:
-        _materialize_parameter_data(
-            param, tuple(loaded_weight.shape), loaded_weight.dtype
-        )
-        param.data.copy_(loaded_weight)
+        if isinstance(param, UninitializedParameter):
+            param.materialize((0,), device=param.device, dtype=loaded_weight.dtype)
+        param.data = loaded_weight
         return
 
     if shard_id not in param.shard_id_map:
@@ -196,7 +285,13 @@ def _gguf_moe_weight_loader(
     shard_id: str,
     expert_id: int,
     return_success: bool = False,
+    *,
+    params_dtype: torch.dtype,
 ) -> bool | None:
+    # GGUF floating expert tensors may use a different dtype from the model's
+    # activations. Convert once before allocating the destination parameter.
+    if loaded_weight.is_floating_point():
+        loaded_weight = loaded_weight.to(dtype=params_dtype)
     _materialize_gguf_moe_param(layer, param, loaded_weight, shard_id)
     return base_weight_loader(
         param,
