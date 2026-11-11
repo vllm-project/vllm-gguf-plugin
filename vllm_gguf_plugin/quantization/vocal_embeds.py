@@ -195,4 +195,7 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
 
     def tie_weights(self, layer: torch.nn.Module, embed_tokens: VocabParallelEmbedding):
         del layer
+        # `lm_head` is the embedding itself, give it `ParallelLMHead`'s `bias`
+        if not hasattr(embed_tokens, "bias"):
+            embed_tokens.register_parameter("bias", None)
         return embed_tokens
