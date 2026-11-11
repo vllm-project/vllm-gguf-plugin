@@ -470,3 +470,13 @@ def test_gguf_merged_column_releases_shards_after_concat(monkeypatch):
     assert layer.weight is not source_param
     assert not source_param.data_container
     assert all(ref() is None for ref in shard_refs)
+
+
+def test_tied_lm_head_has_no_bias():
+    """Tying returns the embedding as `lm_head`, which callers read `bias` from."""
+    from vllm_gguf_plugin.quantization.vocal_embeds import GGUFEmbeddingMethod
+
+    embed_tokens = torch.nn.Module()
+    lm_head = GGUFEmbeddingMethod.tie_weights(None, torch.nn.Module(), embed_tokens)
+    assert lm_head is embed_tokens
+    assert lm_head.bias is None
