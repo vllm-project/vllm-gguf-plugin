@@ -18,16 +18,21 @@ from .linear import GGUFLinearMethod
 from .utils import UNQUANTIZED_TYPES, is_layer_skipped_gguf
 
 
-def dequant_gemm_gguf(
-    x: torch.Tensor, weight: torch.Tensor, weight_type: int
+def dequant_gguf(
+    weight: torch.Tensor, weight_type: int, dtype: torch.dtype
 ) -> torch.Tensor:
     if weight_type in UNQUANTIZED_TYPES:
-        return x @ weight.T
+        return weight
 
     block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
     shape = (weight.shape[0], weight.shape[1] // type_size * block_size)
-    weight = ops.ggml_dequantize(weight, weight_type, *shape, x.dtype)
-    return x @ weight.T
+    return ops.ggml_dequantize(weight, weight_type, *shape, dtype)
+
+
+def dequant_gemm_gguf(
+    x: torch.Tensor, weight: torch.Tensor, weight_type: int
+) -> torch.Tensor:
+    return x @ dequant_gguf(weight, weight_type, x.dtype).T
 
 
 class DiffusionGGUFLinearMethod(GGUFLinearMethod):
@@ -64,11 +69,11 @@ class DiffusionGGUFLinearMethod(GGUFLinearMethod):
                     idx, fallback_wtype
                 )
                 result.append(
-                    dequant_gemm_gguf(
-                        x, weight[start:end, :offset].contiguous(), weight_type
+                    dequant_gguf(
+                        weight[start:end, :offset].contiguous(), weight_type, x.dtype
                     )
                 )
-            out = torch.cat(result, axis=1)
+            out = x @ torch.cat(result, dim=0).T
         else:
             weight = layer.weight
             weight_type = layer.weight_type.weight_type
