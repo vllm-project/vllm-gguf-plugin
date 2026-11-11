@@ -11,7 +11,11 @@ from vllm.config.load import LoadConfig
 import vllm_gguf_plugin.loader as loader_module
 from vllm_gguf_plugin.gguf_files import GGUFModelFiles
 from vllm_gguf_plugin.loader import GGUFModelLoader
-from vllm_gguf_plugin.weight_utils import download_gguf, download_mmproj
+from vllm_gguf_plugin.weight_utils import (
+    download_gguf,
+    download_mmproj,
+    resolve_local_gguf,
+)
 
 
 class TestGGUFDownload:
@@ -158,6 +162,17 @@ class TestGGUFDownload:
 
         with pytest.raises(ValueError, match="Downloaded GGUF files not found"):
             download_gguf("unsloth/gemma-3-4b-it-GGUF", "F16")
+
+    def test_resolve_local_gguf_skips_the_multimodal_projector(self, tmp_path):
+        folder = self._make_repo(tmp_path, ["mmproj-BF16.gguf", "z-model-BF16.gguf"])
+
+        assert resolve_local_gguf(folder, "BF16") == f"{folder}/z-model-BF16.gguf"
+
+    def test_resolve_local_gguf_rejects_only_a_projector(self, tmp_path):
+        folder = self._make_repo(tmp_path, ["mmproj-F16.gguf"])
+
+        with pytest.raises(ValueError, match="No GGUF file matching quant_type"):
+            resolve_local_gguf(folder, "F16")
 
     @patch("vllm_gguf_plugin.weight_utils.hf_hub_download")
     @patch("vllm_gguf_plugin.weight_utils.list_filtered_repo_files")
