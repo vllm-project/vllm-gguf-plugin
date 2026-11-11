@@ -1123,7 +1123,9 @@ static __device__ __forceinline__ int __vsubss4(const int a, const int b) {
 }
 
 static __device__ __forceinline__ int __dp4a(const int a, const int b, int c) {
-#if __has_builtin(__builtin_amdgcn_sdot4)
+#if __has_builtin(__builtin_amdgcn_sudot4)
+    c = __builtin_amdgcn_sudot4(true, a, true, b, c, false);
+#elif __has_builtin(__builtin_amdgcn_sdot4)
     c = __builtin_amdgcn_sdot4(a, b, c, false);
 #else
     const int8x4_t va = reinterpret_cast<const int8x4_t&>(a);
