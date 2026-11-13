@@ -1,0 +1,162 @@
+name: Windows wheels
+
+on:
+  pull_request:
+  push:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheel:
+    name: Build wheel (Windows ${{ matrix.arch }}, ${{ matrix.backend }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            arch: x64
+            cuda: "12.9.1"
+            cuda-components: '["nvcc", "cudart", "cccl"]'
+            backend: cu129
+            version-suffix: +cu129
+            torch: "torch==2.9.0+cu129"
+            torch-index: https://download.pytorch.org/whl/cu129
+            cuda-arch-list: ""
+          - runner: windows-2022
+            arch: x64
+            cuda: "13.0.2"
+            cuda-components: '["nvcc", "crt", "nvvm", "cudart", "cccl"]'
+            backend: cu130
+            version-suffix: ""
+            torch: "torch==2.9.1+cu130"
+            torch-index: https://download.pytorch.org/whl/cu130
+            cuda-arch-list: ""
+          - runner: windows-11-arm
+            arch: arm64
+            cuda: "13.4.0"
+            backend: cu134
+            version-suffix: ""
+            torch: "torch==2.14.0+cu134"
+            torch-index: https://pypi.nvidia.com/nvtorch_oot/
+            cuda-arch-list: "12.1+PTX"
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      VLLM_GGUF_PLUGIN_LOCAL_VERSION_SUFFIX: ${{ matrix.version-suffix }}
+      TORCH_CUDA_ARCH_LIST: ${{ matrix.cuda-arch-list }}
+      DISTUTILS_USE_SDK: "1"
+      MAX_JOBS: "2"
+      UV_PYTHON_DOWNLOADS: never
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.arch }}
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Install CUDA (x64)
+        if: matrix.arch == 'x64'
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: network
+          sub-packages: ${{ matrix.cuda-components }}
+
+      # cuda-toolkit does not yet provide Windows ARM64 installer URLs.
+      - name: Install CUDA (ARM64)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "cuda-arm64.exe"
+          Invoke-WebRequest `
+            -Uri "https://packages.nvidia.com/prerelease/cuda/13.4.0/local_installers/cuda_13.4.0_windows_arm64.exe" `
+            -OutFile $installer
+          $process = Start-Process -FilePath $installer -Wait -PassThru `
+            -ArgumentList "-s", "nvcc_13.4", "crt_13.4", "nvvm_13.4", "cudart_13.4", "cccl_13.4"
+          if ($process.ExitCode -notin 0, 3010) {
+            throw "CUDA installer failed with exit code $($process.ExitCode)"
+          }
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4"
+          if (!(Test-Path "$cuda\bin\nvcc.exe") -or !(Test-Path "$cuda\lib\arm64\cudart.lib")) {
+            throw "The native ARM64 CUDA compiler or runtime import library is missing"
+          }
+          "CUDA_PATH=$cuda" >> $env:GITHUB_ENV
+          "CUDA_HOME=$cuda" >> $env:GITHUB_ENV
+          "$cuda\bin" >> $env:GITHUB_PATH
+          "$cuda\bin\arm64" >> $env:GITHUB_PATH
+          Remove-Item -LiteralPath $installer
+
+      - name: Install build dependencies
+        env:
+          TORCH_PACKAGE: ${{ matrix.torch }}
+          TORCH_INDEX: ${{ matrix.torch-index }}
+        run: |
+          python -m pip install uv
+          uv venv --python "$(python -c 'import sys; print(sys.executable)')"
+          python -c 'from pathlib import Path; print("UV_PYTHON=" + str(Path(".venv/Scripts/python.exe").resolve()))' >> "$GITHUB_ENV"
+          uv pip install "setuptools>=77.0.3,<81.0.0" wheel twine pytest ninja
+          uv pip install "$TORCH_PACKAGE" --extra-index-url "$TORCH_INDEX"
+
+      - name: Check native build configuration
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_CUDA: ${{ matrix.cuda }}
+        run: |
+          uv run --no-project python - <<'PY'
+          import os
+          import sysconfig
+          import torch
+
+          platform = {"x64": "win-amd64", "arm64": "win-arm64"}[os.environ["EXPECTED_ARCH"]]
+          assert sysconfig.get_platform() == platform, sysconfig.get_platform()
+          cuda = ".".join(os.environ["EXPECTED_CUDA"].split(".")[:2])
+          assert torch.version.cuda == cuda, torch.version.cuda
+          print(f"Building {platform} with PyTorch {torch.__version__} and CUDA {cuda}")
+          PY
+          uv run --no-project pytest tests/test_build.py
+
+      - name: Build wheel
+        run: bash scripts/build_release_wheel.sh
+
+      - name: Check wheel metadata
+        run: uv run --no-project python -m twine check dist/*.whl
+
+      - name: Load installed native extension
+        run: |
+          uv pip install --no-deps dist/*.whl
+          uv run --no-project python -I - <<'PY'
+          import importlib.metadata
+          import importlib.util
+          import torch
+
+          distribution = importlib.metadata.distribution("vllm-gguf-plugin")
+          extensions = [f for f in distribution.files if f.name.startswith("_C_gguf") and f.suffix == ".pyd"]
+          assert len(extensions) == 1, extensions
+          # Load directly: GPU-less build runners do not have a Windows vLLM installation.
+          spec = importlib.util.spec_from_file_location("_C_gguf", distribution.locate_file(extensions[0]))
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          assert torch.ops._C_gguf.ggml_moe_get_block_size(2) > 0
+          PY
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel-${{ matrix.backend }}-windows-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error

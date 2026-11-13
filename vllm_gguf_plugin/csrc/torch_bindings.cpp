@@ -56,6 +56,6 @@ static struct PyModuleDef _module_def = {
     PyModuleDef_HEAD_INIT, "_C_gguf", nullptr, -1, nullptr,
 };
 
-extern "C" PyObject* PyInit__C_gguf(void) {
+PyMODINIT_FUNC PyInit__C_gguf(void) {
   return PyModule_Create(&_module_def);
 }

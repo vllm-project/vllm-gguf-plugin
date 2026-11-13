@@ -4,6 +4,15 @@
 # Forwards extra args to `uv build` (e.g. -o /tmp/dist).
 set -euo pipefail
 
+if [ "${OS:-}" = "Windows_NT" ]; then
+    if ! command -v cl.exe >/dev/null 2>&1; then
+        echo "error: run from a Visual Studio developer shell with cl.exe on PATH" >&2
+        exit 1
+    fi
+    # Git Bash prepends its own link.exe; setuptools needs the MSVC linker.
+    export PATH="$(dirname "$(command -v cl.exe)"):$PATH"
+fi
+
 if ! command -v nvcc >/dev/null 2>&1; then
     echo "error: nvcc not found on PATH" >&2
     exit 1
@@ -15,7 +24,9 @@ cuda_minor=${cuda_release#*.}
 
 # 10.1 is dropped from the 12.8 list: PyTorch's TORCH_CUDA_ARCH_LIST validator
 # (torch.utils.cpp_extension._get_cuda_arch_flags) does not list it.
-if [ "$cuda_major" -ge 13 ]; then
+if [ -n "${TORCH_CUDA_ARCH_LIST:-}" ]; then
+    export TORCH_CUDA_ARCH_LIST
+elif [ "$cuda_major" -ge 13 ]; then
     export TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0"
 elif [ "$cuda_major" -ge 12 ] && [ "$cuda_minor" -ge 8 ]; then
     export TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.7;8.9;9.0;10.0"
