@@ -1,6 +1,11 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <c10/util/Exception.h>
+
+#include <cstdint>
+#include <string>
+
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/ops.h>
@@ -20,6 +25,15 @@
 using torch::headeronly::ScalarType;
 using torch::stable::Tensor;
 using torch::stable::accelerator::DeviceGuard;
+
+// Kernel params are int; dims >= 2^31 would silently truncate there.
+// Validate every crossing at the op boundary (see issue #127).
+static inline void check_kernel_int_range(int64_t v, const char* what) {
+  if (v < 0 || v > INT32_MAX) {
+    throw c10::Error("gguf: kernel parameter out of int32 range: " +
+                     std::string(what) + " = " + std::to_string(v));
+  }
+}
 
 static inline cudaStream_t get_current_cuda_stream(int32_t device_index) {
   void* raw_stream = nullptr;
@@ -87,6 +101,8 @@ static void quantize_row_q8_1_cuda(const scalar_t* x, void* vy, const int kx,
 Tensor ggml_dequantize(Tensor W,  // quant weight
                        int64_t type, int64_t m, int64_t n,
                        std::optional<ScalarType> dtype) {
+  check_kernel_int_range(m, "dequantize m");
+  check_kernel_int_range(n, "dequantize n");
   const int32_t device_idx = W.get_device_index();
   const DeviceGuard device_guard(device_idx);
   const auto dtype_ = dtype.value_or(ScalarType::Half);
@@ -107,6 +123,10 @@ Tensor ggml_mul_mat_vec_a8(Tensor W,  // quant weight
   int64_t col = X.sizes()[1];
   int64_t vecs = X.sizes()[0];
   const int64_t padded = (col + 512 - 1) / 512 * 512;
+  check_kernel_int_range(col, "mul_mat_vec col");
+  check_kernel_int_range(vecs, "mul_mat_vec vecs");
+  check_kernel_int_range(row, "mul_mat_vec row");
+  check_kernel_int_range(padded, "mul_mat_vec padded");
   const int32_t device_idx = X.get_device_index();
   const DeviceGuard device_guard(device_idx);
   Tensor Y = torch::stable::new_zeros(W, {vecs, row}, X.scalar_type());
@@ -223,6 +243,10 @@ Tensor ggml_mul_mat_a8(Tensor W,  // quant weight
   int64_t col = X.sizes()[1];
   int64_t padded = (col + 512 - 1) / 512 * 512;
   int64_t batch = X.sizes()[0];
+  check_kernel_int_range(col, "mul_mat col");
+  check_kernel_int_range(batch, "mul_mat batch");
+  check_kernel_int_range(row, "mul_mat row");
+  check_kernel_int_range(padded, "mul_mat padded");
   const int32_t device_idx = X.get_device_index();
   const DeviceGuard device_guard(device_idx);
   Tensor Y = torch::stable::new_zeros(W, {batch, row}, X.scalar_type());
@@ -296,6 +320,13 @@ Tensor ggml_moe_a8(Tensor X,  // input
                    int64_t top_k, int64_t tokens) {
   int64_t col = X.sizes()[1];
   int64_t padded = (col + 512 - 1) / 512 * 512;
+  check_kernel_int_range(col, "moe col");
+  check_kernel_int_range(row, "moe row");
+  check_kernel_int_range(tokens, "moe tokens");
+  check_kernel_int_range(top_k, "moe top_k");
+  check_kernel_int_range(padded, "moe padded");
+  check_kernel_int_range(W.stride(0), "moe W.stride(0) (expert stride)");
+  check_kernel_int_range(sorted_token_ids.sizes()[0], "moe sorted slots");
   const int32_t device_idx = X.get_device_index();
   const DeviceGuard device_guard(device_idx);
   Tensor Y =
@@ -303,6 +334,7 @@ Tensor ggml_moe_a8(Tensor X,  // input
   cudaStream_t stream = get_current_cuda_stream(device_idx);
   Tensor quant_X =
       torch::stable::new_empty(W, {tokens, padded / 32 * 9}, ScalarType::Int);
+  check_kernel_int_range(quant_X.stride(0), "moe quant_X.stride(0)");
   VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_moe_a8", [&] {
     quantize_row_q8_1_cuda((scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(),
                            col, tokens, stream);
@@ -398,6 +430,11 @@ Tensor ggml_moe_a8_vec(Tensor X,  // input
                        int64_t row, int64_t tokens) {
   int64_t col = X.sizes()[1];
   const int64_t padded = (col + 512 - 1) / 512 * 512;
+  check_kernel_int_range(col, "moe_vec col");
+  check_kernel_int_range(row, "moe_vec row");
+  check_kernel_int_range(tokens, "moe_vec tokens");
+  check_kernel_int_range(top_k, "moe_vec top_k");
+  check_kernel_int_range(padded, "moe_vec padded");
   const int32_t device_idx = X.get_device_index();
   const DeviceGuard device_guard(device_idx);
   Tensor Y =
@@ -405,6 +442,7 @@ Tensor ggml_moe_a8_vec(Tensor X,  // input
   cudaStream_t stream = get_current_cuda_stream(device_idx);
   Tensor quant_X =
       torch::stable::new_empty(W, {tokens, padded / 32 * 9}, ScalarType::Int);
+  check_kernel_int_range(quant_X.stride(0), "moe_vec quant_X.stride(0)");
   VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_moe_vec_a8", [&] {
     quantize_row_q8_1_cuda<scalar_t>((scalar_t*)X.data_ptr(),
                                      (void*)quant_X.data_ptr(), col, tokens,
