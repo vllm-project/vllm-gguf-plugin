@@ -257,11 +257,38 @@ class _GGUFParamLoadMixin:
                 tp_size=tp_size,
             )
         elif tp_size > 1 and loaded_weight.ndim >= 2:
-            shard_size = loaded_weight.shape[1] // tp_size
-            if shard_size > 0:
-                loaded_weight = loaded_weight.narrow(
-                    1, tp_rank * shard_size, shard_size
-                )
+            # Block-aligned sharding for quantized packed dim: ensure shard
+            # boundaries fall on GGML block boundaries (block_size=32 for Q8).
+            # For unquantized dims this is equivalent to simple narrow.
+            weight_type_param = getattr(self, "gguf_weight_type_parameter", None)
+            if weight_type_param is not None:
+                wt = getattr(weight_type_param, "weight_type", None)
+                if wt in gguf.GGML_QUANT_SIZES:
+                    block_size, type_size = gguf.GGML_QUANT_SIZES[wt]
+                    # packed dim is input_dim
+                    logical_size = getattr(self, "gguf_logical_input_size", None)
+                    if logical_size is not None:
+                        # Validate block alignment per TP rank
+                        assert logical_size % block_size == 0, f"logical_size {logical_size} not aligned to block_size {block_size}"
+                        assert (logical_size // tp_size) % block_size == 0, f"TP sharding splits Q8 block: logical {logical_size}/TP{tp_size}={logical_size//tp_size} % {block_size} !=0"
+                        # Convert logical shard to packed-byte shard
+                        packed = loaded_weight.shape[1]
+                        assert packed == logical_size // block_size * type_size
+                        packed_shard = packed // tp_size
+                        assert packed % tp_size == 0
+                        loaded_weight = loaded_weight.narrow(1, tp_rank * packed_shard, packed_shard)
+                    else:
+                        shard_size = loaded_weight.shape[1] // tp_size
+                        if shard_size > 0:
+                            loaded_weight = loaded_weight.narrow(1, tp_rank * shard_size, shard_size)
+                else:
+                    shard_size = loaded_weight.shape[1] // tp_size
+                    if shard_size > 0:
+                        loaded_weight = loaded_weight.narrow(1, tp_rank * shard_size, shard_size)
+            else:
+                shard_size = loaded_weight.shape[1] // tp_size
+                if shard_size > 0:
+                    loaded_weight = loaded_weight.narrow(1, tp_rank * shard_size, shard_size)
         self._store(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
