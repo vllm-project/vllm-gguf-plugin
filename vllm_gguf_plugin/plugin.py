@@ -68,6 +68,10 @@ def _patch_engine_args() -> None:
                 self.model_weights = gguf_model
             if self.served_model_name is None:
                 self.served_model_name = [gguf_model]
+            # Preserve original GGUF path for config_parser vision stripping
+            # (model is rewritten to HF config source before parse)
+            import vllm_gguf_plugin.config_parser as _cp_mod
+            _cp_mod._last_gguf_path = str(gguf_model)
             self.model = _get_gguf_config_source(
                 gguf_model,
                 self.tokenizer if isinstance(self.tokenizer, str) else None,
