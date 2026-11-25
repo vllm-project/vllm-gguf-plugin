@@ -1,0 +1,30 @@
+steps:
+  - label: ":docker: Build stable image"
+    key: stable-image-build
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker build --progress=plain --file docker/Dockerfile.ci -t vllm-gguf-plugin-ci:stable ."
+      - "docker tag vllm-gguf-plugin-ci:stable public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-stable"
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-stable"
+    agents:
+      queue: "cpu_queue_premerge"
+
+  - label: ":docker: Build nightly image"
+    key: nightly-image-build
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker build --progress=plain --file docker/Dockerfile.ci --build-arg VLLM_BASE_TAG=nightly -t vllm-gguf-plugin-ci:nightly ."
+      - "docker tag vllm-gguf-plugin-ci:nightly public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-nightly"
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-nightly"
+    agents:
+      queue: "cpu_queue_premerge"
+
+  - label: "Upload Merge Pipeline"
+    depends_on:
+      - stable-image-build
+      - nightly-image-build
+    key: upload-merge-pipeline
+    commands:
+      - "buildkite-agent pipeline upload .buildkite/test-merge.yml"
+    agents:
+      queue: "cpu_queue_premerge"
