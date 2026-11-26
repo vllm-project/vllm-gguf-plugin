@@ -18,29 +18,14 @@ jobs:
         include:
           - runner: windows-2022
             arch: x64
-            cuda: "12.9.1"
-            cuda-components: '["nvcc", "cudart", "thrust"]'
-            backend: cu129
-            version-suffix: +cu129
-            torch: "torch==2.9.0+cu129"
-            torch-index: https://download.pytorch.org/whl/cu129
-            cuda-arch-list: ""
-          - runner: windows-2022
-            arch: x64
             cuda: "13.0.2"
             cuda-components: '["nvcc", "crt", "nvvm", "cudart", "thrust"]'
             backend: cu130
-            version-suffix: ""
-            torch: "torch==2.9.1+cu130"
-            torch-index: https://download.pytorch.org/whl/cu130
             cuda-arch-list: ""
           - runner: windows-11-arm
             arch: arm64
             cuda: "13.4.0"
             backend: cu134
-            version-suffix: ""
-            torch: "torch==2.14.0+cu134"
-            torch-index: https://pypi.nvidia.com/nvtorch_oot/
             cuda-arch-list: "12.1+PTX"
 
     defaults:
@@ -48,7 +33,6 @@ jobs:
         shell: bash
 
     env:
-      VLLM_GGUF_PLUGIN_LOCAL_VERSION_SUFFIX: ${{ matrix.version-suffix }}
       TORCH_CUDA_ARCH_LIST: ${{ matrix.cuda-arch-list }}
       DISTUTILS_USE_SDK: "1"
       MAX_JOBS: "2"
@@ -125,15 +109,32 @@ jobs:
           if-no-files-found: warn
 
       - name: Install build dependencies
-        env:
-          TORCH_PACKAGE: ${{ matrix.torch }}
-          TORCH_INDEX: ${{ matrix.torch-index }}
         run: |
           python -m pip install uv
           uv venv --python "$(python -c 'import sys; print(sys.executable)')"
           python -c 'from pathlib import Path; print("UV_PYTHON=" + str(Path(".venv/Scripts/python.exe").resolve()))' >> "$GITHUB_ENV"
           uv pip install "setuptools>=77.0.3,<81.0.0" wheel twine pytest ninja
-          uv pip install "$TORCH_PACKAGE" --extra-index-url "$TORCH_INDEX"
+
+      - name: Install CUDA-enabled PyTorch (x64)
+        if: matrix.arch == 'x64'
+        env:
+          TORCH_BACKEND: ${{ matrix.backend }}
+        run: uv pip install --torch-backend "$TORCH_BACKEND" "torch>=2.9"
+
+      - name: Install CUDA-enabled PyTorch (ARM64)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        env:
+          TORCH_BACKEND: ${{ matrix.backend }}
+        run: |
+          $index = "https://pypi.nvidia.com/nvtorch_oot/"
+          $listing = uvx --python $env:UV_PYTHON --from "pip>=25.1" pip index versions torch --json --only-binary=:all: --index-url $index
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # NVIDIA lists multiple CUDA variants together, newest version first.
+          $version = ($listing | ConvertFrom-Json).versions |
+            Where-Object { $_.EndsWith("+$env:TORCH_BACKEND") } | Select-Object -First 1
+          if (-not $version) { throw "No compatible PyTorch wheel for $env:TORCH_BACKEND at $index" }
+          uv pip install --index $index "torch>=2.9,==$version"
 
       - name: Check native build configuration
         env:
