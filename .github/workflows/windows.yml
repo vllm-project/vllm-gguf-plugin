@@ -19,7 +19,7 @@ jobs:
           - runner: windows-2022
             arch: x64
             cuda: "12.9.1"
-            cuda-components: '["nvcc", "cudart", "cccl"]'
+            cuda-components: '["nvcc", "cudart", "thrust"]'
             backend: cu129
             version-suffix: +cu129
             torch: "torch==2.9.0+cu129"
@@ -28,7 +28,7 @@ jobs:
           - runner: windows-2022
             arch: x64
             cuda: "13.0.2"
-            cuda-components: '["nvcc", "crt", "nvvm", "cudart", "cccl"]'
+            cuda-components: '["nvcc", "crt", "nvvm", "cudart", "thrust"]'
             backend: cu130
             version-suffix: ""
             torch: "torch==2.9.1+cu130"
@@ -102,7 +102,7 @@ jobs:
             -Uri "https://packages.nvidia.com/prerelease/cuda/13.4.0/local_installers/cuda_13.4.0_windows_arm64.exe" `
             -OutFile $installer
           $process = Start-Process -FilePath $installer -Wait -PassThru `
-            -ArgumentList "-s", "nvcc_13.4", "crt_13.4", "nvvm_13.4", "cudart_13.4", "cccl_13.4"
+            -ArgumentList "-s", "nvcc_13.4", "crt_13.4", "nvvm_13.4", "cudart_13.4", "thrust_13.4"
           if ($process.ExitCode -notin 0, 3010) {
             throw "CUDA installer failed with exit code $($process.ExitCode)"
           }
