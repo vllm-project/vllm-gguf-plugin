@@ -69,7 +69,21 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
 
+      # NVIDIA's logging profile also works when cuda-toolkit invokes setup on x64.
+      - name: Enable NVIDIA installer logging
+        shell: pwsh
+        run: |
+          $settings = Join-Path $env:RUNNER_TEMP "EnableFullLogging.reg"
+          Invoke-WebRequest -Uri "https://nvidia.custhelp.com/ci/fattach/get/115381/0/filename/EnableFullLogging.reg" `
+            -OutFile $settings -MaximumRetryCount 2
+          if ((Get-FileHash $settings -Algorithm SHA256).Hash -ne "a04b7fc95d244e05e94e466d0f8e56202a87c007da992f79d2e880da1231549b") {
+            throw "Unexpected checksum for NVIDIA's installer logging profile"
+          }
+          New-Item -ItemType Directory -Force -Path "C:\NvidiaLogging" | Out-Null
+          reg.exe import $settings
+
       - name: Install CUDA (x64)
+        id: cuda_x64
         if: matrix.arch == 'x64'
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
@@ -79,6 +93,7 @@ jobs:
 
       # cuda-toolkit does not yet provide Windows ARM64 installer URLs.
       - name: Install CUDA (ARM64)
+        id: cuda_arm64
         if: matrix.arch == 'arm64'
         shell: pwsh
         run: |
@@ -100,6 +115,14 @@ jobs:
           "$cuda\bin" >> $env:GITHUB_PATH
           "$cuda\bin\arm64" >> $env:GITHUB_PATH
           Remove-Item -LiteralPath $installer
+
+      - name: Upload NVIDIA installer logs
+        if: failure() && (steps.cuda_x64.outcome == 'failure' || steps.cuda_arm64.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvidia-installer-logs-${{ matrix.arch }}-${{ matrix.backend }}
+          path: C:\NvidiaLogging
+          if-no-files-found: warn
 
       - name: Install build dependencies
         env:
