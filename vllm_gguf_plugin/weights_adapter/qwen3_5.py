@@ -17,7 +17,11 @@ from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 from ..gguf_files import GGUFModelFiles
 from ..gguf_utils import maybe_patch_hf_config_from_gguf
 from ..quantization.layout import GGUFHeadTilingLayout, GGUFLinearLayout
-from ..weight_utils import get_gguf_tensor_names, split_stacked_experts
+from ..weight_utils import (
+    get_gguf_tensor_names,
+    get_gguf_unquantized_params,
+    split_stacked_experts,
+)
 from .base import BaseGGUFWeightsAdapter, GGUFWeight
 
 if TYPE_CHECKING:
@@ -80,6 +84,24 @@ QWEN35_DENSE_SUBSTR: dict[str, str] = {
     "ffn_down.": "mlp.down_proj.",
 }
 
+# Recent llama.cpp converters (ggml-org/llama.cpp, ``_merge_shared_input`` in
+# ``conversion/qwen.py``) store the two projections that read the same input
+# of every Gated DeltaNet block as one tensor each, concatenated along rows:
+#   attn_qkv_gate  = [attn_qkv | attn_gate]
+#   ssm_beta_alpha = [ssm_beta | ssm_alpha]
+# They map to placeholder names here and are split back into the HF
+# projections at load time. Older GGUFs keep the separate tensors and load as
+# before. The placeholders must not contain a real shard name as a substring,
+# because ``is_layer_skipped_gguf`` matches shard prefixes by substring.
+QWEN35_FUSED_GDN_SUBSTR: dict[str, str] = {
+    "attn_qkv_gate.": "linear_attn.fused_qkv_gate.",
+    "ssm_beta_alpha.": "linear_attn.fused_beta_alpha.",
+}
+_FUSED_GDN_PARTS: dict[str, tuple[str, str]] = {
+    "linear_attn.fused_qkv_gate": ("linear_attn.in_proj_qkv", "linear_attn.in_proj_z"),
+    "linear_attn.fused_beta_alpha": ("linear_attn.in_proj_b", "linear_attn.in_proj_a"),
+}
+
 _MTP_NORM_SUFFIXES = (
     "norm.weight",
     "norm_embedding.weight",
@@ -110,7 +132,7 @@ def _find_nextn_block_index(gguf_files: Iterable[str]) -> int | None:
 def qwen35_layer_substr(is_moe: bool) -> dict[str, str]:
     """Within-layer renames shared by the target and MTP draft."""
     mlp_substr = QWEN35_MOE_SUBSTR if is_moe else QWEN35_DENSE_SUBSTR
-    return QWEN35_ATTN_SUBSTR | mlp_substr
+    return QWEN35_FUSED_GDN_SUBSTR | QWEN35_ATTN_SUBSTR | mlp_substr
 
 
 def build_qwen35_text_mapper(is_multimodal: bool, is_moe: bool) -> WeightsMapper:
@@ -164,6 +186,56 @@ def build_qwen35_mtp_mapper(block_index: int, is_moe: bool) -> WeightsMapper:
 def _map_tensor_name(mapper: WeightsMapper, name: str) -> str | None:
     mapped = mapper.apply_list([name])[0]
     return mapped if mapped != name else None
+
+
+def _fused_gdn_parts(name: str) -> tuple[str, str] | None:
+    """Return the two HF names a fused GDN input tensor *name* splits into."""
+    base, dot, suffix = name.rpartition(".")
+    for fused, parts in _FUSED_GDN_PARTS.items():
+        if base.endswith(fused):
+            prefix = base.removesuffix(fused)
+            return tuple(f"{prefix}{part}{dot}{suffix}" for part in parts)
+    return None
+
+
+def split_fused_gdn_inputs(
+    weights: Iterable[GGUFWeight],
+    text_config: PretrainedConfig,
+) -> Iterable[GGUFWeight]:
+    """Split llama.cpp's fused GDN input tensors into the HF projections.
+
+    The split is along rows. GGML quantization blocks run along a row, so a
+    packed quantized tensor (one row of bytes per output row) splits exactly
+    like a dense one, and the halves keep the fused tensor's GGML type.
+    """
+
+    def split_rows(name: str) -> tuple[int, int]:
+        """(rows of the first part, rows in total) of the fused tensor *name*."""
+        num_v_heads = text_config.linear_num_value_heads
+        if ".fused_beta_alpha." in name:
+            return num_v_heads, 2 * num_v_heads
+        qk_rows = 2 * text_config.linear_num_key_heads * text_config.linear_key_head_dim
+        v_rows = num_v_heads * text_config.linear_value_head_dim
+        return qk_rows + v_rows, qk_rows + 2 * v_rows
+
+    for name, weight in weights:
+        parts = _fused_gdn_parts(name)
+        if parts is None:
+            yield name, weight
+            continue
+        if name.endswith(".weight_type"):
+            yield parts[0], weight
+            yield parts[1], weight.clone()
+            continue
+        first, total = split_rows(name)
+        if weight.shape[0] != total:
+            raise ValueError(
+                f"{name} has {weight.shape[0]} rows, the config expects {total} "
+                f"({first} + {total - first}); check the linear_* head counts of "
+                "the text config"
+            )
+        yield parts[0], weight[:first]
+        yield parts[1], weight[first:]
 
 
 def _gdn_value_head_layout(
@@ -258,6 +330,19 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
                 len(unmapped),
                 unmapped,
             )
+        # The loader derives the unquantized modules from ``name_map``, which
+        # only knows the placeholder of a fused tensor. An unquantized (e.g.
+        # BF16) fused tensor must mark both of its HF projections.
+        fused_unquantized = tuple(
+            part.removesuffix(".weight")
+            for gguf_name in get_gguf_unquantized_params(list(files.all_files))
+            if (mapped := name_map.get(gguf_name)) is not None
+            and (parts := _fused_gdn_parts(mapped)) is not None
+            for part in parts
+        )
+        self.extra_unquantized_modules = (
+            tuple(self.extra_unquantized_modules) + fused_unquantized
+        )
         return name_map
 
     def get_linear_layouts(
@@ -333,7 +418,7 @@ class Qwen35GGUFAdapter(BaseGGUFWeightsAdapter):
         def transformed() -> Iterable[GGUFWeight]:
             patch_embed_parts: dict[str, torch.Tensor] = {}
             quantized_bases: set[str] = set()
-            for name, weight in weights:
+            for name, weight in split_fused_gdn_inputs(weights, text_config):
                 # weight_type entries arrive before their packed weight data.
                 if name.endswith(".weight_type"):
                     quantized_bases.add(name.removesuffix(".weight_type"))
