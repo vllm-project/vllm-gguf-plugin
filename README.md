@@ -64,6 +64,7 @@ The release workflow reuses these builds and publishes the following wheels:
 | --- | --- | --- |
 | Windows x64 | 13.0 | GitHub Releases, PyPI and TestPyPI |
 | Windows ARM64 | 13.4 | GitHub Releases, PyPI and TestPyPI |
+| Windows ARM64 | 13.5 (`+cu135`) | GitHub Releases only |
 
 Stable releases go to PyPI; prereleases go to TestPyPI. Manual release runs
 only upload workflow artifacts, as for Linux.
@@ -71,8 +72,9 @@ only upload workflow artifacts, as for Linux.
 Windows builds require native Python, MSVC C++ build tools and the matching
 CUDA toolkit. Like Linux, Windows CI requests `torch>=2.9` rather than
 pinning a PyTorch release. On x64, `uv` selects the wheel for the requested
-CUDA backend. For Windows ARM64 with CUDA 13.4, use the newest `+cu134`
-wheel for your Python version from [NVIDIA's PyTorch index](https://pypi.nvidia.com/nvtorch_oot/torch/).
+CUDA backend. On ARM64, select the newest wheel for your Python version
+from [NVIDIA's PyTorch index](https://pypi.nvidia.com/nvtorch_oot/torch/)
+that matches the toolkit: `+cu134` for CUDA 13.4 or `+cu135` for CUDA 13.5.
 
 Run source builds from a Visual Studio developer shell targeting the same
 architecture as Python. The release helper `scripts/build_release_wheel.sh`

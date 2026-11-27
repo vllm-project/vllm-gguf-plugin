@@ -25,7 +25,15 @@ jobs:
           - runner: windows-11-arm
             arch: arm64
             cuda: "13.4.0"
+            cuda-installer: https://packages.nvidia.com/prerelease/cuda/13.4.0/local_installers/cuda_13.4.0_windows_arm64.exe
             backend: cu134
+            cuda-arch-list: "12.1+PTX"
+          - runner: windows-11-arm
+            arch: arm64
+            cuda: "13.5.0"
+            cuda-installer: https://developer.download.nvidia.com/compute/cuda/13.5.0/network_installers/cuda_13.5.0_windows_arm64_network.exe
+            backend: cu135
+            version-suffix: +cu135
             cuda-arch-list: "12.1+PTX"
 
     defaults:
@@ -65,17 +73,19 @@ jobs:
       - name: Install CUDA (ARM64)
         if: matrix.arch == 'arm64'
         shell: pwsh
+        env:
+          CUDA_VERSION: ${{ matrix.cuda }}
+          CUDA_INSTALLER_URL: ${{ matrix.cuda-installer }}
         run: |
+          $version = ([version]$env:CUDA_VERSION).ToString(2)
           $installer = Join-Path $env:RUNNER_TEMP "cuda-arm64.exe"
-          Invoke-WebRequest `
-            -Uri "https://packages.nvidia.com/prerelease/cuda/13.4.0/local_installers/cuda_13.4.0_windows_arm64.exe" `
-            -OutFile $installer
+          Invoke-WebRequest -Uri $env:CUDA_INSTALLER_URL -OutFile $installer
           $process = Start-Process -FilePath $installer -Wait -PassThru `
-            -ArgumentList "-s", "nvcc_13.4", "crt_13.4", "nvvm_13.4", "cudart_13.4", "thrust_13.4"
+            -ArgumentList "-s", "nvcc_$version", "crt_$version", "nvvm_$version", "cudart_$version", "thrust_$version"
           if ($process.ExitCode -notin 0, 3010) {
             throw "CUDA installer failed with exit code $($process.ExitCode)"
           }
-          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4"
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$version"
           if (!(Test-Path "$cuda\bin\nvcc.exe") -or !(Test-Path "$cuda\lib\arm64\cudart.lib")) {
             throw "The native ARM64 CUDA compiler or runtime import library is missing"
           }
@@ -132,6 +142,8 @@ jobs:
           uv run --no-project pytest tests/test_build.py
 
       - name: Build wheel
+        env:
+          VLLM_GGUF_PLUGIN_LOCAL_VERSION_SUFFIX: ${{ matrix.version-suffix }}
         run: bash scripts/build_release_wheel.sh
 
       - name: Check wheel metadata
