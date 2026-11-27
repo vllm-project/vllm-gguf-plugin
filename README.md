@@ -55,6 +55,37 @@ pre-commit run --all-files
 
 The same hooks also run in GitHub Actions on every push and pull request.
 
+### Windows builds
+
+CI builds native Windows x64 and ARM64 wheels on pushes and pull requests.
+The release workflow reuses these builds and publishes the following wheels:
+
+| Platform | CUDA | Publication |
+| --- | --- | --- |
+| Windows x64 | 13.0 | GitHub Releases, PyPI and TestPyPI |
+| Windows ARM64 | 13.4 | GitHub Releases, PyPI and TestPyPI |
+| Windows ARM64 | 13.5 (`+cu135`) | GitHub Releases only |
+
+Stable releases go to PyPI; prereleases go to TestPyPI. Manual release runs
+only upload workflow artifacts, as for Linux.
+
+Windows builds require native Python, MSVC C++ build tools and the matching
+CUDA toolkit. Like Linux, Windows CI requests `torch>=2.9` rather than
+pinning a PyTorch release. On x64, `uv` selects the wheel for the requested
+CUDA backend. On ARM64, select the newest wheel for your Python version
+from [NVIDIA's PyTorch index](https://pypi.nvidia.com/nvtorch_oot/torch/)
+that matches the toolkit: `+cu134` for CUDA 13.4 or `+cu135` for CUDA 13.5.
+
+Run source builds from a Visual Studio developer shell targeting the same
+architecture as Python. The release helper `scripts/build_release_wheel.sh`
+runs under Git Bash on Windows and accepts an explicit
+`TORCH_CUDA_ARCH_LIST`; ARM64 releases target RTX Spark (`12.1+PTX`).
+
+CI checks that the installed extension loads and registers its operators
+without a GPU. It does not run inference: using the plugin still requires a
+Windows-compatible vLLM installation, a supported NVIDIA GPU and driver,
+and PyTorch built for the matching CUDA version.
+
 ## Usage
 
 ```bash
