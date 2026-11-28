@@ -73,6 +73,20 @@ vllm serve unsloth/Qwen3.5-4B-MTP-GGUF:Q4_K_M \
 For a GGUF without a `nextn` block, omit `--speculative-config`; the backbone
 loads normally without MTP.
 
+## Environment variables
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `VLLM_GGUF_USE_CUDA` | `1` | Use the plugin's compiled CUDA kernels when they are available. `0` uses the Triton implementations instead. |
+| `VLLM_GGUF_DEQUANT_MIN_TOKENS` | per type: 24 (Q3_K, Q6_K), 32 (Q4_K, Q5_K, Q5_0, Q8_0), 48 (Q5_1), 64 (Q2_K, Q4_0, Q4_1) | For linear layers with standard and K-quant weights, batches of at least this many tokens dequantize the weight and use a dense GEMM instead of the MMQ kernel; smaller batches keep the MMQ and MMVQ kernels. The per-type defaults are where dequantize + GEMM became at least as fast as MMQ on an RTX A6000; setting the variable applies one threshold to every type, and `0` keeps MMQ for every batch size. Weights larger than 256 MiB once dequantized (e.g. a large-vocabulary `lm_head`) are dequantized in row chunks, so the temporary buffer stays at most 256 MiB. |
+
+The variables are read when the plugin is imported, so set them before
+starting vLLM, for example:
+
+```bash
+VLLM_GGUF_DEQUANT_MIN_TOKENS=0 vllm serve Qwen/Qwen3-0.6B-GGUF:Q8_0 --tokenizer Qwen/Qwen3-0.6B
+```
+
 ## Tested model coverage
 
 The plugin uses vLLM's model implementations and a generic GGUF weight
