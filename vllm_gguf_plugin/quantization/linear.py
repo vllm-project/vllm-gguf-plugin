@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import gguf
 import torch
 from gguf import GGMLQuantizationType as WeightType
@@ -31,6 +33,65 @@ from .utils import (
     UNQUANTIZED_TYPES,
 )
 
+# From this many tokens on, MMQ-capable types are dequantized and multiplied with
+# a dense GEMM instead of the MMQ kernel: the dequantized weight is read once for
+# all tokens, while the MMQ kernel's time grows linearly with the token count.
+# Per type, the smallest token count at which dequantize + GEMM was at least as
+# fast as MMQ for typical layer shapes (2048..17408 x 2048..17408, RTX A6000).
+_DEQUANT_MIN_TOKENS_BY_TYPE = {
+    WeightType.Q4_0: 64,
+    WeightType.Q4_1: 64,
+    WeightType.Q5_0: 32,
+    WeightType.Q5_1: 48,
+    WeightType.Q8_0: 32,
+    WeightType.Q2_K: 64,
+    WeightType.Q3_K: 24,
+    WeightType.Q4_K: 32,
+    WeightType.Q5_K: 32,
+    WeightType.Q6_K: 24,
+}
+_DEQUANT_MIN_TOKENS_DEFAULT = 64
+# VLLM_GGUF_DEQUANT_MIN_TOKENS overrides the threshold for every type;
+# 0 keeps the MMQ kernel for every batch size (the previous behavior).
+_DEQUANT_MIN_TOKENS = (
+    int(os.environ["VLLM_GGUF_DEQUANT_MIN_TOKENS"])
+    if "VLLM_GGUF_DEQUANT_MIN_TOKENS" in os.environ
+    else None
+)
+
+
+def _use_dequant(num_tokens: int, weight_type: int) -> bool:
+    if _DEQUANT_MIN_TOKENS is not None:
+        return 0 < _DEQUANT_MIN_TOKENS <= num_tokens
+    threshold = _DEQUANT_MIN_TOKENS_BY_TYPE.get(
+        weight_type, _DEQUANT_MIN_TOKENS_DEFAULT
+    )
+    return num_tokens >= threshold
+
+
+# Upper bound of the temporary dequantized weight: larger weights (e.g. a large
+# vocabulary lm_head) are dequantized and multiplied in row chunks.
+_DEQUANT_CHUNK_BYTES = 256 * 1024 * 1024
+
+
+def _dequant_mul_mat(
+    x: torch.Tensor, weight: torch.Tensor, weight_type: int
+) -> torch.Tensor:
+    block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
+    rows, cols = weight.shape[0], weight.shape[1] // type_size * block_size
+    chunk = max(1, _DEQUANT_CHUNK_BYTES // (cols * x.element_size()))
+    if chunk >= rows:
+        return x @ ops.ggml_dequantize(weight, weight_type, rows, cols, x.dtype).T
+    weight = weight.contiguous()
+    y = torch.empty(x.shape[0], rows, dtype=x.dtype, device=x.device)
+    for start in range(0, rows, chunk):
+        end = min(start + chunk, rows)
+        w = ops.ggml_dequantize(
+            weight[start:end], weight_type, end - start, cols, x.dtype
+        )
+        y[:, start:end] = x @ w.T
+    return y
+
 
 def _fused_mul_mat_gguf(
     x: torch.Tensor, weight: torch.Tensor, weight_type: int
@@ -45,13 +106,10 @@ def _fused_mul_mat_gguf(
         return x @ weight.T
     if x.shape[0] <= mmvq_safe and weight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(weight, x, weight_type, weight.shape[0])
-    elif weight_type in MMQ_QUANT_TYPES:
+    elif weight_type in MMQ_QUANT_TYPES and not _use_dequant(x.shape[0], weight_type):
         y = ops.ggml_mul_mat_a8(weight, x, weight_type, weight.shape[0])
     elif weight_type in DEQUANT_TYPES:
-        block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
-        shape = (weight.shape[0], weight.shape[1] // type_size * block_size)
-        weight = ops.ggml_dequantize(weight, weight_type, *shape, x.dtype)
-        y = x @ weight.T
+        y = _dequant_mul_mat(x, weight, weight_type)
     else:
         weight_type = WeightType(weight_type)
         raise NotImplementedError(f"Unsupported GGUF quantization type: {weight_type}")

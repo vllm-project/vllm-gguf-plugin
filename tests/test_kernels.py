@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
 from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
 import vllm_gguf_plugin.ops as ops
+from vllm_gguf_plugin.quantization import linear as gguf_linear
 from vllm_gguf_plugin.quantization.fused_moe import _fused_moe_gguf
 from vllm_gguf_plugin.quantization.vocal_embeds import apply_gguf_embedding
 from vllm_gguf_plugin.triton.fused_moe import ggml_moe_a8_triton
@@ -194,6 +195,66 @@ def test_mmq(
         torch.testing.assert_close(
             output, ref_output, atol=atols[dtype], rtol=rtols[dtype]
         )
+
+
+MMQ_DISPATCH_TYPES = [
+    GGMLQuantizationType.Q2_K,
+    GGMLQuantizationType.Q4_K,
+    GGMLQuantizationType.Q6_K,
+    GGMLQuantizationType.Q4_0,
+    GGMLQuantizationType.Q8_0,
+]
+
+
+@pytest.mark.parametrize("num_tokens", [7, 23, 24, 83, 2048])
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize("quant_type", MMQ_DISPATCH_TYPES)
+@pytest.mark.parametrize("chunked", [False, True])
+@torch.inference_mode()
+def test_fused_mul_mat_dequant_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    quant_type: GGMLQuantizationType,
+    chunked: bool,
+):
+    """Batches of at least the dequantize threshold take the dequantize + GEMM
+    path, optionally in row chunks; smaller ones keep MMQ."""
+    seed_everything(0)
+    monkeypatch.setattr(gguf_linear, "_DEQUANT_MIN_TOKENS", 24)
+    if chunked:  # a few rows per chunk, with a ragged last chunk
+        monkeypatch.setattr(
+            gguf_linear, "_DEQUANT_CHUNK_BYTES", 7 * hidden_size * dtype.itemsize
+        )
+
+    tensors = get_gguf_sample_tensors(hidden_size, quant_type)
+    x = torch.rand((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    atols = {torch.half: 1, torch.bfloat16: 1.5}
+    rtols = {torch.half: 1e-1, torch.bfloat16: 1e4}
+    for tensor in tensors:
+        weight = torch.tensor(dequantize(tensor.data, quant_type), device="cuda").to(
+            dtype
+        )
+        ref_output = x @ weight.T
+
+        weight = torch.tensor(tensor.data, device="cuda")
+        output = gguf_linear._fused_mul_mat_gguf(x, weight, quant_type)
+        assert output.shape == ref_output.shape
+        torch.testing.assert_close(
+            output, ref_output, atol=atols[dtype], rtol=rtols[dtype]
+        )
+        if num_tokens >= 24:
+            # the chunked or whole dequantize + GEMM path matches one GEMM with
+            # the plugin's own dequantized weight up to GEMM rounding (a few
+            # output ulps: the chunks may use different GEMM kernels)
+            rows = weight.shape[0]
+            cols = hidden_size
+            dq = ops.ggml_dequantize(weight, quant_type, rows, cols, dtype)
+            ref_dq = (x @ dq.T).float()
+            atol = 4 * torch.finfo(dtype).eps * ref_dq.abs().max().item()
+            torch.testing.assert_close(output.float(), ref_dq, atol=atol, rtol=0)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
